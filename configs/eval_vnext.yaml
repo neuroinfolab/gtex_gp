@@ -1,0 +1,5 @@
+run_root: out/vnext_alignment
+baseline_combo: ""
+rollout_gate:
+  mean_pearson_min: 0.50
+  mean_rmse_lt_baseline: true

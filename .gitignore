@@ -1,0 +1,35 @@
+.DS_Store
+
+# Python and notebooks
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Local environments
+.venv/
+venv/
+
+# Generated outputs
+out/
+docs/manuscript/figs/*
+!docs/manuscript/figs/.gitkeep
+docs/manuscript/tables/*
+!docs/manuscript/tables/.gitkeep
+
+# Local data
+data/*
+!data/README.md
+!data/raw/
+!data/raw/.gitkeep
+!data/derived/
+!data/derived/.gitkeep
+data/bha2/
+data/gtex/
+data/fixtures/
+datasets/
+
+# Legacy root-level local inputs
+gxp_samples.csv
+ahba_100hvg.txt
