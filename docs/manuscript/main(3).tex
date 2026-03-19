@@ -1,0 +1,1201 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{bm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[hidelinks]{hyperref}
+\usepackage{multirow}
+\hypersetup{breaklinks=true}
+\emergencystretch=2em
+\numberwithin{equation}{section}
+\captionsetup[subfigure]{labelformat=simple}
+\renewcommand\thesubfigure{\Alph{subfigure}}
+
+\graphicspath{{figs/}}
+
+\title{AHBA--GTEx Imputation by Deterministic and Probabilistic Latent Alignment}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+The Allen Human Brain Atlas (AHBA) and GTEx provide complementary but structurally
+mismatched views of human brain transcriptomics.  AHBA supplies dense atlas-level
+measurements over a canonical parcellation, whereas GTEx provides subject-specific
+observations over only a sparse subset of regions \cite{hawrylycz2012anatomically}.
+GTEx broadens population coverage and subject diversity, but only over a limited set
+of brain regions \cite{gtex2013genotype,gtex2017genetic,gtex2020atlas}.  Our aim is
+to impute, for each GTEx subject, a complete parcel-by-gene expression matrix over
+all canonical parcels by leveraging the shared spatial structure encoded in the AHBA
+atlas.  This is not a standard missing-data problem: it is cross-platform
+missing-region inference under domain shift, because the atlas reference is derived
+from microarray measurements (AHBA) while subject-level observations in GTEx arise
+from bulk RNA sequencing.
+
+A common assumption in this setting is that inter-regional transcriptomic variation
+is dominated by a low-dimensional spatial structure that is more completely visible
+in the atlas than in any individual GTEx subject.  The central modeling question is
+therefore how to infer that structure, align sparse subject measurements to the atlas
+frame, and extend subject-specific expression over unobserved parcels.  Two
+complementary approaches are developed here.  The first is the deterministic latent
+alignment model (DLAM), based on subject-specific partial least squares (PLS), affine
+latent alignment, and spatial interpolation.  The second is the probabilistic latent
+alignment model (PLAM), in which the atlas defines a global factor structure, each
+subject is represented by an orthogonally aligned latent deviation field, and
+unobserved parcels are inferred by Gaussian-process conditioning.
+
+\section{Data Setting and Notation}
+Let $R=150$ denote the canonical parcel set and $G$ the number of genes under
+analysis.  AHBA defines a dense parcel-by-gene atlas
+\[
+  X_A \in \mathbb{R}^{R \times G},
+\]
+while subject $s$ contributes GTEx observations on a sparse subset of parcels
+\[
+  \Omega_s \subset \{1,\dots,R\},
+  \qquad
+  X_s^{(G)} \in \mathbb{R}^{|\Omega_s| \times G}.
+\]
+All spatial quantities are defined with respect to canonical parcel centroids
+\[
+  Y \in \mathbb{R}^{R \times 3}.
+\]
+The latent dimension is denoted by $K$ and fixed to $K=3$ throughout.  Atlas-scale
+heatmaps and scatter diagnostics are shown on the matched high-variance subset with
+$G=88$ for readability, whereas leave-one-region-out diagnostics are computed over the
+full gene set so that the cross-validated evaluation remains aligned with
+transcriptome-wide completion.
+
+\section{Cross-Dataset Harmonization}
+\label{sec:harmonization}
+
+Both alignment methods begin with the same preprocessing step: AHBA and GTEx are
+mapped into a common harmonized expression domain before any latent alignment is
+attempted.  The purpose of harmonization is to remove systematic, platform-induced
+differences in marginal gene-expression distributions while preserving the relative
+biological variation across parcels and subjects.
+
+\subsection{General harmonization model}
+\label{sec:harmonization-general}
+
+Let $\mathcal{H}_A$ and $\mathcal{H}_G$ be platform-specific transformation functions
+parameterized by shared parameters $\theta_H$, satisfying the following two
+properties: (i)~the mapped expressions are on a common scale, in the sense that
+$\mathcal{H}_A(X_A;\theta_H)$ and $\mathcal{H}_G(X_s^{(G)};\theta_H)$ have compatible
+marginal distributions across genes; and (ii)~biologically informative between-parcel
+and between-subject contrasts are preserved under the transformations.  The shared
+preprocessing transformation is written as
+\begin{equation}
+  \label{eq:shared-harmonization}
+  X_A^{(h)} = \mathcal{H}_A(X_A;\theta_H),
+  \qquad
+  X_{s,h}^{obs} = \mathcal{H}_G(X_s^{(G)};\theta_H).
+\end{equation}
+The parameters $\theta_H$ are estimated using the AHBA atlas together with the
+available GTEx rows, treating the two platforms as two batches.  Both DLAM and PLAM
+receive the harmonized atlas
+$X_A^{(h)}$ and harmonized subject observations $X_{s,h}^{obs}$ as input, and both
+ultimately produce a completed harmonized subject atlas
+\[
+  \hat{X}_s^{(h)} \in \mathbb{R}^{R\times G}.
+\]
+
+\subsection{Implementation via ComBat}
+\label{sec:harmonization-combat}
+
+In our implementation, the harmonization functions in Eq.~\eqref{eq:shared-harmonization}
+are realized by the ComBat batch-correction procedure
+\cite{johnson2007combat,bolstad2003normalization}.
+ComBat models the observed expression of gene $g$ in platform (batch) $b$ as
+\begin{equation}
+  \label{eq:combat}
+  x_{g}^{(b)} = \mu_g + \gamma_{b,g} + \delta_{b,g}\,x_g^{(*)} + \varepsilon_g,
+\end{equation}
+where $\mu_g$ is the overall gene mean, $\gamma_{b,g}$ is an additive batch shift,
+$\delta_{b,g}$ is a multiplicative batch scale, $x_g^{(*)}$ is the underlying
+platform-free expression, and $\varepsilon_g \sim \mathcal{N}(0,\sigma_g^2)$.
+The batch parameters $(\gamma_{b,g}, \delta_{b,g})$ are estimated by empirical Bayes,
+pooling information across genes to stabilize estimates for genes with few observations
+\cite{johnson2007combat}.  Harmonized expression is obtained by removing the estimated
+batch effects:
+\[
+  \mathcal{H}_b(x_g^{(b)};\,\hat\gamma,\hat\delta)
+  = \frac{x_g^{(b)} - \hat\gamma_{b,g}}{\hat\delta_{b,g}}.
+\]
+Quantile normalization is applied prior to ComBat to equalize within-platform gene
+distributions before cross-platform correction \cite{bolstad2003normalization}.
+
+PLAM adds one further calibration layer after this shared
+preprocessing step (Section~\ref{sec:calibration}): gene-wise subject-specific
+coefficients $(a_{s,g}, b_{s,g})$ adjust residual within-subject mismatch inside
+the latent observation model rather than replacing the global harmonizer.
+
+\subsection{Naive Atlas-Fill Baseline}
+\label{sec:naive-fill}
+The same harmonized domain also supports a simple atlas-prior baseline.  For a GTEx
+subject $s$, the naive fill predictor preserves all observed harmonized parcels and
+fills every unobserved parcel directly from the harmonized AHBA atlas:
+\begin{equation}
+  \label{eq:naive-fill-unobs}
+  \hat{x}_{srg}^{\text{naive}} = x_{A,rg}^{(h)}, \qquad r \notin \Omega_s,
+\end{equation}
+\begin{equation}
+  \label{eq:naive-fill-obs}
+  \hat{x}_{srg}^{\text{naive}} = x_{srg}^{(G,h)}, \qquad r \in \Omega_s.
+\end{equation}
+This baseline is not an alignment model: it contains no subject-specific latent
+structure beyond the exact preservation of observed parcels.  It serves as a
+harmonized atlas-prior reference for both quantitative benchmarking and residual
+visualization.
+
+\section{Deterministic Latent Alignment Model (DLAM)}
+\subsection{Intuition}
+DLAM treats the observed parcels of a subject as
+sufficient to estimate a subject-specific latent expression basis that is spatially
+structured.  That basis is aligned to an atlas reference basis by an affine change of
+coordinates.  After the subject-specific latent spatial trajectory has been transported
+into the atlas frame, it is interpolated over unobserved parcels and decoded back into
+gene space.  The procedure is modular: harmonization, latent decomposition, affine
+alignment, interpolation, ridge regression, and decoding are estimated sequentially as
+point estimates.
+
+\subsection{Joint PLS decomposition}
+\label{sec:det-pls}
+
+The key idea of DLAM is to factorize the subject's harmonized
+expression matrix $X_{s,h}^{obs}$ into two components: one that is specifically
+aligned with the spatial distribution of the observed parcels, and one that captures
+the residual gene-expression variation.  This is achieved by fitting a joint partial
+least squares (PLS) decomposition that simultaneously decomposes expression and
+spatial covariates, finding latent directions of maximum covariance between the two.
+
+Formally, let $\tilde X = X_{s,h}^{obs}$ and $\tilde Y = Y_{\Omega_s}$ denote the
+centered expression and spatial matrices at the observed parcels.  PLS finds successive
+pairs of weight vectors $(p_k,\, c_k)$ with $p_k\in\mathbb{R}^G$ and
+$c_k\in\mathbb{R}^3$ solving
+\begin{equation}
+  \label{eq:pls-objective}
+  (p_k, c_k) = \arg\max_{\|p\|=\|c\|=1} \operatorname{Cov}\!\left(\tilde X\, p,\; \tilde Y\, c\right),
+\end{equation}
+deflating the matrices between components.  The resulting $K$ component pairs yield
+latent score matrices
+\begin{equation}
+  \label{eq:det-expression-decomp}
+  X_{s,h}^{obs} \approx Z_s W_s^\top,
+  \qquad
+  Z_s \in \mathbb{R}^{|\Omega_s|\times K},\;
+  W_s \in \mathbb{R}^{G\times K},
+\end{equation}
+\begin{equation}
+  \label{eq:det-spatial-decomp}
+  Y_{\Omega_s} \approx S_s C_s^\top,
+  \qquad
+  S_s \in \mathbb{R}^{|\Omega_s|\times K},\;
+  C_s \in \mathbb{R}^{3\times K},
+\end{equation}
+where $Z_s$ are latent expression scores and $S_s$ are latent spatial scores.  By
+construction of the PLS criterion, each column $z_{s,\cdot,k}$ of $Z_s$ is the linear
+combination of genes that maximally co-varies with the corresponding spatial score
+$s_{s,\cdot,k}$.  This means $Z_s$ captures precisely the spatially-structured
+component of expression: it is the part of $X_{s,h}^{obs}$ that can be predicted
+from spatial location.
+
+The atlas reference decomposition is obtained analogously on $X_A^{(h)}$:
+\begin{equation}
+  \label{eq:det-atlas-decomp}
+  X_A^{(h)} \approx Z_A^{det}\!\left(W_A^{det}\right)^\top,
+  \qquad
+  Z_A^{det}\in\mathbb{R}^{R\times K},\;
+  W_A^{det}\in\mathbb{R}^{G\times K}.
+\end{equation}
+
+\subsection{Affine alignment, interpolation, and decoding}
+\label{sec:det-align}
+
+Because the subject and atlas PLS decompositions are fit independently, the resulting
+latent spaces are in different coordinate systems.  The subject latent expression
+scores $Z_s$ are aligned to the atlas reference scores $Z_A^{det}$ on the observed
+parcels by solving a regularized affine regression:
+\begin{equation}
+  \label{eq:det-affine-fit}
+  (B_s,b_s)
+  =
+  \arg\min_{B,b}
+  \left\|
+  Z_s B + \mathbf{1}b^\top - Z_{A,\Omega_s}^{det}
+  \right\|_F^2
+  +
+  \lambda_B \|B\|_F^2.
+\end{equation}
+The fitted affine map is then applied to both the latent expression and spatial
+scores:
+\begin{equation}
+  \label{eq:det-affine-map}
+  Z'_s = Z_s B_s + \mathbf{1}b_s^\top,
+\end{equation}
+\begin{equation}
+  \label{eq:det-spatial-transport}
+  S'_s = S_s B_s.
+\end{equation}
+
+\paragraph{Why the same $B_s$ applies to both $Z_s$ and $S_s$.}
+The PLS decomposition in Eqs.~\eqref{eq:det-expression-decomp}--\eqref{eq:det-spatial-decomp}
+operates in a \emph{shared} latent space: both $Z_s$ and $S_s$ are projections of
+their respective data matrices onto the same set of $K$ latent directions, chosen to
+maximize cross-covariance.  Concretely, one can write
+$z_{s,r} = X_{s,r}^{(h)} W_s$ and $s_{s,r} = y_{\Omega_s,r} C_s$, where the loading
+directions $W_s$ and $C_s$ are jointly determined by the PLS criterion
+\eqref{eq:pls-objective}.  The alignment matrix $B_s$ represents a linear change of
+basis in this shared PLS latent space.  Applying it consistently to $Z_s$ and $S_s$
+is therefore necessary to maintain the correspondence between expression modes and
+spatial modes that was established by PLS: if the expression basis is rotated without
+rotating the spatial basis, the relationship between spatial position and predicted
+expression is lost.
+
+The aligned latent spatial coordinates are extended to all parcels by an RBF
+interpolator
+\begin{equation}
+  \label{eq:det-rbf}
+  \hat{S}'_s(r) = f_s(y_r), \qquad r=1,\dots,R,
+\end{equation}
+after which a ridge regression maps interpolated latent spatial coordinates back to
+aligned latent expression coordinates,
+\begin{equation}
+  \label{eq:det-ridge-regression}
+  \hat{Z}'_s = \hat{S}'_s M_s + \mathbf{1}\beta_s^\top.
+\end{equation}
+The aligned coordinates are then returned to the subject-specific score system,
+\begin{equation}
+  \label{eq:det-inverse-affine}
+  \hat{Z}_s = \left(\hat{Z}'_s - \mathbf{1}b_s^\top\right) B_s^{-1},
+\end{equation}
+and decoded into harmonized expression via the subject-specific gene loadings,
+\begin{equation}
+  \label{eq:det-decode}
+  \hat{X}_{s,h} = \hat{Z}_s W_s^\top.
+\end{equation}
+Observed parcels are preserved exactly by overwrite,
+\begin{equation}
+  \label{eq:det-overwrite}
+  \hat{x}_{srg}^{(h)} = x_{srg}^{(G,h)}, \qquad r\in\Omega_s.
+\end{equation}
+The deterministic implementation additionally restricts anatomically implausible
+borrowing during subject-to-parcel assignment by preferring anchors in the same
+hemisphere and brain area before falling back to purely distance-based matches.
+
+\subsection{Initialization}
+Initialization is direct because each stage is either closed-form or a standard
+regression problem.  The shared harmonizer in Eq.~\eqref{eq:shared-harmonization} is
+fit first.  The atlas reference decomposition in Eq.~\eqref{eq:det-atlas-decomp} and
+the subject-specific PLS decomposition in
+Eqs.~\eqref{eq:det-expression-decomp}--\eqref{eq:det-spatial-decomp} are then fit
+from the harmonized matrices.  The affine parameters $(B_s,b_s)$ are initialized by
+least squares on the overlap objective in Eq.~\eqref{eq:det-affine-fit}.  The RBF
+interpolator in Eq.~\eqref{eq:det-rbf} and the ridge regression in
+Eq.~\eqref{eq:det-ridge-regression} are fit on the observed parcels only.  No latent
+state is propagated across subjects.
+
+\begin{algorithm}[H]
+\caption{Deterministic alignment for subject $s$}
+\begin{algorithmic}[1]
+\Require Atlas expression $X_A$, subject observations $X_s^{(G)}$ on $\Omega_s$,
+         parcel centroids $Y$, latent dimension $K$
+\Ensure Completed harmonized atlas $\hat{X}_{s,h}$
+\State Fit the shared harmonizer and compute $X_A^{(h)}$ and $X_{s,h}^{obs}$
+       using Eq.~\eqref{eq:shared-harmonization}
+\State Fit the atlas reference latent decomposition in Eq.~\eqref{eq:det-atlas-decomp}
+\State Fit the subject-specific joint PLS decompositions in
+       Eqs.~\eqref{eq:det-expression-decomp} and~\eqref{eq:det-spatial-decomp}
+\State Estimate $(B_s,b_s)$ by the affine alignment objective in
+       Eq.~\eqref{eq:det-affine-fit}
+\State Compute aligned subject coordinates by Eqs.~\eqref{eq:det-affine-map}
+       and~\eqref{eq:det-spatial-transport}
+\State Fit the RBF interpolator and evaluate $\hat{S}'_s(r)$ for all parcels
+       using Eq.~\eqref{eq:det-rbf}
+\State Fit ridge regression from observed $S'_s$ to observed $Z'_s$ and predict
+       $\hat{Z}'_s$ using Eq.~\eqref{eq:det-ridge-regression}
+\State Map predicted aligned coordinates back to the subject-specific system with
+       Eq.~\eqref{eq:det-inverse-affine}
+\State Decode to harmonized expression using Eq.~\eqref{eq:det-decode}
+\State Overwrite observed parcels using Eq.~\eqref{eq:det-overwrite}
+\State \Return $\hat{X}_{s,h}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Probabilistic Latent Alignment Model (PLAM)}
+\subsection{Intuition}
+PLAM takes the opposite view: instead of estimating a
+subject-specific basis first and then transporting it to the atlas, it treats the atlas
+as the primary latent geometry and represents each subject as a smooth, aligned
+deviation from that geometry.  Subject-specific variation is captured by three
+components: an orthogonal alignment matrix, a spatially smooth latent deviation field,
+and subject-specific gene-wise calibration parameters.  Unobserved parcels are inferred
+by conditioning the deviation field on the observed parcels and then decoding the
+completed latent state into harmonized expression.
+
+\subsection{Atlas factor model and subject-specific latent state}
+The harmonized atlas is represented by a low-rank factor model,
+\begin{equation}
+  \label{eq:prob-atlas-factor}
+  X_A^{(h)} \approx \mathbf{1}\alpha^\top + Z_A W^\top,
+\end{equation}
+where $Z_A\in\mathbb{R}^{R\times K}$ contains atlas latent expression coordinates,
+$W\in\mathbb{R}^{G\times K}$ is a gene loading matrix, and $\alpha\in\mathbb{R}^G$ is
+a gene-wise intercept vector.  This is the generative atlas model: each parcel's
+expression profile is explained by a $K$-dimensional latent code $z_{A,r}$ projected
+through the shared decoder $W$, plus a gene mean $\alpha$.  It is equivalent to
+probabilistic PCA with a fixed mean \cite{tipping1999ppca}.
+
+Let $z_{A,r}$ denote row $r$ of $Z_A$ and $w_g$ denote row $g$ of $W$.  For subject
+$s$ and parcel $r$, the latent state is
+\begin{equation}
+  \label{eq:prob-latent-state}
+  z_{s,r} = \left(z_{A,r} + \delta_{s,r}\right)Q_s,
+\end{equation}
+where $\delta_{s,r}\in\mathbb{R}^K$ is a subject-specific latent deviation from the
+atlas at parcel $r$, and $Q_s\in O(K)$ is an orthogonal alignment matrix.  This
+decomposition cleanly separates three sources of variation: (i)~the atlas coordinate
+$z_{A,r}$, shared across all subjects; (ii)~the subject-specific deviation
+$\delta_{s,r}$, which is spatially smooth but subject-dependent; and (iii)~the global
+rotation $Q_s$, which captures a linear reorientation of the subject's expression axes
+relative to the atlas.  The corresponding platform-free latent expression is
+\begin{equation}
+  \label{eq:prob-latent-expression}
+  x_{srg}^{(*)} = \alpha_g + z_{s,r}^\top w_g.
+\end{equation}
+
+\subsection{Subject-specific calibration}
+\label{sec:calibration}
+
+After the shared preprocessing harmonization in Eq.~\eqref{eq:shared-harmonization},
+residual platform mismatch may persist at the subject level.  PLAM
+allows additional gene-wise subject-specific calibration in the observation model:
+\begin{equation}
+  \label{eq:prob-observation-model}
+  x_{srg}^{(G,h)} = a_{s,g}\,x_{srg}^{(*)} + b_{s,g} + \varepsilon_{srg},
+  \qquad r\in\Omega_s.
+\end{equation}
+This calibration layer is structurally equivalent to the location-scale correction in
+ComBat \cite{johnson2007combat}, applied at the individual subject level within the
+latent observation model rather than at the cohort level in gene space.  While the
+global harmonizer in Section~\ref{sec:harmonization-combat} corrects for systematic
+platform differences shared across all subjects, the coefficients $(a_{s,g}, b_{s,g})$
+absorb residual subject-specific offsets that remain after global correction.
+
+Given the current latent states, the calibration parameters are updated by regularized
+regression,
+\begin{equation}
+  \label{eq:prob-calibration-update}
+  \min_{a_{s,g},\,b_{s,g}}
+  \sum_{r\in\Omega_s}
+  \left(
+  x_{srg}^{(G,h)} - a_{s,g}\tilde{x}_{srg}^{(*)} - b_{s,g}
+  \right)^2
+  +
+  \lambda_a (a_{s,g}-a_{0,g})^2
+  +
+  \lambda_b (b_{s,g}-b_{0,g})^2,
+\end{equation}
+where $\tilde{x}_{srg}^{(*)}=\alpha_g + z_{s,r}^\top w_g$ and $(a_{0,g},b_{0,g})$
+are global calibration targets.  In the neutral initialization, $a_{0,g}=1$ and
+$b_{0,g}=0$, corresponding to the prior belief that the global harmonizer has already
+removed most platform effects.
+
+\subsection{Full joint distribution}
+\label{sec:joint}
+
+The complete PLAM model is summarized by the following factored joint
+distribution:
+\begin{equation}
+  \label{eq:prob-joint}
+  \begin{aligned}
+  &p\!\left(
+  X_A^{(h)}, \{X_s^{(G,h)}\}_{s=1}^S,
+  Z_A, W, \alpha,
+  \{\Delta_s,Q_s,a_s,b_s\}_{s=1}^S
+  \right) \\
+  &\quad =
+  p(X_A^{(h)}\mid Z_A,W,\alpha)\,
+  p(Z_A)\,
+  p(W)\,
+  p(\alpha) \\
+  &\qquad\times
+  \prod_{s=1}^S
+  p(Q_s)\,
+  p(\Delta_s\mid Y)\,
+  p(a_s,b_s)\,
+  p(X_s^{(G,h)}\mid Z_A,\Delta_s,Q_s,W,\alpha,a_s,b_s).
+  \end{aligned}
+\end{equation}
+The explicit distributional assumptions for each factor are as follows.
+
+\paragraph{Atlas likelihood.}
+\[
+  p(X_A^{(h)}\mid Z_A,W,\alpha)
+  = \prod_{r=1}^R\prod_{g=1}^G
+    \mathcal{N}\!\left(x_{A,rg}^{(h)};\;\alpha_g + z_{A,r}^\top w_g,\;\sigma_A^2\right).
+\]
+This is a Gaussian factor model for the atlas, identical to probabilistic PCA
+\cite{tipping1999ppca} with a fixed intercept $\alpha$.
+
+\paragraph{Atlas latent prior.}
+\[
+  p(Z_A) = \prod_{r=1}^R \mathcal{N}(z_{A,r};\,\mathbf{0},\,I_K).
+\]
+A standard spherical Gaussian prior on atlas latent codes.
+
+\paragraph{Decoder and intercept priors.}
+\[
+  p(W) = \prod_{g=1}^G \mathcal{N}(w_g;\,\mathbf{0},\,\tau_W^2 I_K),
+  \qquad
+  p(\alpha) = \prod_{g=1}^G \mathcal{N}(\alpha_g;\,0,\,\tau_\alpha^2).
+\]
+Gaussian shrinkage on gene loadings and gene means.
+
+\paragraph{Orthogonal alignment.}
+\[
+  p(Q_s) = \mathrm{Uniform}\!\left(O(K)\right).
+\]
+$Q_s$ is constrained to the group of $K\times K$ orthogonal matrices and estimated by
+solving a Procrustes problem (Section~\ref{sec:procrustes}).
+
+\paragraph{Spatial GP prior on deviations.}
+\[
+  p(\Delta_s \mid Y) = \prod_{k=1}^K\,
+  \mathcal{GP}\!\left(\delta_{s,\cdot,k};\;0,\;\kappa_k(\cdot,\cdot)\right),
+\]
+where $\kappa_k$ is a squared-exponential kernel defined over parcel centroids
+(Section~\ref{sec:gp-completion}).  This prior encodes the assumption that
+subject-specific deviations from the atlas are spatially smooth.
+
+\paragraph{Calibration prior.}
+\[
+  p(a_s,b_s)
+  = \prod_{g=1}^G
+    \mathcal{N}(a_{s,g};\,a_{0,g},\,\lambda_a^{-1})\,
+    \mathcal{N}(b_{s,g};\,b_{0,g},\,\lambda_b^{-1}).
+\]
+Gaussian regularization toward the identity transformation $(a_{0,g}=1,\,b_{0,g}=0)$.
+
+\paragraph{Subject likelihood.}
+\[
+  p(X_s^{(G,h)}\mid \cdots)
+  = \prod_{r\in\Omega_s}\prod_{g=1}^G
+    \mathcal{N}\!\left(x_{srg}^{(G,h)};\;
+    a_{s,g}\bigl(\alpha_g + z_{s,r}^\top w_g\bigr) + b_{s,g},\;
+    \sigma_{s,g}^2\right),
+\]
+where $z_{s,r} = (z_{A,r}+\delta_{s,r})Q_s$ from Eq.~\eqref{eq:prob-latent-state}.
+
+\subsection{From unweighted to weighted latent regression}
+The latent-state update is easiest to motivate from ordinary least squares.  If every
+gene were treated as equally reliable and all residuals were penalized equally, the
+subject-specific latent coordinate at parcel $r$ would solve
+\begin{equation}
+  \label{eq:prob-unweighted-latent-update}
+  \min_{z}
+  \sum_{g=1}^{G}
+  \left(
+  x_{srg}^{(G,h)} -
+  a_{s,g}\left(\alpha_g + z^\top w_g\right) -
+  b_{s,g}
+  \right)^2
+  +
+  \lambda_z \left\| z - z_{A,r}Q_s \right\|_2^2.
+\end{equation}
+This objective balances fitting the observed gene expression against staying close to
+the atlas-aligned coordinate $z_{A,r}Q_s$.
+
+In practice, some residuals are unusually large and some genes are systematically
+noisier than others.  Let
+\[
+  e_{srg}
+  = x_{srg}^{(G,h)}
+  - a_{s,g}\left(\alpha_g + z_{s,r}^\top w_g\right)
+  - b_{s,g}
+\]
+denote the current residual.  A Student-$t$-inspired robust weight is
+\begin{equation}
+  \label{eq:prob-robust-weight}
+  \omega_{srg}^{robust}
+  =
+  \frac{\nu + 1}{\nu + e_{srg}^2 / \hat{\sigma}_{s,g}^2},
+\end{equation}
+and a gene-wise heteroscedastic weight is
+\begin{equation}
+  \label{eq:prob-hetero-weight}
+  \omega_{sg}^{hetero}
+  =
+  \left(\hat{\sigma}_{s,g}^2 + \epsilon_\omega\right)^{-1},
+  \qquad
+  \hat{\sigma}_{s,g}^2
+  =
+  \frac{1}{|\Omega_s|}
+  \sum_{r\in\Omega_s}
+  e_{srg}^2.
+\end{equation}
+The combined weight is
+\begin{equation}
+  \label{eq:prob-total-weight}
+  \omega_{srg} = \omega_{srg}^{robust}\,\omega_{sg}^{hetero}.
+\end{equation}
+The implemented latent-state update is then the weighted ridge regression
+\begin{equation}
+  \label{eq:prob-latent-update}
+  \min_{z}
+  \sum_{g=1}^{G}
+  \omega_{srg}
+  \left(
+  x_{srg}^{(G,h)} -
+  a_{s,g}\left(\alpha_g + z^\top w_g\right) -
+  b_{s,g}
+  \right)^2
+  +
+  \lambda_z \left\| z - z_{A,r}Q_s \right\|_2^2.
+\end{equation}
+
+\paragraph{Connection to M-estimation and IRLS.}
+The combined weight $\omega_{srg}$ corresponds to M-estimation
+\cite{huber1981robust}: $\omega_{srg}^{robust}$ is proportional to the influence
+function of a Student-$t$ distribution, downweighting outlier genes at individual
+observations, while $\omega_{sg}^{hetero}$ accounts for gene-level heteroscedasticity.
+Fixing $\omega_{srg}$ and solving Eq.~\eqref{eq:prob-latent-update}, then updating
+$\omega_{srg}$ given the new $z_{s,r}$, is precisely the iteratively reweighted least
+squares (IRLS) algorithm \cite{huber1981robust}.  Each cycle is guaranteed not to
+increase the M-estimation objective.
+
+\subsection{Orthogonal Procrustes alignment}
+\label{sec:procrustes}
+
+Given the updated observed latent coordinates, the orthogonal alignment matrix $Q_s$
+is refreshed by solving the classical orthogonal Procrustes problem
+\cite{schonemann1966procrustes}:
+\begin{equation}
+  \label{eq:prob-procrustes}
+  Q_s^\star
+  =
+  \arg\min_{Q\in O(K)}
+  \left\|
+  Z_{A,\Omega_s}Q - Z_{s,\Omega_s}
+  \right\|_F^2.
+\end{equation}
+This has the closed-form solution $Q_s^\star = UV^\top$, where
+$Z_{A,\Omega_s}^\top Z_{s,\Omega_s} = U\Sigma V^\top$ is the singular value
+decomposition.
+
+\subsection{Gaussian-process completion of the latent deviation field}
+\label{sec:gp-completion}
+
+The Gaussian process is used to interpolate the subject-specific latent deviation
+field rather than the expression directly \cite{rasmussen2006gpml}.  After the observed
+latent coordinates have been updated, the deviation at observed parcels is obtained by
+undoing the orthogonal alignment and subtracting the atlas coordinate:
+\begin{equation}
+  \label{eq:prob-observed-deviation}
+  \delta_{s,r}^{obs} = z_{s,r}Q_s^\top - z_{A,r},
+  \qquad r\in\Omega_s.
+\end{equation}
+For latent dimension $k$, the scalar deviations
+$\{\delta_{s,r,k}^{obs}\}_{r\in\Omega_s}$ are modeled as noise-corrupted observations
+from a zero-mean Gaussian process with squared-exponential kernel
+\begin{equation}
+  \label{eq:prob-kernel}
+  \kappa_k(y_r,y_{r'})
+  =
+  \sigma_k^2
+  \exp\!\left(
+  -\frac{\|y_r-y_{r'}\|_2^2}{2\ell_k^2}
+  \right),
+\end{equation}
+where $\sigma_k^2$ is the marginal signal variance and $\ell_k$ is the spatial
+length-scale for dimension $k$.  Let $K_{\Omega,\Omega}^{(k)}$ denote the
+$|\Omega_s|\times|\Omega_s|$ kernel matrix evaluated at observed parcel centroids,
+$K_{r,\Omega}^{(k)}$ the $1\times|\Omega_s|$ cross-kernel between parcel $r$ and
+the observed parcels, and $K_{r,r}^{(k)}$ the prior variance at $r$.  The GP
+posterior mean and variance at any parcel $r$ are then
+\begin{equation}
+  \label{eq:prob-gp-mean}
+  \hat{\delta}_{s,r,k}
+  =
+  K_{r,\Omega}^{(k)}
+  \left(
+  K_{\Omega,\Omega}^{(k)} + \tau_k^2 I
+  \right)^{-1}
+  \delta_{s,\Omega,k}^{obs},
+\end{equation}
+\begin{equation}
+  \label{eq:prob-gp-var}
+  \mathrm{Var}\!\left(
+  \delta_{s,r,k}\mid \Omega_s
+  \right)
+  =
+  K_{r,r}^{(k)}
+  -
+  K_{r,\Omega}^{(k)}
+  \left(
+  K_{\Omega,\Omega}^{(k)} + \tau_k^2 I
+  \right)^{-1}
+  K_{\Omega,r}^{(k)},
+\end{equation}
+where $\tau_k^2$ is an observation noise variance \cite{rasmussen2006gpml}.  The
+posterior mean $\hat\delta_{s,r,k}$ provides the completed deviation at unobserved
+parcel $r$, while the posterior variance quantifies how uncertain that completion is
+as a function of distance from the observed parcels.
+
+Averaging the posterior variance over latent dimensions gives the parcel-wise average
+latent posterior variance,
+\begin{equation}
+  \label{eq:prob-avg-latent-var}
+  \bar{\sigma}_{s,r}^{2}
+  =
+  \frac{1}{K}
+  \sum_{k=1}^{K}
+  \mathrm{Var}\!\left(
+  \delta_{s,r,k}\mid \Omega_s
+  \right).
+\end{equation}
+The completed latent coordinate is reconstructed as
+\begin{equation}
+  \label{eq:prob-completed-latent}
+  \hat{z}_{s,r}
+  =
+  \left(
+  z_{A,r} + \hat{\delta}_{s,r}
+  \right)Q_s.
+\end{equation}
+The completed harmonized expression is decoded as
+\begin{equation}
+  \label{eq:prob-final-decode}
+  \hat{x}_{srg}^{(h)}
+  =
+  a_{s,g}\!\left(
+  \alpha_g + \hat{z}_{s,r}^\top w_g
+  \right)
+  +
+  b_{s,g},
+\end{equation}
+and observed parcels are preserved exactly by
+\begin{equation}
+  \label{eq:prob-overwrite}
+  \hat{x}_{srg}^{(h)} = x_{srg}^{(G,h)}, \qquad r\in\Omega_s.
+\end{equation}
+
+\subsection{Optional uncertainty shrinkage}
+The broader probabilistic family also permits the completed subject atlas to be
+shrunk toward an atlas prior according to spatial distance and average latent posterior
+variance.  If $\tilde{d}_{s,r}$ is a scaled distance to the nearest observed parcel
+and $\widetilde{\bar{\sigma}}_{s,r}^{2}$ is the scaled average latent posterior
+variance from Eq.~\eqref{eq:prob-avg-latent-var}, then one possible shrinkage score is
+\[
+  \operatorname{score}_{s,r}
+  =
+  \gamma_d \tilde{d}_{s,r}
+  +
+  \gamma_u \widetilde{\bar{\sigma}}_{s,r}^{2},
+\]
+with logistic weight
+\[
+  w_{s,r}
+  =
+  \sigma\!\left(
+  \frac{\operatorname{score}_{s,r}-m_0}{\tau}
+  \right),
+  \qquad
+  \hat{x}_{s,r}^{final}
+  =
+  (1-w_{s,r})\hat{x}_{s,r}^{model}
+  +
+  w_{s,r}\hat{x}_{r}^{prior}.
+\]
+This extension belongs to the general model family but is inactive in the particular
+probabilistic analysis presented here.
+
+\subsection{Initialization}
+Initialization is explicit because PLAM is fit by alternating
+updates.  After the shared preprocessing harmonization in
+Eq.~\eqref{eq:shared-harmonization}, the atlas latent coordinates $Z_A$ are
+initialized by a rank-$K$ singular value decomposition of centered $X_A^{(h)}$, and
+the decoder parameters $(W,\alpha)$ are fit by ridge regression under
+Eq.~\eqref{eq:prob-atlas-factor}.  For each subject, the orthogonal alignment is
+initialized as $Q_s=I$, the observed latent coordinates are initialized as the atlas
+coordinates at the observed parcels, $z_{s,r}=z_{A,r}$ for $r\in\Omega_s$, the
+calibration parameters are initialized as $a_{s,g}=1$ and $b_{s,g}=0$, and the
+combined weights are initialized as $\omega_{srg}=1$.  These choices correspond to
+the neutral hypothesis that the subject initially coincides with the atlas in the
+harmonized domain.
+
+\begin{algorithm}[H]
+\caption{Unified probabilistic alignment for subject $s$}
+\begin{algorithmic}[1]
+\Require Atlas expression $X_A$, subject observations $X_s^{(G)}$ on $\Omega_s$,
+         parcel centroids $Y$, latent dimension $K$, number of iterations $T$
+\Ensure Completed harmonized atlas $\hat{X}_{s,h}$ and parcel-wise average latent
+        posterior variance $\bar{\sigma}_{s,r}^2$
+\State Fit the shared harmonizer and compute $X_A^{(h)}$ and $X_{s,h}^{obs}$
+       using Eq.~\eqref{eq:shared-harmonization}
+\State Initialize $Z_A$, $W$, and $\alpha$ under the atlas factor model in
+       Eq.~\eqref{eq:prob-atlas-factor}
+\State Initialize $Q_s \gets I$, $z_{s,r} \gets z_{A,r}$ for $r\in\Omega_s$,
+       $a_{s,g}\gets 1$, $b_{s,g}\gets 0$, and $\omega_{srg}\gets 1$
+\For{$t=1,\dots,T$}
+    \For{each gene $g$}
+        \State Update $(a_{s,g},b_{s,g})$ by solving the regularized regression in
+               Eq.~\eqref{eq:prob-calibration-update}
+    \EndFor
+    \For{each observed parcel $r\in\Omega_s$}
+        \State Form residuals $e_{srg}$ and update $\omega_{srg}^{robust}$,
+               $\omega_{sg}^{hetero}$, and $\omega_{srg}$ using
+               Eqs.~\eqref{eq:prob-robust-weight}--\eqref{eq:prob-total-weight}
+        \State Update $z_{s,r}$ by solving the weighted latent regression in
+               Eq.~\eqref{eq:prob-latent-update}
+    \EndFor
+    \State Update $Q_s$ by the orthogonal Procrustes step in
+           Eq.~\eqref{eq:prob-procrustes}
+\EndFor
+\State Form observed deviations $\delta_{s,r}^{obs}$ using
+       Eq.~\eqref{eq:prob-observed-deviation}
+\For{each latent dimension $k=1,\dots,K$}
+    \State Compute the Gaussian-process posterior mean and variance using
+           Eqs.~\eqref{eq:prob-gp-mean} and~\eqref{eq:prob-gp-var}
+\EndFor
+\State Compute $\bar{\sigma}_{s,r}^{2}$ using Eq.~\eqref{eq:prob-avg-latent-var}
+       and the completed latent coordinates $\hat{z}_{s,r}$ using
+       Eq.~\eqref{eq:prob-completed-latent}
+\State Decode to harmonized expression using Eq.~\eqref{eq:prob-final-decode}
+\State Overwrite observed parcels using Eq.~\eqref{eq:prob-overwrite}
+\State \Return $\hat{X}_{s,h}$ and $\bar{\sigma}_{s,r}^{2}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Atlas-Level Diagnostics}
+Atlas-level diagnostics are useful because they separate two questions: whether the
+harmonization and alignment steps place AHBA and GTEx in a comparable coordinate
+system, and whether the imputation step preserves parcel-level structure when sparse
+subject data are aggregated into a population atlas.
+Figures~\ref{fig:atlas-det-heatmap} and~\ref{fig:atlas-uni-heatmap} show the
+progression from raw AHBA and sparse GTEx observations to harmonized and completed
+parcel-by-gene atlases.  In both cases, the gap between the sparse observed GTEx
+pattern and the completed harmonized atlas is explicitly visible.
+Figures~\ref{fig:atlas-naive-heatmap} and~\ref{fig:atlas-naive-scatter} provide the
+same diagnostics for the naive atlas-fill baseline, making it possible to compare
+learned alignment against direct atlas borrowing in the same harmonized domain.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{figs/atlas_deterministic_heatmap_demo.pdf}
+\caption{Atlas-level heatmap diagnostic for DLAM.  Panels show (A) AHBA raw,
+(B) sparse GTEx raw, (C) sparse GTEx after harmonization, (D) AHBA harmonized,
+(E) the DLAM-completed harmonized GTEx atlas, and (F) the residual difference
+relative to the harmonized AHBA atlas.}
+\label{fig:atlas-det-heatmap}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{figs/atlas_unified_heatmap_demo.pdf}
+\caption{Atlas-level heatmap diagnostic for PLAM.  Panels show (A) AHBA raw,
+(B) sparse GTEx raw, (C) sparse GTEx after harmonization, (D) AHBA harmonized,
+(E) the PLAM-completed harmonized GTEx atlas, and (F) the residual difference
+relative to the harmonized AHBA atlas.}
+\label{fig:atlas-uni-heatmap}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{figs/atlas_naive_heatmap_demo.pdf}
+\caption{Atlas-level heatmap diagnostic for the naive atlas-fill baseline.
+Panels show (A) AHBA raw, (B) sparse GTEx raw, (C) sparse GTEx after harmonization,
+(D) AHBA harmonized, (E) the naive-fill harmonized GTEx atlas, and (F) the residual
+difference relative to the harmonized AHBA atlas.}
+\label{fig:atlas-naive-heatmap}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_deterministic_scatter_region_harmonized.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_deterministic_scatter_gene_harmonized.pdf}
+\end{subfigure}
+\medskip
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_deterministic_scatter_region_corr.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_deterministic_scatter_gene_corr.pdf}
+\end{subfigure}
+\caption{Atlas-level scatter diagnostics for DLAM.  Panels show (A) parcel identity,
+(B) gene identity, (C) parcel-level correlation, and (D) gene-level correlation in the
+harmonized atlas space.  Only the most informative parcel and gene subsets are
+individually color-coded, with the remaining points shown in gray for context.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_unified_scatter_region_harmonized.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_unified_scatter_gene_harmonized.pdf}
+\end{subfigure}
+\medskip
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_unified_scatter_region_corr.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_unified_scatter_gene_corr.pdf}
+\end{subfigure}
+\caption{Atlas-level scatter diagnostics for PLAM.  Panels show (A) parcel identity,
+(B) gene identity, (C) parcel-level correlation, and (D) gene-level correlation in the
+harmonized atlas space.  The same visual grammar is used as in the DLAM panel so that
+the effect of the two alignment strategies can be compared directly.}
+\label{fig:atlas-plam-scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_naive_scatter_region_harmonized.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_naive_scatter_gene_harmonized.pdf}
+\end{subfigure}
+\medskip
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_naive_scatter_region_corr.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/atlas_naive_scatter_gene_corr.pdf}
+\end{subfigure}
+\caption{Atlas-level scatter diagnostics for the naive atlas-fill baseline.
+Panels show (A) parcel identity, (B) gene identity, (C) parcel-level correlation, and
+(D) gene-level correlation in the harmonized atlas space.}
+\label{fig:atlas-naive-scatter}
+\end{figure}
+
+\section{Single-Subject Diagnostics}
+Single-subject diagnostics illustrate how each model turns sparse observations into a
+completed atlas.  The representative subject shown here is \texttt{GTEX-14ASI}, chosen
+because its subject-level PLAM performance lies close to the cohort median
+among subjects with at least eight observed parcels.  This makes the visual example
+representative of typical behavior rather than an extreme case.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/subject_deterministic_heatmap_demo.pdf}
+    \caption{DLAM}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/subject_unified_heatmap_demo.pdf}
+    \caption{PLAM}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/subject_naive_heatmap_demo.pdf}
+    \caption{Naive fill}
+\end{subfigure}
+\caption{Single-subject heatmap diagnostics for the representative subject
+\texttt{GTEX-14ASI}.  Panels (A)--(C) compare the transition from sparse observations
+to the completed harmonized atlas under DLAM, PLAM, and naive fill in the same visual
+format.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/subject_deterministic_scatter_harmonized.pdf}
+    \caption{DLAM}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/subject_unified_scatter_harmonized.pdf}
+    \caption{PLAM}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/subject_naive_scatter_harmonized.pdf}
+    \caption{Naive fill}
+\end{subfigure}
+\caption{Single-subject scatter diagnostics in harmonized space for the representative
+subject.  Panels (A)--(C) show parcel identity, gene identity, parcel-level
+correlation, and gene-level correlation for the completed subject atlas under DLAM,
+PLAM, and naive fill.}
+\end{figure}
+
+
+\section{Multi-Subject Spatial Gene Maps}
+Cohort-wide hemisphere maps make it possible to compare how each method propagates
+sparse subject observations over unobserved parcels for individual genes.  Figure~\ref{fig:spatial-top3-hvg}
+shows three high-variance genes selected because they provide the clearest visual
+contrast between the learned alignment models and the naive atlas-fill baseline.
+Across these examples, DLAM and PLAM preserve localized low-expression structure
+that is attenuated or overwritten by naive fill, while also differing subtly from
+one another in subject-specific ways.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figs/spatial_top3_hvg_panel.pdf}
+\caption{Cohort-wide spatial comparison for three selected high-variance genes.
+Panels (A)--(C) show \textit{SLC17A7}, \textit{NRGN}, and \textit{ITPKA}.  Within each
+panel, the top row gives the AHBA atlas reference map for that gene and the remaining
+rows show the first subject block from the full multi-subject hemisphere-map diagnostic,
+comparing sparse GTEx observations, DLAM, PLAM, and naive fill in harmonized expression
+space.  These genes were selected because they exhibit the clearest qualitative
+separation between the learned models and direct atlas borrowing.}
+\label{fig:spatial-top3-hvg}
+\end{figure}
+
+\section{Validation Context}
+Validation is based on leave-one-region-out cross-validation at the subject level.
+For each subject and each observed parcel, the parcel is held out completely, all
+fitted quantities are recomputed without it, and the held-out gene vector is predicted
+from the remaining parcels.  This protocol is strict: the held-out parcel is excluded
+from harmonization, latent fitting, spatial completion, and decoding.  The resulting
+diagnostics therefore measure genuine out-of-sample regional generalization rather than
+reconstruction of inputs seen during fitting.
+
+\paragraph{Naive baseline.}
+Both alignment models are benchmarked against a naive atlas-fill baseline.  For each held-out
+parcel $r$ of subject $s$, the predicted expression is simply the corresponding row of
+the harmonized AHBA atlas:
+\[
+  \hat{x}_{srg}^{naive} = x_{A,rg}^{(h)},
+  \qquad g = 1,\dots,G.
+\]
+This baseline captures the information available purely from the atlas spatial prior
+without any subject-specific adaptation.  Improvement over this baseline therefore
+reflects the additional benefit of fitting each model to the individual subject's
+observed parcels.
+
+The leave-one-region-out diagnostics reported below are computed over the full gene
+set so that the manuscript-level evaluation is consistent with the main
+transcriptome-wide completion setting.  These plots are diagnostic rather than
+exhaustive: the aim is to expose how error and correlation vary over subjects, parcels,
+and genes, not merely to report a single cohort-level score.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figs/loro_subject_metrics_allgene.pdf}
+\caption{Subject-level leave-one-region-out diagnostics over the full gene set.
+Subjects are ordered by PLAM Pearson correlation.  The panels show the subject-wise
+coverage indicator, subject-wise Pearson correlation, subject-wise RMSE, and cohort-level
+summary bars for DLAM, PLAM, and the naive AHBA-fill baseline.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figs/loro_parcel_metrics_allgene.pdf}
+\caption{Parcel-level leave-one-region-out diagnostics over the full gene set.  The
+heatmaps summarize mean held-out correlation and RMSE by parcel across the canonical
+parcel set; rows with no GTEx holdout events are left blank.  The bar plot shows
+parcel-specific improvement relative to the naive AHBA-fill baseline for parcels with
+available leave-one-region-out evaluations.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{figs/loro_method_summary_bars_allgene.pdf}
+\caption{Cohort-level summary of leave-one-region-out diagnostics over the full gene
+set.  Mean Pearson correlation, mean RMSE, and mean improvement relative to the naive
+AHBA-fill baseline are shown for both atlas-completion models and the naive baseline.}
+\end{figure}
+
+\section{Discussion}
+DLAM and PLAM share a common scientific aim: to infer a subject-complete parcel-by-gene atlas
+from sparse GTEx regional measurements by borrowing structure from AHBA.  Their main
+difference lies in what is treated as primary.  DLAM treats each
+subject as the starting point, estimates a subject-specific latent basis whose spatial
+structure is revealed by PLS, and then transports that basis into the atlas frame.
+PLAM treats the atlas as the starting point, defines a global latent
+geometry there, and then expresses each subject as a smooth, orthogonally aligned
+perturbation of that geometry.
+
+This distinction has practical consequences.  DLAM is modular and
+interpretable at each step, which makes it attractive for diagnosing where alignment
+or extrapolation may fail.  PLAM is more coherent because
+calibration, alignment, latent completion, and uncertainty all live in a single
+atlas-referenced latent system.  That coherence is what makes Gaussian-process
+deviation conditioning natural in the probabilistic formulation: the GP is not
+interpolating gene expression directly, but a low-dimensional deviation field whose
+spatial smoothness is biologically and statistically motivated \cite{rasmussen2006gpml}.
+
+The two approaches should therefore not be understood simply as different stages of a
+software pipeline.  They represent two different answers to the same problem.  DLAM
+provides a transparent latent transport view built from subject-specific components,
+whereas PLAM provides a global
+generative view in which atlas structure, subject alignment, subject deviation, and
+calibration are estimated jointly in a common latent space.
+
+\begin{thebibliography}{99}
+
+\bibitem[Hawrylycz et~al.(2012)]{hawrylycz2012anatomically}
+M.~J. Hawrylycz et~al.
+\newblock An anatomically comprehensive atlas of the adult human brain transcriptome.
+\newblock {\em Nature}, 489:391--399, 2012.
+
+\bibitem[GTEx Consortium(2013)]{gtex2013genotype}
+The GTEx Consortium.
+\newblock The genotype-tissue expression (GTEx) project.
+\newblock {\em Nature Genetics}, 45:580--585, 2013.
+
+\bibitem[GTEx Consortium(2017)]{gtex2017genetic}
+The GTEx Consortium.
+\newblock Genetic effects on gene expression across human tissues.
+\newblock {\em Nature}, 550:204--213, 2017.
+
+\bibitem[GTEx Consortium(2020)]{gtex2020atlas}
+The GTEx Consortium.
+\newblock The GTEx Consortium atlas of genetic regulatory effects across human tissues.
+\newblock {\em Science}, 369:1318--1330, 2020.
+
+\bibitem[Arnatkevi{\v{c}}i{\={u}}t{\.{e}} et~al.(2019)]{arnatkeviciute2019practical}
+A. Arnatkevi{\v{c}}i{\={u}}t{\.{e}}, B.~D. Fulcher, and A. Fornito.
+\newblock A practical guide to linking brain-wide gene expression and neuroimaging data.
+\newblock {\em NeuroImage}, 189:353--367, 2019.
+
+\bibitem[Markello et~al.(2021)]{markello2021abagen}
+R.~D. Markello et~al.
+\newblock Standardizing workflows in imaging transcriptomics with the abagen toolbox.
+\newblock {\em eLife}, 10:e72129, 2021.
+
+\bibitem[Richiardi et~al.(2015)]{richiardi2015correlated}
+J. Richiardi et~al.
+\newblock Correlated gene expression supports synchronous activity in brain networks.
+\newblock {\em Science}, 348:1241--1244, 2015.
+
+\bibitem[Fornito et~al.(2019)]{fornito2019bridging}
+A. Fornito, A. Arnatkevi{\v{c}}i{\={u}}t{\.{e}}, and B.~D. Fulcher.
+\newblock Bridging the gap between connectome and transcriptome.
+\newblock {\em Trends in Cognitive Sciences}, 23:34--50, 2019.
+
+\bibitem[Burt et~al.(2018)]{burt2018hierarchy}
+J.~B. Burt et~al.
+\newblock Hierarchy of transcriptomic specialization across human cortex captured by
+structural neuroimaging topography.
+\newblock {\em Nature Neuroscience}, 21:1251--1259, 2018.
+
+\bibitem[Vogel et~al.(2023)]{vogel2023molecular}
+J.~W. Vogel et~al.
+\newblock Molecular gradients and cross-atlas spatial transcriptomics alignment.
+\newblock {\em Proceedings of the National Academy of Sciences},
+120:e2219137121, 2023.
+
+\bibitem[Geladi and Kowalski(1986)]{geladi1986pls}
+P. Geladi and B.~R. Kowalski.
+\newblock Partial least-squares regression: a tutorial.
+\newblock {\em Analytica Chimica Acta}, 185:1--17, 1986.
+
+\bibitem[de~Jong(1993)]{dejong1993simpls}
+S. de~Jong.
+\newblock SIMPLS: an alternative approach to partial least squares regression.
+\newblock {\em Journal of Chemometrics}, 7:251--263, 1993.
+
+\bibitem[Wold et~al.(2001)]{wold2001pls}
+S. Wold, M. Sj\"ostr\"om, and L. Eriksson.
+\newblock PLS-regression: a basic tool of chemometrics.
+\newblock {\em Chemometrics and Intelligent Laboratory Systems}, 58:109--130, 2001.
+
+\bibitem[Sch\"onemann(1966)]{schonemann1966procrustes}
+P.~H. Sch\"onemann.
+\newblock A generalized solution of the orthogonal Procrustes problem.
+\newblock {\em Psychometrika}, 31:1--10, 1966.
+
+\bibitem[Johnson et~al.(2007)]{johnson2007combat}
+W.~E. Johnson, C. Li, and A. Rabinovic.
+\newblock Adjusting batch effects in microarray expression data using empirical Bayes
+methods.
+\newblock {\em Biostatistics}, 8:118--127, 2007.
+
+\bibitem[Bolstad et~al.(2003)]{bolstad2003normalization}
+B.~M. Bolstad et~al.
+\newblock A comparison of normalization methods for high density oligonucleotide array
+data based on variance and bias.
+\newblock {\em Bioinformatics}, 19:185--193, 2003.
+
+\bibitem[Tipping and Bishop(1999)]{tipping1999ppca}
+M.~E. Tipping and C.~M. Bishop.
+\newblock Probabilistic principal component analysis.
+\newblock {\em Journal of the Royal Statistical Society, Series B}, 61:611--622, 1999.
+
+\bibitem[Huber(1981)]{huber1981robust}
+P.~J. Huber.
+\newblock {\em Robust Statistics}.
+\newblock Wiley, New York, 1981.
+
+\bibitem[Rasmussen and Williams(2006)]{rasmussen2006gpml}
+C.~E. Rasmussen and C.~K.~I. Williams.
+\newblock {\em Gaussian Processes for Machine Learning}.
+\newblock MIT Press, 2006.
+
+\bibitem[Cressie(1993)]{cressie1993statistics}
+N.~A.~C. Cressie.
+\newblock {\em Statistics for Spatial Data}.
+\newblock Wiley, 1993.
+
+\bibitem[Stuart et~al.(2019)]{stuart2019comprehensive}
+T. Stuart et~al.
+\newblock Comprehensive integration of single-cell data.
+\newblock {\em Cell}, 177:1888--1902, 2019.
+
+\bibitem[Korsunsky et~al.(2019)]{korsunsky2019harmony}
+I. Korsunsky et~al.
+\newblock Fast, sensitive and accurate integration of single-cell data with Harmony.
+\newblock {\em Nature Methods}, 16:1289--1296, 2019.
+
+\bibitem[Lotfollahi et~al.(2022)]{lotfollahi2022scarches}
+M. Lotfollahi et~al.
+\newblock Mapping single-cell data to reference atlases by transfer learning.
+\newblock {\em Nature Biotechnology}, 40:121--130, 2022.
+
+\bibitem[Li et~al.(2022)]{li2022tangram}
+B. Li et~al.
+\newblock Integrating spatial transcriptomics and single-cell transcriptomics with
+Tangram.
+\newblock {\em Nature Methods}, 19:317--324, 2022.
+
+\bibitem[Kleshchevnikov et~al.(2022)]{kleshchevnikov2022cell2location}
+V. Kleshchevnikov et~al.
+\newblock Cell2location maps fine-grained cell types in spatial transcriptomics.
+\newblock {\em Nature Biotechnology}, 40:661--671, 2022.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --account=torch_pr_59_tandon_advanced
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=04:00:00
+#SBATCH --mem=32G
+#SBATCH --job-name=loro_subj_test
+#SBATCH --output=/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp/out/slurm/loro_subj_%j.out
+#SBATCH --error=/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp/out/slurm/loro_subj_%j.err
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp}"
+SUBJECT_ID="${SUBJECT_ID:-GTEX-14ASI}"
+MODEL_NAME="${MODEL_NAME:-all}"
+GENE_SCOPE="${GENE_SCOPE:-hvg}"
+USE_CACHE="${USE_CACHE:-true}"
+
+cd "${REPO_ROOT}"
+mkdir -p out/slurm
+
+echo "[single-subject] repo=${REPO_ROOT} subject=${SUBJECT_ID} model=${MODEL_NAME} scope=${GENE_SCOPE}"
+
+SINGULARITY_CMD="source /ext3/env.sh && python3 ar_utils/run_loro_cache_batch.py \
+  --subject \"${SUBJECT_ID}\" \
+  --model \"${MODEL_NAME}\" \
+  --gene-scope \"${GENE_SCOPE}\" \
+  --use-cache \"${USE_CACHE}\""
+
+singularity exec --fakeroot \
+  --overlay "/scratch/$USER/envs/vformer_env/overlay-25GB-500K.ext3:ro" \
+  /share/apps/images/cuda12.8.1-cudnn9.8.0-ubuntu24.04.2.sif \
+  /bin/bash -lc "${SINGULARITY_CMD}"
+
+echo "[single-subject] done"

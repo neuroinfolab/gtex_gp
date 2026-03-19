@@ -1,19 +1,19 @@
 # AHBA-GTEx Latent Alignment and Imputation
 
-This repository contains the current Python workflow for transcriptomic alignment between the Allen Human Brain Atlas (AHBA) and GTEx brain samples.
+This repository contains a Python workflow for brain-wide alignment between gene expression samples from the Allen Human Brain Atlas (AHBA) and Genotype-Tissue Expression (GTEx) Portal. 
 
 The canonical user entrypoint is a single notebook:
 - `notebooks/ahba_gtex_writeup_end_to_end.ipynb`
 
 That notebook orchestrates the full write-up workflow from a raw `gxp_samples.csv` file:
-- shared harmonization,
-- naive atlas-fill baseline,
-- DLAM,
-- PLAM,
-- all-gene leave-one-region-out evaluation,
-- atlas-level figures,
-- representative-subject figures,
-- manuscript-facing tables and figures.
+- shared harmonization
+- naive atlas-fill baseline
+- DLAM
+- PLAM
+- all-gene leave-one-region-out evaluation
+- atlas-level figures
+- representative-subject figures
+- manuscript-facing tables and figures
 
 ## Repository layout
 
