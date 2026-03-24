@@ -16,6 +16,9 @@ SUBJECT_ID="${SUBJECT_ID:-GTEX-14ASI}"
 MODEL_NAME="${MODEL_NAME:-all}"
 GENE_SCOPE="${GENE_SCOPE:-hvg}"
 USE_CACHE="${USE_CACHE:-true}"
+LATENT_DIM="${LATENT_DIM:-3}"
+DYNAMIC_RANK="${DYNAMIC_RANK:-false}"
+PLAM_MAX_RANK="${PLAM_MAX_RANK:-10}"
 
 cd "${REPO_ROOT}"
 mkdir -p out/slurm
@@ -26,7 +29,10 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 ar_utils/run_loro_cache_batch.py
   --subject \"${SUBJECT_ID}\" \
   --model \"${MODEL_NAME}\" \
   --gene-scope \"${GENE_SCOPE}\" \
-  --use-cache \"${USE_CACHE}\""
+  --use-cache \"${USE_CACHE}\" \
+  --latent-dim \"${LATENT_DIM}\" \
+  --dynamic-rank \"${DYNAMIC_RANK}\" \
+  --plam-latent-dim-max \"${PLAM_MAX_RANK}\""
 
 singularity exec --fakeroot \
   --overlay "/scratch/$USER/envs/vformer_env/overlay-25GB-500K.ext3:ro" \

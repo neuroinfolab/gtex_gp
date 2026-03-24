@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
     p.add_argument("--latent-dim", type=int, default=SubjectCacheConfig.latent_dim)
+    p.add_argument("--dynamic-rank", default=str(SubjectCacheConfig.dynamic_rank).lower())
+    p.add_argument("--plam-latent-dim-max", type=int, default=SubjectCacheConfig.plam_latent_dim_max)
     p.add_argument("--plam-max-iters", type=int, default=SubjectCacheConfig.plam_max_iters)
     p.add_argument("--lambda-w", type=float, default=SubjectCacheConfig.lambda_w)
     p.add_argument("--lambda-z", type=float, default=SubjectCacheConfig.lambda_z)
@@ -72,6 +74,8 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
         latent_dim=int(a.latent_dim),
+        dynamic_rank=_parse_bool(a.dynamic_rank),
+        plam_latent_dim_max=int(a.plam_latent_dim_max),
         plam_max_iters=int(a.plam_max_iters),
         lambda_w=float(a.lambda_w),
         lambda_z=float(a.lambda_z),

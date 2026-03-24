@@ -1,35 +1,32 @@
 # `ar_utils` Subject-Wise LORO Cache Architecture
 
-This folder adds a scalable, subject-wise cache workflow for strict LORO outputs.
+This folder provides scalable subject-wise LORO cache generation and cache-based EDA helpers.
 
 ## Goals
 
-- Persist model-specific subject tensors to avoid rerunning long LORO loops.
-- Keep shape compatible with downstream code: `subject x parcel x gene` (single-subject files are `parcel x gene`).
-- Preserve masks for modular evaluation and comparison against held-out GTEx truth and AHBA distributions.
+- Persist subject/model outputs to avoid rerunning long LORO loops.
+- Keep downstream-friendly tensors (`parcel x gene` per subject file).
+- Preserve masks for strict held-out evaluation and full-map imputation analyses.
 
 ## Outputs
 
 Default root:
-
 - `out/loro_subject_cache/<gene_scope>/<model>/<subject>.npz`
 - `out/loro_subject_cache/<gene_scope>/<model>/<subject>.json`
 
-Default testing scope:
+`gene_scope`:
+- `allgenes` or `hvg`
 
-- `gene_scope=hvg` (faster for development/testing).
-
-Each subject/model `.npz` contains:
-
-- `predictions_subject_h` (`150 x G`) final tensor:
-  - LORO-held parcels use strict held-out prediction.
-  - Remaining parcels use model-specific fallback completion.
-- `fallback_subject_h` (`150 x G`) model fallback completion.
-- `truth_loro_h` (`150 x G`) held-out harmonized GTEx truth (`NaN` outside `loro_eval_mask`).
-- `gtex_mask` (`150`) parcels observed for that subject.
-- `loro_eval_mask` (`150`) parcels with successful strict LORO fold prediction.
-- `imputed_mask` (`150`) complement of `loro_eval_mask`.
-- `held_out_parcels`, `skipped_holds`, `gene_names`, `parcel_idx`, `subject_id`, `model_name`.
+Each `.npz` contains:
+- `predictions_subject_h` (`150 x G`): final fused map
+  - strict LORO predictions at `loro_eval_mask`
+  - model-specific fallback for non-LORO parcels
+- `fallback_subject_h` (`150 x G`): fallback-only full-brain completion
+- `truth_loro_h` (`150 x G`): held-out harmonized GTEx truth (`NaN` outside eval mask)
+- `gtex_mask` (`150`): global GTEx-observed parcel mask (cohort-level)
+- `loro_eval_mask` (`150`): subject-specific strict LORO eval parcels
+- `imputed_mask` (`150`): complement of `loro_eval_mask`
+- `skipped_holds`, `gene_names`, `parcel_idx`, `subject_id`, `model_name`
 
 ## Scripts
 
@@ -37,11 +34,11 @@ Each subject/model `.npz` contains:
   - Build cache for one subject and one/all models.
 
 - `run_loro_cache_batch.py`
-  - Batch driver:
-    - all subjects
-    - one explicit subject
-    - one subject by index
-    - one array-task subject (`--from-sbatch-array`)
+  - Batch driver supporting:
+    - all subjects,
+    - explicit subject,
+    - subject by index,
+    - sbatch-array subject selection.
 
 ## SBATCH Launchers (repo root)
 
@@ -49,24 +46,37 @@ Each subject/model `.npz` contains:
   - one-subject smoke test.
 
 - `run_loro_cache_array.sbatch`
-  - array execution, one subject per task.
+  - all-subject array run, one subject per task.
 
 ## Typical Usage
 
 Single subject local:
 
 ```bash
-python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope hvg --use-cache true
+python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --use-cache true
 ```
 
-Array (cluster):
+Single subject (sbatch):
 
 ```bash
-sbatch run_loro_cache_array.sbatch
+SUBJECT_ID=GTEX-14ASI MODEL_NAME=all GENE_SCOPE=allgenes sbatch run_loro_cache_single_subject.sbatch
+```
+
+All subjects (sbatch array):
+
+```bash
+GENE_SCOPE=allgenes sbatch run_loro_cache_array.sbatch
+```
+
+Dynamic-rank PLAM experiment (rank capped by `PLAM_MAX_RANK` and per-fold train coverage):
+
+```bash
+MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch run_loro_cache_array.sbatch
 ```
 
 ## Notes
 
-- Cache validity is based on config hash + source signatures (csv/hvg path, size, mtime).
-- `use_cache=true` is default and skips recomputation when a valid subject/model cache exists.
-- This workflow is intentionally independent of the current `allgene_loro` stage manifest so it can scale per subject.
+- Cache validity uses config hash + source signatures.
+- `use_cache=true` is default and skips valid subject/model recomputation.
+- Dynamic rank can be enabled for PLAM with `--dynamic-rank true` (or `DYNAMIC_RANK=true` in sbatch launchers).
+- This workflow is designed for modular downstream analysis, not only manuscript panel generation.

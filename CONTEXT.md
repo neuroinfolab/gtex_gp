@@ -1,0 +1,97 @@
+# Repo Context
+
+## Purpose
+
+`gtex_gp` is the AHBA<->GTEx atlas-alignment repo used to:
+- harmonize AHBA and GTEx gene expression into a shared domain,
+- complete sparse GTEx subject maps over the full atlas,
+- evaluate completion quality with strict leave-one-region-out (LORO) validation,
+- generate manuscript-facing figures/tables.
+
+## Current Development Direction
+
+Near-term work is centered on:
+- expanding `ar_utils` wrappers and reusable analysis functions,
+- iterative feature development in `results_eda_cached_predictions_allgenes.ipynb`,
+- later synchronization of stable patterns into `results_eda_cached_predictions_hvg.ipynb`.
+- rank-comparison EDA via all-genes variants:
+  - `results_eda_cached_predictions_allgenes_rank3.ipynb`
+  - `results_eda_cached_predictions_allgenes_rank4.ipynb`
+  - `results_eda_cached_predictions_allgenes_dynamicrank.ipynb`
+
+## Main Entrypoints
+
+- `README.md` — top-level usage and commands
+- `notebooks/ahba_gtex_writeup_end_to_end.ipynb` — canonical manuscript workflow
+- `scripts/build_dual_model_loro_metric_panels.py` — manuscript LORO panel builder
+- `ar_utils/run_loro_subject_cache.py` — per-subject cache builder
+- `ar_utils/run_loro_cache_batch.py` — batch/array subject driver
+- `ar_utils/results_eda.py` — cache-based EDA utilities
+- `results_eda_cached_predictions_allgenes.ipynb` — primary EDA notebook
+- `results_eda_cached_predictions_hvg.ipynb` — fast-scope counterpart
+
+## Key Recent Changes (Important)
+
+1. Subject-wise `.npz` caching for naive/DLAM/PLAM under `out/loro_subject_cache/...`.
+2. Strict LORO-at-evaluable-parcels + single full-data fallback elsewhere.
+3. Cache schema includes masks for downstream modular evaluation:
+   - `gtex_mask` (global GTEx parcels),
+   - `loro_eval_mask` (subject-specific strict eval parcels),
+   - `imputed_mask` (non-LORO parcels).
+4. DLAM gate default lowered to `c_min=4` so low-coverage eligible subjects are fit in LORO folds.
+5. PLAM dynamic-rank support added:
+   - `dynamic_rank=true|false`
+   - `plam_latent_dim_max` (default cap `10`)
+   - fold-level rank persisted as `plam_fold_latent_dim` in cache `.npz`.
+6. Root-level sbatch launchers now pass:
+   - `LATENT_DIM`
+   - `DYNAMIC_RANK`
+   - `PLAM_MAX_RANK`
+7. EDA config now supports model folder remapping (`*_cache_dirname`) for comparisons like:
+   - `plam_rank3`
+   - `plam_rank4`
+   - `plam_dynamicrank`
+
+## Core LORO Semantics
+
+- Fold unit is a **subject-observed parcel**.
+- For each fold, one parcel from one subject is removed from training.
+- Harmonization is re-fit on fold training data.
+- Held-out truth is harmonized with that fold harmonizer.
+- Strict fold prediction is evaluated only at held-out parcel(s).
+- Final `predictions_subject_h` is a fused map (strict LORO where available + fallback elsewhere).
+
+## Data / Path Assumptions
+
+Default raw inputs:
+- `data/raw/gxp_samples.csv`
+- `data/raw/ahba_100hvg.txt`
+
+Default outputs:
+- write-up pipeline: `out/notebook_writeup/`
+- subject caches: `out/loro_subject_cache/`
+- slurm logs: `out/slurm/`
+
+## Do Not Casually Modify
+
+- LORO fold semantics (held-out parcel policy, fold harmonization behavior)
+- cache field names/shapes consumed by EDA notebooks
+- sbatch container activation pattern (`source /ext3/env.sh`) without checking cluster impact
+- manuscript asset naming conventions used by TeX docs/scripts
+
+## HPC Notes
+
+- Root sbatches are the current launch points:
+  - `run_loro_cache_single_subject.sbatch`
+  - `run_loro_cache_array.sbatch`
+- Scripts are CPU-oriented; no required GPU path for current cache generation.
+- Array jobs are one subject per task and support `GENE_SCOPE=hvg|allgenes`.
+- Dynamic-rank PLAM launch example:
+  - `MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch run_loro_cache_array.sbatch`
+
+## Quick Start (Agent Onboarding)
+
+1. Read `README.md` and this file.
+2. Inspect `ar_utils/results_eda.py` and the all-genes notebook first.
+3. Treat all-genes notebook as source of active iteration.
+4. Once stable, port equivalent behavior into HVG notebook.

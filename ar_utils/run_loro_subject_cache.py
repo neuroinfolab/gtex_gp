@@ -44,7 +44,7 @@ class SubjectCacheConfig:
     gene_scope: str = "hvg"
     use_cache: bool = True
     min_observed_parcels: int = 5
-    c_min: int = 8
+    c_min: int = 4
     n_comp_target: int = 3
     ridge_alpha_bridge: float = 1e-2
     rbf_smoothing: float = 0.10
@@ -53,6 +53,8 @@ class SubjectCacheConfig:
     seed: int = 123
     combat_use_covariates: bool = True
     latent_dim: int = 3
+    dynamic_rank: bool = False
+    plam_latent_dim_max: int = 10
     plam_max_iters: int = 5
     lambda_w: float = 1.0
     lambda_z: float = 1.0
@@ -201,8 +203,12 @@ def _full_model_fallback(
         )
         return np.asarray(pred["X_full_h"], dtype=np.float64)
     if model_name == "plam":
+        if bool(cfg.dynamic_rank):
+            k_use = int(min(max(1, int(cfg.plam_latent_dim_max)), max(1, int(len(obs_idx)))))
+        else:
+            k_use = int(cfg.latent_dim)
         ucfg = UnifiedGenerativeConfig(
-            latent_dim=int(cfg.latent_dim),
+            latent_dim=int(k_use),
             max_iters=int(cfg.plam_max_iters),
             lambda_w=float(cfg.lambda_w),
             lambda_z=float(cfg.lambda_z),
@@ -256,7 +262,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     global_obs_idx = np.sort(gtex_raw["parcel_idx"].astype(np.int32).unique())
     gtex_mask = np.zeros(n_parcels, dtype=bool)
     gtex_mask[global_obs_idx] = True
-    coverage_tier = "ge8" if int(len(obs_idx_all)) >= int(cfg.c_min) else "lt8"
+    coverage_tier = "ge_cmin" if int(len(obs_idx_all)) >= int(cfg.c_min) else "lt_cmin"
 
     fallback_full = _full_model_fallback(
         model_name=model_name,
@@ -275,6 +281,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     truth_loro = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
     loro_eval_mask = np.zeros(n_parcels, dtype=bool)
     skipped_holds: List[int] = []
+    plam_fold_latent_dim = np.full(n_parcels, -1, dtype=np.int32)
 
     for fold_id, hold in enumerate(obs_idx_all.tolist()):
         hold = int(hold)
@@ -340,8 +347,12 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
             if len(obs_idx) < 2:
                 skipped_holds.append(hold)
                 continue
+            if bool(cfg.dynamic_rank):
+                k_use = int(min(max(1, int(cfg.plam_latent_dim_max)), max(1, int(len(obs_idx)))))
+            else:
+                k_use = int(cfg.latent_dim)
             ucfg = UnifiedGenerativeConfig(
-                latent_dim=int(cfg.latent_dim),
+                latent_dim=int(k_use),
                 max_iters=int(cfg.plam_max_iters),
                 lambda_w=float(cfg.lambda_w),
                 lambda_z=float(cfg.lambda_z),
@@ -363,11 +374,15 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                 fold_ctx={"prior_h": ahba_h_mat, "obs_idx": obs_idx},
             )
             pred = np.asarray(res["x_hat_h_full"], dtype=np.float64)[hold, :]
+            plam_fold_latent_dim[hold] = int(k_use)
 
         pred_loro[hold, :] = pred
         truth_loro[hold, :] = truth
         loro_eval_mask[hold] = True
-        print(f"[{model_name} fold] {subject} fold={fold_id} hold={hold}")
+        if model_name == "plam":
+            print(f"[{model_name} fold] {subject} fold={fold_id} hold={hold} k={int(plam_fold_latent_dim[hold])}")
+        else:
+            print(f"[{model_name} fold] {subject} fold={fold_id} hold={hold}")
 
     predictions_subject_h = fallback_full.copy()
     predictions_subject_h[loro_eval_mask, :] = pred_loro[loro_eval_mask, :]
@@ -386,6 +401,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         loro_eval_mask=loro_eval_mask.astype(np.int8),
         imputed_mask=imputed_mask.astype(np.int8),
         skipped_holds=np.asarray(sorted(set(skipped_holds)), dtype=np.int32),
+        plam_fold_latent_dim=plam_fold_latent_dim.astype(np.int32),
     )
     meta = {
         "status": "ok",
@@ -400,6 +416,8 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         "n_gtex_observed_subject": int(len(obs_idx_all)),
         "n_loro_eval": int(loro_eval_mask.sum()),
         "coverage_tier": coverage_tier,
+        "dynamic_rank": bool(cfg.dynamic_rank),
+        "plam_latent_dim_max": int(cfg.plam_latent_dim_max),
         "timestamp": io_utils.utc_timestamp(),
         "config": asdict(cfg),
     }
@@ -427,6 +445,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
     p.add_argument("--latent-dim", type=int, default=SubjectCacheConfig.latent_dim)
+    p.add_argument("--dynamic-rank", default=str(SubjectCacheConfig.dynamic_rank).lower())
+    p.add_argument("--plam-latent-dim-max", type=int, default=SubjectCacheConfig.plam_latent_dim_max)
     p.add_argument("--plam-max-iters", type=int, default=SubjectCacheConfig.plam_max_iters)
     p.add_argument("--lambda-w", type=float, default=SubjectCacheConfig.lambda_w)
     p.add_argument("--lambda-z", type=float, default=SubjectCacheConfig.lambda_z)
@@ -462,6 +482,8 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
         latent_dim=int(a.latent_dim),
+        dynamic_rank=_parse_bool(a.dynamic_rank),
+        plam_latent_dim_max=int(a.plam_latent_dim_max),
         plam_max_iters=int(a.plam_max_iters),
         lambda_w=float(a.lambda_w),
         lambda_z=float(a.lambda_z),
