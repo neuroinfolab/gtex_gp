@@ -29,6 +29,7 @@ data/bha2/
 data/gtex/
 data/fixtures/
 datasets/
+ar_utils/context_packages/
 
 # Legacy root-level local inputs
 gxp_samples.csv

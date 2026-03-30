@@ -21,8 +21,21 @@ Rank-specific all-genes EDA variants:
 Companion fast-scope notebook:
 - `results_eda_cached_predictions_hvg.ipynb`
 
+Publication-ready cached-results notebook:
+- `results_eda_publication_ready.ipynb`
+
 Single-subject cache smoke/debug notebook:
 - `loro_single_subject_test.ipynb`
+
+DLAM single-subject diagnostics notebook:
+- `results_eda_dlam_single_subject_deepdive.ipynb`
+
+## Recent Workflow Additions (High Level)
+
+- Subject-wise LORO caches now support stable downstream EDA without re-running full notebook workflows.
+- PLAM rank experiments are supported via cache directories such as `plam_rank3`, `plam_rank4`, and `plam_dynamicrank`.
+- `ar_utils/dlam_diagnostics.py` provides DLAM full-fit/LORO diagnostics with reusable plotting utilities.
+- Publication-facing EDA is now centralized in `results_eda_publication_ready.ipynb` using cache-backed utilities.
 
 ## Repository Layout
 
@@ -118,3 +131,5 @@ GENE_SCOPE=hvg sbatch run_loro_cache_array.sbatch
   - `naive_cache_dirname`, `dlam_cache_dirname`, `plam_cache_dirname`
   - useful for side-by-side rank experiments (`plam_rank3`, `plam_rank4`, `plam_dynamicrank`)
 - See `CONTEXT.md` for a fast onboarding summary intended for parallel agents.
+
+Last updated at: 2026-03-30

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -103,6 +104,26 @@ def _rmse_safe(x: np.ndarray, y: np.ndarray) -> float:
         return np.nan
     d = x[m] - y[m]
     return float(np.sqrt(np.mean(d**2)))
+
+
+def _metrics_panel_label(metrics_df: pd.DataFrame, panel_label: str | None = None) -> str:
+    if panel_label is not None and str(panel_label).strip():
+        return str(panel_label).strip()
+    if "eval_gene_mode" not in metrics_df.columns:
+        return ""
+    vals = sorted(set(metrics_df["eval_gene_mode"].astype(str).str.lower().dropna().tolist()))
+    if len(vals) == 1:
+        v = vals[0]
+        if v == "hvg":
+            return "HVG"
+        if v == "all":
+            return "All genes"
+        if v == "custom":
+            return "Custom genes"
+        return v
+    if len(vals) > 1:
+        return "Mixed panels"
+    return ""
 
 
 def _pretty_gtex_label(name: str) -> str:
@@ -962,7 +983,12 @@ def compute_subject_metrics_from_cache_gene_subset(
     return out
 
 
-def plot_coverage_vs_accuracy(metrics_df: pd.DataFrame, metric: str = "pearson_r", figsize: Tuple[float, float] = (7.2, 4.2)) -> Tuple[plt.Figure, plt.Axes]:
+def plot_coverage_vs_accuracy(
+    metrics_df: pd.DataFrame,
+    metric: str = "pearson_r",
+    figsize: Tuple[float, float] = (7.2, 4.2),
+    panel_label: str | None = None,
+) -> Tuple[plt.Figure, plt.Axes]:
     if metric not in {"pearson_r", "rmse"}:
         raise ValueError("metric must be one of: pearson_r, rmse")
     d = (
@@ -988,7 +1014,9 @@ def plot_coverage_vs_accuracy(metrics_df: pd.DataFrame, metric: str = "pearson_r
     ax.set_xlabel("GTEx observed parcels per subject", fontsize=FONT["label"])
     ylabel = "Mean LORO Pearson r" if metric == "pearson_r" else "Mean LORO RMSE"
     ax.set_ylabel(ylabel, fontsize=FONT["label"])
-    ax.set_title("Coverage vs LORO accuracy", fontsize=FONT["title"])
+    p_lbl = _metrics_panel_label(metrics_df, panel_label=panel_label)
+    ttl = "Coverage vs LORO accuracy" if p_lbl == "" else f"Coverage vs LORO accuracy ({p_lbl})"
+    ax.set_title(ttl, fontsize=FONT["title"])
     ax.grid(True, alpha=0.2)
     ax.legend(frameon=False)
     return fig, ax
@@ -998,6 +1026,7 @@ def plot_loro_subject_summary_bars(
     metrics_df: pd.DataFrame,
     figsize: Tuple[float, float] = (10.2, 4.2),
     use_sem: bool = False,
+    panel_label: str | None = None,
 ) -> Tuple[plt.Figure, np.ndarray, pd.DataFrame]:
     need = {"model", "pearson_r", "rmse"}
     if not need.issubset(set(metrics_df.columns)):
@@ -1035,6 +1064,9 @@ def plot_loro_subject_summary_bars(
     labels = [MODEL_LABELS[m] for m in summ["model"].tolist()]
     colors = [MODEL_COLORS[m] for m in summ["model"].tolist()]
 
+    p_lbl = _metrics_panel_label(metrics_df, panel_label=panel_label)
+    sfx = "" if p_lbl == "" else f" ({p_lbl})"
+
     bar0 = axes[0].bar(
         x,
         summ["pearson_mean"].to_numpy(dtype=np.float64),
@@ -1044,7 +1076,7 @@ def plot_loro_subject_summary_bars(
         capsize=4,
         ecolor="#3a3a3a",
     )
-    axes[0].set_title(f"Mean Subject LORO Pearson r ({err_lbl} bars)", fontsize=FONT["title"] + 3)
+    axes[0].set_title(f"Mean Subject LORO Pearson r ({err_lbl} bars){sfx}", fontsize=FONT["title"] + 3)
     axes[0].set_ylabel("Pearson r", fontsize=FONT["label"] + 2)
     axes[0].set_xticks(x.tolist())
     axes[0].set_xticklabels(labels, rotation=0, fontsize=FONT["tick"] + 2)
@@ -1060,7 +1092,7 @@ def plot_loro_subject_summary_bars(
         capsize=4,
         ecolor="#3a3a3a",
     )
-    axes[1].set_title(f"Mean Subject LORO RMSE ({err_lbl} bars)", fontsize=FONT["title"] + 3)
+    axes[1].set_title(f"Mean Subject LORO RMSE ({err_lbl} bars){sfx}", fontsize=FONT["title"] + 3)
     axes[1].set_ylabel("RMSE", fontsize=FONT["label"] + 2)
     axes[1].set_xticks(x.tolist())
     axes[1].set_xticklabels(labels, rotation=0, fontsize=FONT["tick"] + 2)
@@ -1247,7 +1279,9 @@ def plot_fold_combo_ranked(
     prepost: Dict[str, object],
     model: str = "dlam",
     metric: str = "mean_pearson",  # mean_pearson | mean_rmse
-    figsize: Tuple[float, float] = (18.0, 7.2),
+    figsize: Tuple[float, float] = (13.8, 7.2),
+    show_fold_xticklabels: bool = False,
+    show_y_axis_label: bool = True,
 ) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
     m = str(model).lower()
     if metric not in {"mean_pearson", "mean_rmse"}:
@@ -1269,22 +1303,39 @@ def plot_fold_combo_ranked(
     y = d[metric].to_numpy(dtype=np.float64)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=False)
-    ax.plot(x, y, color=MODEL_COLORS.get(m, "#333333"), linewidth=0.9, alpha=0.95)
-    ax.scatter(x, y, s=2, color=MODEL_COLORS.get(m, "#333333"), alpha=0.5, linewidths=0)
-    ax.set_title(f"{MODEL_LABELS.get(m, m.upper())}: fold-combo ranking ({metric})", fontsize=FONT["title"] + 1)
-    ax.set_xlabel("Fold combo (worst -> best)", fontsize=FONT["label"] + 1)
-    ax.set_ylabel(ylab, fontsize=FONT["label"] + 1)
+    ax.plot(x, y, color=MODEL_COLORS.get(m, "#333333"), linewidth=1.7, alpha=0.98)
+    ax.scatter(x, y, s=6.0, color=MODEL_COLORS.get(m, "#333333"), alpha=0.62, linewidths=0)
+    n_combo = int(len(d))
+    ax.set_title(
+        f"{MODEL_LABELS.get(m, m.upper())}: fold-combo ranking ({metric}; n={n_combo:,})",
+        fontsize=FONT["title"] + 6,
+    )
+    ax.set_xlabel("Fold combo (worst -> best)", fontsize=FONT["label"] + 5)
+    if bool(show_y_axis_label):
+        ax.set_ylabel(ylab, fontsize=FONT["label"] + 5)
+    else:
+        ax.set_ylabel("")
     ax.grid(True, axis="y", alpha=0.2)
+    ax.tick_params(axis="y", labelsize=FONT["tick"] + 4)
 
     # Show only worst/median/best fold_key labels on x-axis.
     idx_w = 0
     idx_m = int(len(d) // 2)
     idx_b = int(len(d) - 1)
     tick_idx = [idx_w, idx_m, idx_b]
-    tick_lbl = [str(d.iloc[idx_w]["fold_key"]), str(d.iloc[idx_m]["fold_key"]), str(d.iloc[idx_b]["fold_key"])]
-    ax.set_xticks(tick_idx)
-    ax.set_xticklabels(tick_lbl, rotation=90, ha="center", fontsize=FONT["tick"])
-    fig.subplots_adjust(bottom=0.44)
+    def _compact_fold_tick(row: pd.Series) -> str:
+        hold, train = _parse_fold_key(str(row["fold_key"]))
+        train_txt = ",".join(str(t) for t in train)
+        return f"test:{hold}\ntrain:{train_txt}"
+
+    tick_lbl = [_compact_fold_tick(d.iloc[idx_w]), _compact_fold_tick(d.iloc[idx_m]), _compact_fold_tick(d.iloc[idx_b])]
+    if bool(show_fold_xticklabels):
+        ax.set_xticks(tick_idx)
+        ax.set_xticklabels(tick_lbl, rotation=90, ha="center", fontsize=FONT["tick"] + 3)
+    else:
+        ax.set_xticks([])
+        ax.set_xticklabels([])
+    fig.subplots_adjust(bottom=0.28, right=0.74)
 
     # Decode fold keys to GTEx-native tissue labels and print under the plot.
     p2g = _parcel_to_gtex_label_map(prepost)
@@ -1312,12 +1363,30 @@ def plot_fold_combo_ranked(
 
     pick_df = pd.DataFrame(picks)
     lines = []
+    def _wrap_words(s: str, n_words: int = 7) -> str:
+        toks = str(s).split()
+        if len(toks) <= n_words:
+            return str(s)
+        chunks = [" ".join(toks[i : i + n_words]) for i in range(0, len(toks), n_words)]
+        return "\n".join(chunks)
     for _, r in pick_df.iterrows():
-        lines.append(
-            f"{r['rank_tag']}: hold={r['hold_gtex']} | train={', '.join(r['train_gtex'])} "
-            f"| score={r['score']:.3f} | coverage={int(r['coverage'])} | n_subj={int(r['n_subjects'])}"
+        train_txt = _wrap_words(", ".join(r["train_gtex"]), n_words=7)
+        line = (
+            f"{r['rank_tag'].upper()}\n"
+            f"hold: {r['hold_gtex']}\n"
+            f"train: {train_txt}\n"
+            f"score={r['score']:.3f} | coverage={int(r['coverage'])} | n_subj={int(r['n_subjects'])}"
         )
-    fig.text(0.01, 0.01, "\n".join(lines), ha="left", va="bottom", fontsize=FONT["tick"])
+        lines.append(line)
+    fig.text(
+        0.755,
+        0.50,
+        "\n\n".join(lines),
+        ha="left",
+        va="center",
+        fontsize=FONT["tick"] + 2,
+        bbox={"facecolor": "white", "edgecolor": "#8a8a8a", "alpha": 0.92, "boxstyle": "round,pad=0.35"},
+    )
     return fig, ax, pick_df
 
 
@@ -1458,7 +1527,13 @@ def select_subject_by_model(cfg: EDAConfig, mode: str = "median", metric: str = 
     return str(row["subject"])
 
 
-def _subject_scatter_payload(cfg: EDAConfig, model: str, subject: str) -> Dict[str, np.ndarray]:
+def _subject_scatter_payload(
+    cfg: EDAConfig,
+    model: str,
+    subject: str,
+    eval_gene_mode: str = "all",  # all | hvg | custom
+    custom_gene_list: Sequence[str] | None = None,
+) -> Dict[str, np.ndarray]:
     p = (_model_cache_root(cfg, str(model).lower()) / f"{subject}.npz").resolve()
     if not p.exists():
         raise FileNotFoundError(p)
@@ -1466,10 +1541,31 @@ def _subject_scatter_payload(cfg: EDAConfig, model: str, subject: str) -> Dict[s
     pred = z["predictions_subject_h"].astype(np.float64)
     truth = z["truth_loro_h"].astype(np.float64)
     mask = z["loro_eval_mask"].astype(bool)
-    g = pred.shape[1]
+    gene_names = [str(g) for g in z["gene_names"].tolist()]
+
+    mode = str(eval_gene_mode).lower()
+    if mode not in {"all", "hvg", "custom"}:
+        raise ValueError("eval_gene_mode must be one of: all, hvg, custom")
+    if mode == "all":
+        gi = np.arange(len(gene_names), dtype=np.int32)
+    elif mode == "hvg":
+        hdr = io_utils.load_gene_header_and_hvg(_resolve_repo_path(cfg.csv_path), _resolve_repo_path(cfg.hvg_path))
+        hvg_set = set(str(g) for g in hdr["genes_hvg"])
+        gi = np.asarray([i for i, g in enumerate(gene_names) if g in hvg_set], dtype=np.int32)
+        if int(gi.size) == 0:
+            raise RuntimeError(f"No HVG overlap found in cache gene_names for subject={subject}, model={model}")
+    else:
+        if custom_gene_list is None:
+            raise ValueError("custom_gene_list is required when eval_gene_mode='custom'")
+        cset = set(str(g) for g in custom_gene_list)
+        gi = np.asarray([i for i, g in enumerate(gene_names) if g in cset], dtype=np.int32)
+        if int(gi.size) == 0:
+            raise RuntimeError(f"No custom gene overlap found in cache gene_names for subject={subject}, model={model}")
+
+    g = int(gi.size)
     parcel_ids = np.where(mask)[0]
-    x = truth[mask, :].ravel()
-    y = pred[mask, :].ravel()
+    x = truth[mask, :][:, gi].ravel()
+    y = pred[mask, :][:, gi].ravel()
     parcel_per_point = np.repeat(parcel_ids, g)
     gene_per_point = np.tile(np.arange(g, dtype=np.int32), len(parcel_ids))
     finite = np.isfinite(x) & np.isfinite(y)
@@ -1494,24 +1590,61 @@ def plot_single_subject_scatter_triplet(
     subject_mode: str = "median",
     subject_id: str | None = None,
     rank_model: str = "plam",
-    color_by: str = "parcel",
+    color_by: str = "parcel",  # parcel | gene | none | density
     top_n: int = 10,
+    eval_gene_mode: str = "all",  # all | hvg | custom
+    custom_gene_list: Sequence[str] | None = None,
+    density_gridsize: int = 70,
+    density_cmap: str = "magma",
+    density_mincnt: int = 1,
     figsize: Tuple[float, float] = (15.0, 4.8),
 ) -> Tuple[plt.Figure, np.ndarray, str]:
     subject = str(subject_id) if subject_id else select_subject_by_model(cfg, mode=str(subject_mode), metric="pearson_r", model=str(rank_model))
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
+    mode_eval = str(eval_gene_mode).lower()
+    mode_color = str(color_by).lower()
+    if mode_eval == "all":
+        s_bg = 2.0
+        s_fg = 3.0
+        a_bg = 0.12
+        a_fg = 0.28
+    else:
+        s_bg = 5.0
+        s_fg = 7.0
+        a_bg = 0.15
+        a_fg = 0.45
+
     for ax, model in zip(axes, MODEL_ORDER):
-        p = _subject_scatter_payload(cfg, model=model, subject=subject)
+        p = _subject_scatter_payload(
+            cfg,
+            model=model,
+            subject=subject,
+            eval_gene_mode=eval_gene_mode,
+            custom_gene_list=custom_gene_list,
+        )
         x = p["x"]
         y = p["y"]
-        ids = p["parcel_ids"] if str(color_by).lower() == "parcel" else p["gene_ids"]
-        tops = _top_ids(ids, top_n)
-        base = np.isin(ids, tops, invert=True)
-        ax.scatter(x[base], y[base], s=5, alpha=0.15, color="#9a9a9a", linewidths=0)
-        palette = sns.color_palette("tab10", n_colors=max(1, len(tops)))
-        for c, tid in zip(palette, tops):
-            m = ids == tid
-            ax.scatter(x[m], y[m], s=7, alpha=0.45, color=c, linewidths=0)
+        if mode_color == "density":
+            ax.hexbin(
+                x,
+                y,
+                gridsize=int(density_gridsize),
+                mincnt=int(density_mincnt),
+                cmap=str(density_cmap),
+                linewidths=0.0,
+                bins="log",
+            )
+        elif mode_color == "none":
+            ax.scatter(x, y, s=s_fg, alpha=a_fg, color="#4f4f4f", linewidths=0)
+        else:
+            ids = p["parcel_ids"] if mode_color == "parcel" else p["gene_ids"]
+            tops = _top_ids(ids, top_n)
+            base = np.isin(ids, tops, invert=True)
+            ax.scatter(x[base], y[base], s=s_bg, alpha=a_bg, color="#9a9a9a", linewidths=0)
+            palette = sns.color_palette("tab10", n_colors=max(1, len(tops)))
+            for c, tid in zip(palette, tops):
+                m = ids == tid
+                ax.scatter(x[m], y[m], s=s_fg, alpha=a_fg, color=c, linewidths=0)
         lim_lo = float(np.nanpercentile(np.r_[x, y], 0.5))
         lim_hi = float(np.nanpercentile(np.r_[x, y], 99.5))
         if not np.isfinite(lim_lo) or not np.isfinite(lim_hi) or lim_hi <= lim_lo:
@@ -1523,18 +1656,517 @@ def plot_single_subject_scatter_triplet(
         ax.set_ylim(lim_lo - pad, lim_hi + pad)
         pear = _pearson_safe(x, y)
         rmse = _rmse_safe(x, y)
-        n_theory = int(p["n_parcels"] * p["n_genes"])
-        legend_title = f"parcels={p['n_parcels']}, genes={p['n_genes']}\nmax={n_theory:,}, plotted={p['n_points']:,}"
-        ax.legend(
-            [f"r={pear:.3f}", f"rmse={rmse:.3f}"],
-            title=legend_title,
-            frameon=True,
-            loc="upper left",
-            fontsize=FONT["legend"],
-            title_fontsize=FONT["legend"],
+        if mode_color == "density":
+            color_desc = f"density (hexbin, gridsize={int(density_gridsize)})"
+        elif mode_color == "none":
+            color_desc = "none"
+        else:
+            color_desc = f"{mode_color} (top {int(top_n)})"
+        ax.text(
+            0.985,
+            0.03,
+            f"r={pear:.3f}\nrmse={rmse:.3f}\nn={p['n_points']:,}\ncolored by: {color_desc}",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=FONT["small"],
+            bbox={"facecolor": "white", "edgecolor": "#808080", "alpha": 0.9, "boxstyle": "round,pad=0.25"},
         )
         ax.set_title(f"{MODEL_LABELS[model]} ({subject})", fontsize=FONT["title"])
         ax.set_xlabel("True (held-out harmonized GTEx)", fontsize=FONT["label"])
         ax.set_ylabel("Predicted", fontsize=FONT["label"])
         ax.grid(True, alpha=0.15)
     return fig, axes, subject
+
+
+def select_representative_subject_by_gtex_median(
+    prepost: Dict[str, object],
+    gene_mode: str = "hvg",  # hvg | allgenes | custom
+    gene_list: Sequence[str] | None = None,
+    space: str = "harmonized",  # harmonized | raw
+    min_coverage: int = 5,
+    require_coverage: int | None = None,
+) -> Tuple[str, pd.DataFrame]:
+    mode = str(space).lower()
+    if mode not in {"harmonized", "raw"}:
+        raise ValueError("space must be one of: harmonized, raw")
+
+    genes_req = _resolve_gene_panel(prepost, gene_mode=gene_mode, gene_list=gene_list)
+    genes = _restrict_genes_to_available(genes_req, prepost["genes"])
+    all_genes = [str(g) for g in prepost["genes"]]
+    gi = [all_genes.index(g) for g in genes]
+
+    cube = np.asarray(prepost["harm_cube" if mode == "harmonized" else "raw_cube"], dtype=np.float64)[:, :, gi]
+    obs_mask = np.asarray(prepost["obs_mask"], dtype=bool)
+    subjects = [str(s) for s in prepost["subjects"]]
+    coverage = obs_mask.sum(axis=1).astype(int)
+
+    cohort_med = np.nanmedian(cube, axis=0)  # parcel x gene
+    rows: List[Dict[str, object]] = []
+    for i, sid in enumerate(subjects):
+        cov = int(coverage[i])
+        if cov < int(min_coverage):
+            continue
+        if require_coverage is not None and cov != int(require_coverage):
+            continue
+        m = np.isfinite(cube[i]) & np.isfinite(cohort_med) & obs_mask[i][:, None]
+        n = int(m.sum())
+        if n < 2:
+            continue
+        x = cube[i][m]
+        y = cohort_med[m]
+        rows.append(
+            {
+                "subject": sid,
+                "coverage": cov,
+                "n_points": n,
+                "pearson_r_to_cohort_median": _pearson_safe(x, y),
+                "rmse_to_cohort_median": _rmse_safe(x, y),
+            }
+        )
+
+    d = pd.DataFrame(rows)
+    if len(d) == 0:
+        raise RuntimeError("No candidate subjects after representative-subject filtering.")
+    d = d.sort_values(["rmse_to_cohort_median", "subject"], ascending=[True, True]).reset_index(drop=True)
+    return str(d.iloc[0]["subject"]), d
+
+
+def _subject_gene_indices(prepost: Dict[str, object], gene_mode: str, gene_list: Sequence[str] | None) -> Tuple[List[str], List[int]]:
+    genes_req = _resolve_gene_panel(prepost, gene_mode=gene_mode, gene_list=gene_list)
+    genes = _restrict_genes_to_available(genes_req, prepost["genes"])
+    all_genes = [str(g) for g in prepost["genes"]]
+    gi = [all_genes.index(g) for g in genes]
+    return genes, gi
+
+
+def _ahba_harmonized_median_matrix(prepost: Dict[str, object], genes: List[str]) -> np.ndarray:
+    return _parcel_median_matrix(prepost["ahba_h"], genes, prepost["target_meta"])
+
+
+def _load_subject_prediction_matrix(cfg: EDAConfig, model: str, subject_id: str, gi: List[int]) -> np.ndarray:
+    model_l = str(model).lower()
+    npz_path = (_model_cache_root(cfg, model_l) / f"{subject_id}.npz").resolve()
+    if not npz_path.exists() and model_l == "plam":
+        root = (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower()).resolve()
+        # Fallback search for plam variants (e.g., plam_rank3/plam_rank4/plam_dynamicrank).
+        candidates = []
+        for d in sorted(root.glob("plam*")):
+            if d.is_dir():
+                p = (d / f"{subject_id}.npz").resolve()
+                if p.exists():
+                    candidates.append(p)
+        if len(candidates) > 0:
+            npz_path = candidates[0]
+    if not npz_path.exists():
+        raise FileNotFoundError(
+            f"Missing cache for model={model_l}, subject={subject_id}. Tried: {npz_path}. "
+            f"If using PLAM rank variants, set cfg.plam_cache_dirname (e.g., plam_rank4/plam_dynamicrank)."
+        )
+    z = np.load(npz_path, allow_pickle=True)
+    return np.asarray(z["predictions_subject_h"], dtype=np.float64)[:, gi]
+
+
+def _reduce_gene_axis_for_render(
+    mats: List[np.ndarray],
+    labels: List[str],
+    max_genes: int | None,
+    reduce_mode: str = "mean",  # mean | median
+) -> Tuple[List[np.ndarray], List[str]]:
+    if max_genes is None:
+        return mats, labels
+    mg = int(max_genes)
+    if mg <= 0:
+        return mats, labels
+    g = int(mats[0].shape[1]) if len(mats) else 0
+    if g <= mg:
+        return mats, labels
+    # Even-width binning along gene axis for lightweight rendering.
+    bins = np.linspace(0, g, num=mg + 1, dtype=np.int32)
+    out: List[np.ndarray] = []
+    mode = str(reduce_mode).lower()
+    for m in mats:
+        red = np.full((m.shape[0], mg), np.nan, dtype=np.float64)
+        for bi in range(mg):
+            lo, hi = int(bins[bi]), int(bins[bi + 1])
+            if hi <= lo:
+                hi = min(lo + 1, g)
+            sl = m[:, lo:hi]
+            if mode == "median":
+                red[:, bi] = np.nanmedian(sl, axis=1)
+            else:
+                red[:, bi] = np.nanmean(sl, axis=1)
+        out.append(red)
+    new_labels = [f"bin{i+1}" for i in range(mg)]
+    return out, new_labels
+
+
+def _subject_label_map(prepost: Dict[str, object], subject_id: str, label_mode: str) -> List[str]:
+    target_meta = prepost["target_meta"]
+    ahba_labels = target_meta["tissue_or_parcel"].astype(str).tolist()
+    sub_rows = prepost["gtex_eligible_raw"][prepost["gtex_eligible_raw"]["subject"].astype(str) == str(subject_id)].copy()
+    gtex_by_parcel = (
+        sub_rows.groupby("parcel_idx")["tissue_or_parcel"]
+        .apply(lambda s: "; ".join(sorted(set(_pretty_gtex_label(str(x)) for x in s.dropna().tolist()))))
+        .to_dict()
+    )
+    mode = str(label_mode).lower()
+    if mode not in {"gtex", "ahba", "both"}:
+        raise ValueError("label_mode must be one of: gtex, ahba, both")
+    labels: List[str] = []
+    for pidx, ahba_name in enumerate(ahba_labels):
+        gname = gtex_by_parcel.get(int(pidx), "")
+        if mode == "ahba":
+            labels.append(str(ahba_name))
+        elif mode == "both":
+            right = str(gname) if str(gname) else str(ahba_name)
+            labels.append(f"{ahba_name}: {right}")
+        else:
+            labels.append(str(gname) if str(gname) else str(ahba_name))
+    return labels
+
+
+def plot_subject_model_matrix_panel(
+    cfg: EDAConfig,
+    prepost: Dict[str, object],
+    subject_id: str,
+    gene_mode: str = "hvg",  # hvg | allgenes | custom
+    gene_list: Sequence[str] | None = None,
+    label_mode: str = "gtex",  # gtex | ahba | both
+    observed_only: bool = False,
+    label_stride: int | None = None,
+    cmap: str = "viridis",
+    figsize: Tuple[float, float] = (16.0, 11.0),
+    render_max_genes: int | None = 600,
+    render_reduce_mode: str = "mean",  # mean | median
+) -> Tuple[plt.Figure, np.ndarray]:
+    subjects = [str(s) for s in prepost["subjects"]]
+    sid = str(subject_id)
+    if sid not in set(subjects):
+        raise ValueError(f"Subject not found in eligible PREPOST set: {sid}")
+    si = subjects.index(sid)
+
+    genes, gi = _subject_gene_indices(prepost, gene_mode=gene_mode, gene_list=gene_list)
+    ahba_h = _ahba_harmonized_median_matrix(prepost, genes)
+    sparse = np.asarray(prepost["harm_cube"][si, :, :], dtype=np.float64)[:, gi]
+    obs = np.asarray(prepost["obs_mask"][si, :], dtype=bool)
+    labels = _subject_label_map(prepost, sid, label_mode=label_mode)
+
+    model_preds = {m: _load_subject_prediction_matrix(cfg, m, sid, gi) for m in MODEL_ORDER}
+    model_resid = {m: model_preds[m] - ahba_h for m in MODEL_ORDER}
+
+    if bool(observed_only):
+        keep = obs
+    else:
+        keep = np.isfinite(sparse).any(axis=1) | np.isfinite(ahba_h).any(axis=1)
+    keep_idx = np.where(keep)[0]
+    labels = [labels[i] for i in keep_idx.tolist()]
+
+    ahba_h = ahba_h[keep, :]
+    sparse = sparse[keep, :]
+    for m in MODEL_ORDER:
+        model_preds[m] = model_preds[m][keep, :]
+        model_resid[m] = model_resid[m][keep, :]
+
+    render_mats_all = [ahba_h, sparse, model_preds["naive"], model_preds["dlam"], model_preds["plam"], model_resid["naive"], model_resid["dlam"], model_resid["plam"]]
+    render_mats_all, _ = _reduce_gene_axis_for_render(render_mats_all, genes, render_max_genes, render_reduce_mode)
+    ahba_h, sparse, model_preds["naive"], model_preds["dlam"], model_preds["plam"], model_resid["naive"], model_resid["dlam"], model_resid["plam"] = render_mats_all
+
+    vals = np.r_[
+        ahba_h.ravel(),
+        sparse.ravel(),
+        model_preds["naive"].ravel(),
+        model_preds["dlam"].ravel(),
+        model_preds["plam"].ravel(),
+    ]
+    vals = np.asarray(vals, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if int(vals.size):
+        vmin = float(np.nanpercentile(vals, 1.0))
+        vmax = float(np.nanpercentile(vals, 99.0))
+    else:
+        vmin, vmax = -1.0, 1.0
+
+    resid_vals = np.r_[model_resid["naive"].ravel(), model_resid["dlam"].ravel(), model_resid["plam"].ravel()]
+    resid_vals = resid_vals[np.isfinite(resid_vals)]
+    if int(resid_vals.size):
+        lim_r = float(np.nanpercentile(np.abs(resid_vals), 99.0))
+        lim_r = lim_r if np.isfinite(lim_r) and lim_r > 0 else 1.0
+    else:
+        lim_r = 1.0
+
+    fig, axes = plt.subplots(3, 4, figsize=figsize, constrained_layout=True, sharex=True, sharey=True)
+    col_titles = ["AHBA median (harmonized)", f"Sparse GTEx ({sid})", f"Completed GTEx ({sid})", "Residual (GTEx - AHBA)"]
+    for c, t in enumerate(col_titles):
+        axes[0, c].set_title(t, fontsize=FONT["title"] + 2)
+
+    for r, m in enumerate(MODEL_ORDER):
+        mats = [ahba_h, sparse, model_preds[m], model_resid[m]]
+        for c, mat in enumerate(mats):
+            if c == 3:
+                im = axes[r, c].imshow(mat, aspect="auto", interpolation="none", cmap="coolwarm", vmin=-lim_r, vmax=lim_r)
+            else:
+                im = axes[r, c].imshow(mat, aspect="auto", interpolation="none", cmap=str(cmap), vmin=vmin, vmax=vmax)
+            axes[r, c].set_xlabel("Genes", fontsize=FONT["label"])
+            axes[r, c].set_ylabel("")
+            axes[r, c].grid(False, which="both")
+            axes[r, c].xaxis.grid(False, which="both")
+            axes[r, c].yaxis.grid(False, which="both")
+            axes[r, c].minorticks_off()
+        axes[r, 0].text(
+            -0.14,
+            0.5,
+            MODEL_LABELS[m],
+            transform=axes[r, 0].transAxes,
+            rotation=90,
+            va="center",
+            ha="center",
+            fontsize=FONT["title"] + 4,
+            fontweight="bold",
+        )
+
+    if label_stride is None or int(label_stride) <= 0:
+        step = max(1, int(np.ceil(len(labels) / 18)))
+    else:
+        step = max(1, int(label_stride))
+    for ax in axes.ravel().tolist():
+        ax.set_yticks([])
+        ax.set_yticklabels([])
+
+    fig.colorbar(axes[0, 0].images[0], ax=axes[:, :3].ravel().tolist(), shrink=0.58, label="Expression value")
+    fig.colorbar(axes[0, 3].images[0], ax=axes[:, 3].ravel().tolist(), shrink=0.58, label="Residual")
+    return fig, axes
+
+
+def _scatter_with_optional_coloring(
+    ax: plt.Axes,
+    x: np.ndarray,
+    y: np.ndarray,
+    ids: np.ndarray,
+    color_by: str = "parcel",
+    top_n: int = 10,
+    point_size: float = 7.0,
+    alpha: float = 0.45,
+    marker: str = "o",
+) -> List[Tuple[int, tuple]]:
+    mode = str(color_by).lower()
+    legend_items: List[Tuple[int, tuple]] = []
+    if mode == "none":
+        ax.scatter(x, y, s=point_size, alpha=alpha, color="#4f4f4f", linewidths=0, marker=marker)
+        return legend_items
+    tops = _top_ids(ids, top_n)
+    base = np.isin(ids, tops, invert=True)
+    ax.scatter(
+        x[base],
+        y[base],
+        s=max(3.0, point_size - 2.0),
+        alpha=max(0.12, alpha * 0.35),
+        color="#a4a4a4",
+        linewidths=0,
+        marker=marker,
+    )
+    palette = sns.color_palette("tab10", n_colors=max(1, len(tops)))
+    for c, tid in zip(palette, tops):
+        m = ids == tid
+        ax.scatter(x[m], y[m], s=point_size, alpha=alpha, color=c, linewidths=0, marker=marker)
+        legend_items.append((int(tid), c))
+    return legend_items
+
+
+def plot_subject_alignment_scatter_panel(
+    cfg: EDAConfig,
+    prepost: Dict[str, object],
+    subject_id: str,
+    gene_mode: str = "hvg",  # hvg | allgenes | custom
+    gene_list: Sequence[str] | None = None,
+    parcels: str = "observed",  # observed | all
+    color_by: str = "parcel",  # parcel | gene | none
+    top_n: int = 10,
+    overlay_observed_in_predictions: bool = False,
+    figsize: Tuple[float, float] = (18.0, 4.8),
+    show_color_legend: bool = True,
+) -> Tuple[plt.Figure, np.ndarray]:
+    subjects = [str(s) for s in prepost["subjects"]]
+    sid = str(subject_id)
+    if sid not in set(subjects):
+        raise ValueError(f"Subject not found in eligible PREPOST set: {sid}")
+    si = subjects.index(sid)
+
+    genes, gi = _subject_gene_indices(prepost, gene_mode=gene_mode, gene_list=gene_list)
+    ahba_h = _ahba_harmonized_median_matrix(prepost, genes)
+    obs_h = np.asarray(prepost["harm_cube"][si, :, :], dtype=np.float64)[:, gi]
+    obs_mask = np.asarray(prepost["obs_mask"][si, :], dtype=bool)
+
+    eval_mode = str(parcels).lower()
+    if eval_mode not in {"observed", "all"}:
+        raise ValueError("parcels must be one of: observed, all")
+
+    if eval_mode == "observed":
+        row_mask = obs_mask.copy()
+    else:
+        row_mask = np.isfinite(ahba_h).any(axis=1)
+
+    def _flatten_pair(y_mat: np.ndarray, mask_rows: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        xx = ahba_h[mask_rows, :].ravel()
+        yy = y_mat[mask_rows, :].ravel()
+        parcel_ids = np.repeat(np.where(mask_rows)[0], len(genes))
+        gene_ids = np.tile(np.arange(len(genes), dtype=np.int32), int(mask_rows.sum()))
+        m = np.isfinite(xx) & np.isfinite(yy)
+        return xx[m], yy[m], parcel_ids[m], gene_ids[m]
+
+    x_obs, y_obs, pid_obs, gid_obs = _flatten_pair(obs_h, obs_mask)
+    ids_obs = pid_obs if str(color_by).lower() == "parcel" else gid_obs
+
+    fig, axes = plt.subplots(1, 4, figsize=figsize, constrained_layout=True)
+    _scatter_with_optional_coloring(
+        axes[0], x_obs, y_obs, ids_obs, color_by=color_by, top_n=top_n, point_size=8.0, alpha=0.48, marker="o"
+    )
+    pear = _pearson_safe(x_obs, y_obs)
+    rmse = _rmse_safe(x_obs, y_obs)
+    axes[0].set_title(f"{sid} Observed GTEx vs AHBA", fontsize=FONT["title"] + 2)
+    m_leg = axes[0].legend(
+        handles=[Line2D([0], [0], marker="o", color="none", markerfacecolor="#606060", markersize=5, label="Observed")],
+        loc="upper left",
+        frameon=True,
+        fontsize=FONT["small"],
+    )
+    axes[0].add_artist(m_leg)
+    color_desc = "none" if str(color_by).lower() == "none" else f"{str(color_by).lower()} (top {int(top_n)})"
+    axes[0].text(
+        0.985,
+        0.03,
+        f"r={pear:.3f}\nrmse={rmse:.3f}\nn={len(x_obs):,}\ncolored by: {color_desc}",
+        transform=axes[0].transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=FONT["small"],
+        bbox={"facecolor": "white", "edgecolor": "#808080", "alpha": 0.9, "boxstyle": "round,pad=0.25"},
+    )
+
+    for ax, model in zip(axes[1:], MODEL_ORDER):
+        pred = _load_subject_prediction_matrix(cfg, model=model, subject_id=sid, gi=gi)
+        x, y, pid, gid = _flatten_pair(pred, row_mask)
+        ids = pid if str(color_by).lower() == "parcel" else gid
+
+        if bool(overlay_observed_in_predictions):
+            axes_obs_x, axes_obs_y, _, _ = _flatten_pair(obs_h, row_mask)
+            ax.scatter(axes_obs_x, axes_obs_y, s=8.0, alpha=0.20, color="#8f8f8f", linewidths=0, zorder=1, marker="o")
+
+        _scatter_with_optional_coloring(
+            ax, x, y, ids, color_by=color_by, top_n=top_n, point_size=9.5, alpha=0.50, marker="^"
+        )
+        pr = _pearson_safe(x, y)
+        rr = _rmse_safe(x, y)
+        ax.set_title(f"{sid} {MODEL_LABELS[model]} vs AHBA", fontsize=FONT["title"] + 2)
+        if bool(overlay_observed_in_predictions):
+            m_handles = [
+                Line2D([0], [0], marker="o", color="none", markerfacecolor="#8f8f8f", markersize=5, label="Observed"),
+                Line2D([0], [0], marker="^", color="none", markerfacecolor="#606060", markersize=6, label="Predicted"),
+            ]
+        else:
+            m_handles = [Line2D([0], [0], marker="^", color="none", markerfacecolor="#606060", markersize=6, label="Predicted")]
+        m_leg = ax.legend(handles=m_handles, loc="upper left", frameon=True, fontsize=FONT["small"])
+        ax.add_artist(m_leg)
+        color_desc = "none" if str(color_by).lower() == "none" else f"{str(color_by).lower()} (top {int(top_n)})"
+        ax.text(
+            0.985,
+            0.03,
+            f"r={pr:.3f}\nrmse={rr:.3f}\nn={len(x):,}\ncolored by: {color_desc}",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=FONT["small"],
+            bbox={"facecolor": "white", "edgecolor": "#808080", "alpha": 0.9, "boxstyle": "round,pad=0.25"},
+        )
+
+    all_x = []
+    all_y = []
+    for ax in axes:
+        for c in ax.collections:
+            offs = c.get_offsets()
+            if len(offs):
+                all_x.append(np.asarray(offs[:, 0], dtype=np.float64))
+                all_y.append(np.asarray(offs[:, 1], dtype=np.float64))
+    if all_x:
+        xv = np.concatenate(all_x)
+        yv = np.concatenate(all_y)
+        lim_lo = float(np.nanpercentile(np.r_[xv, yv], 0.5))
+        lim_hi = float(np.nanpercentile(np.r_[xv, yv], 99.5))
+        if not np.isfinite(lim_lo) or not np.isfinite(lim_hi) or lim_hi <= lim_lo:
+            lim_lo = float(np.nanmin(np.r_[xv, yv]))
+            lim_hi = float(np.nanmax(np.r_[xv, yv]))
+        pad = 0.05 * max(lim_hi - lim_lo, 1e-3)
+        for ax in axes:
+            ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi], "k--", linewidth=0.9, alpha=0.75)
+            ax.set_xlim(lim_lo - pad, lim_hi + pad)
+            ax.set_ylim(lim_lo - pad, lim_hi + pad)
+
+    for ax in axes:
+        ax.set_xlabel("Observed AHBA median", fontsize=FONT["label"] + 1)
+        ax.tick_params(axis="both", which="major", labelsize=FONT["tick"], length=3.6, width=0.8, direction="out")
+        ax.tick_params(axis="both", which="minor", length=2.0, width=0.6, direction="out")
+        ax.grid(False, which="both")
+        ax.xaxis.grid(False, which="both")
+        ax.yaxis.grid(False, which="both")
+        ax.minorticks_on()
+    axes[0].set_ylabel("Observed GTEx value", fontsize=FONT["label"] + 1)
+    for ax in axes[1:]:
+        ax.set_ylabel("Predicted GTEx value", fontsize=FONT["label"] + 1)
+    return fig, axes
+
+
+def resolve_publication_subject(
+    cfg: EDAConfig,
+    prepost: Dict[str, object] | None = None,
+    subject_id: str | None = None,
+    mode: str = "representative",  # representative | model_median | model_best | model_worst
+    model: str = "plam",
+    metric: str = "pearson_r",
+    gene_mode: str = "hvg",
+    gene_list: Sequence[str] | None = None,
+    space: str = "harmonized",
+    min_coverage: int = 5,
+    require_coverage: int | None = None,
+) -> Tuple[str, pd.DataFrame]:
+    if subject_id is not None and str(subject_id).strip():
+        sid = str(subject_id).strip()
+        if prepost is not None:
+            if sid not in set(str(s) for s in prepost["subjects"]):
+                raise ValueError(f"subject_id={sid} not in eligible PREPOST subjects")
+        return sid, pd.DataFrame(
+            [
+                {
+                    "subject": sid,
+                    "selection_mode": "explicit_subject_id",
+                }
+            ]
+        )
+
+    sel_mode = str(mode).lower()
+    if sel_mode == "representative":
+        if prepost is None:
+            raise ValueError("prepost is required when mode='representative'")
+        sid, tbl = select_representative_subject_by_gtex_median(
+            prepost=prepost,
+            gene_mode=gene_mode,
+            gene_list=gene_list,
+            space=space,
+            min_coverage=min_coverage,
+            require_coverage=require_coverage,
+        )
+        tbl = tbl.copy()
+        tbl["selection_mode"] = "representative"
+        return sid, tbl
+
+    model_mode_map = {
+        "model_median": "median",
+        "model_best": "best",
+        "model_worst": "worst",
+    }
+    if sel_mode not in model_mode_map:
+        raise ValueError("mode must be one of: representative, model_median, model_best, model_worst")
+
+    sid = select_subject_by_model(cfg, mode=model_mode_map[sel_mode], metric=str(metric), model=str(model))
+    metrics_df = compute_subject_metrics_from_cache(cfg, model=str(model))
+    metrics_df["selection_mode"] = sel_mode
+    return str(sid), metrics_df

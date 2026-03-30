@@ -18,6 +18,10 @@ Near-term work is centered on:
   - `results_eda_cached_predictions_allgenes_rank3.ipynb`
   - `results_eda_cached_predictions_allgenes_rank4.ipynb`
   - `results_eda_cached_predictions_allgenes_dynamicrank.ipynb`
+- publication-facing cache EDA in:
+  - `results_eda_publication_ready.ipynb`
+- DLAM single-subject diagnostics in:
+  - `results_eda_dlam_single_subject_deepdive.ipynb`
 
 ## Main Entrypoints
 
@@ -27,8 +31,10 @@ Near-term work is centered on:
 - `ar_utils/run_loro_subject_cache.py` — per-subject cache builder
 - `ar_utils/run_loro_cache_batch.py` — batch/array subject driver
 - `ar_utils/results_eda.py` — cache-based EDA utilities
+- `ar_utils/dlam_diagnostics.py` — DLAM diagnostics fit/cache/plot utilities
 - `results_eda_cached_predictions_allgenes.ipynb` — primary EDA notebook
 - `results_eda_cached_predictions_hvg.ipynb` — fast-scope counterpart
+- `results_eda_publication_ready.ipynb` — publication-ready cached prediction panels
 
 ## Key Recent Changes (Important)
 
@@ -51,6 +57,8 @@ Near-term work is centered on:
    - `plam_rank3`
    - `plam_rank4`
    - `plam_dynamicrank`
+8. Publication EDA workflow now emphasizes cache-backed plotting with minimal recomputation.
+9. DLAM diagnostics were added for single-subject full-fit/LORO latent-alignment inspection.
 
 ## Core LORO Semantics
 
@@ -93,5 +101,8 @@ Default outputs:
 
 1. Read `README.md` and this file.
 2. Inspect `ar_utils/results_eda.py` and the all-genes notebook first.
-3. Treat all-genes notebook as source of active iteration.
-4. Once stable, port equivalent behavior into HVG notebook.
+3. Use `results_eda_publication_ready.ipynb` for publication panel iteration from caches.
+4. Use `results_eda_dlam_single_subject_deepdive.ipynb` for DLAM mechanism figures.
+5. Treat all-genes notebook as source of active iteration; port stable behavior into HVG notebook afterward.
+
+Last updated at: 2026-03-30
