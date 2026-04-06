@@ -48,6 +48,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--heteroscedastic", default=str(SubjectCacheConfig.heteroscedastic).lower())
     p.add_argument("--calibration-mode", default=SubjectCacheConfig.calibration_mode)
     p.add_argument("--uncertainty-shrink", default=str(SubjectCacheConfig.uncertainty_shrink).lower())
+    p.add_argument("--atlas-agg", choices=["mean", "median"], default=SubjectCacheConfig.atlas_agg)
+    p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=SubjectCacheConfig.gtex_rep_mode)
+    p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=SubjectCacheConfig.gtex_hemi_mode)
     return p.parse_args()
 
 
@@ -85,6 +88,9 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         heteroscedastic=_parse_bool(a.heteroscedastic),
         calibration_mode=str(a.calibration_mode),
         uncertainty_shrink=_parse_bool(a.uncertainty_shrink),
+        atlas_agg=str(a.atlas_agg).lower(),
+        gtex_rep_mode=str(a.gtex_rep_mode).lower(),
+        gtex_hemi_mode=str(a.gtex_hemi_mode).lower(),
     )
 
 

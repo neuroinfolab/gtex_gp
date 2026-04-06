@@ -65,9 +65,12 @@ Subject/model caches are written to:
 `<gene_scope>` is one of `allgenes` or `hvg`.
 
 Each `.npz` includes:
-- `predictions_subject_h` (`parcel x gene`): final fused map
-- `fallback_subject_h`: model fallback completion map
-- `truth_loro_h`: held-out harmonized truth (`NaN` outside `loro_eval_mask`)
+- `fullfit_subject_h` (`parcel x gene`): full-data completion/deployment map
+- `fullfit_subject_raw`: covariate-aware inverse-GTEx version of `fullfit_subject_h`
+- `loro_fused_subject_h`: final eval-ready fused map
+- `loro_fused_subject_raw`: covariate-aware inverse-GTEx version of `loro_fused_subject_h`
+- `loro_truth_subject_h`: held-out harmonized truth (`NaN` outside `loro_eval_mask`)
+- `loro_truth_subject_raw`: held-out parcel-averaged native GTEx truth (`NaN` outside `loro_eval_mask`)
 - `gtex_mask`: global GTEx-observed parcel mask (cohort-level)
 - `loro_eval_mask`: subject-specific parcels with strict held-out predictions
 - `imputed_mask`: complement of `loro_eval_mask`
@@ -81,6 +84,9 @@ Fusion behavior:
 Current defaults:
 - eligible subjects: `min_observed_parcels=5`
 - DLAM model gate: `c_min=4`
+- atlas/parcel aggregation: `atlas_agg=mean` (switchable to `median`)
+- GTEx representative point for parcel assignment: `gtex_rep_mode=medoid`
+- GTEx hemisphere preprocessing for parcel assignment: `gtex_hemi_mode=native` (switchable to `mirror_left`)
 - PLAM dynamic rank: opt-in (`dynamic_rank=false` by default)
 - dynamic-rank cap when enabled: `plam_latent_dim_max=10` (or `PLAM_MAX_RANK=10` in sbatch)
 
@@ -97,6 +103,18 @@ Single subject (local):
 
 ```bash
 python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --use-cache true
+```
+
+Median aggregation variant:
+
+```bash
+python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --atlas-agg median
+```
+
+Mirrored-left GTEx assignment with medoids:
+
+```bash
+python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --gtex-rep-mode medoid --gtex-hemi-mode mirror_left
 ```
 
 Single-subject sbatch:

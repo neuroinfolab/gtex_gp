@@ -52,15 +52,22 @@ class PiecewiseRobustZHarmonizer:
         out.loc[:, self.genes] = o.astype(np.float32)
         return out
 
-    def inverse_gtex(self, x_h_matrix: np.ndarray, subject_ids: Optional[np.ndarray] = None, systems: Optional[np.ndarray] = None) -> np.ndarray:
+    def inverse_gtex(
+        self,
+        x_h_matrix: np.ndarray,
+        subject_ids: Optional[np.ndarray] = None,
+        systems: Optional[np.ndarray] = None,
+        sample_df: Optional[pd.DataFrame] = None,
+    ) -> np.ndarray:
         if systems is None:
-            return self.global_model.inverse_gtex(x_h_matrix)
+            return self.global_model.inverse_gtex(x_h_matrix, sample_df=sample_df)
         out = np.zeros_like(x_h_matrix, dtype=np.float64)
         sys_arr = np.asarray(systems).astype(str)
         for sys in np.unique(sys_arr):
             idx = np.where(sys_arr == sys)[0]
             mdl = self.by_system.get(str(sys), self.global_model)
-            out[idx, :] = mdl.inverse_gtex(x_h_matrix[idx, :])
+            sub_df = None if sample_df is None else sample_df.iloc[idx, :].copy()
+            out[idx, :] = mdl.inverse_gtex(x_h_matrix[idx, :], sample_df=sub_df)
         return out
 
     def diagnostics(self) -> Dict[str, float]:

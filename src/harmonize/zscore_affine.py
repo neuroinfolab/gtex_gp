@@ -58,7 +58,12 @@ class ZScoreAffineHarmonizer:
         out.loc[:, self.genes] = h.astype(np.float32)
         return out
 
-    def inverse_gtex(self, x_h_matrix: np.ndarray, subject_ids: Optional[np.ndarray] = None) -> np.ndarray:
+    def inverse_gtex(
+        self,
+        x_h_matrix: np.ndarray,
+        subject_ids: Optional[np.ndarray] = None,
+        sample_df: Optional[pd.DataFrame] = None,
+    ) -> np.ndarray:
         z = (x_h_matrix - self.intercept) / self.slope
         return z * self.gtex_scale + self.gtex_loc
 

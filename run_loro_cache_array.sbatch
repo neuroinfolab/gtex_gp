@@ -19,6 +19,9 @@ USE_CACHE="${USE_CACHE:-true}"
 LATENT_DIM="${LATENT_DIM:-3}"
 DYNAMIC_RANK="${DYNAMIC_RANK:-false}"
 PLAM_MAX_RANK="${PLAM_MAX_RANK:-10}"
+ATLAS_AGG="${ATLAS_AGG:-mean}"
+GTEX_REP_MODE="${GTEX_REP_MODE:-medoid}"
+GTEX_HEMI_MODE="${GTEX_HEMI_MODE:-native}"
 
 cd "${REPO_ROOT}"
 mkdir -p out/slurm
@@ -32,7 +35,10 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 ar_utils/run_loro_cache_batch.py
   --use-cache \"${USE_CACHE}\" \
   --latent-dim \"${LATENT_DIM}\" \
   --dynamic-rank \"${DYNAMIC_RANK}\" \
-  --plam-latent-dim-max \"${PLAM_MAX_RANK}\""
+  --plam-latent-dim-max \"${PLAM_MAX_RANK}\" \
+  --atlas-agg \"${ATLAS_AGG}\" \
+  --gtex-rep-mode \"${GTEX_REP_MODE}\" \
+  --gtex-hemi-mode \"${GTEX_HEMI_MODE}\""
 
 singularity exec --fakeroot \
   --overlay "/scratch/$USER/envs/vformer_env/overlay-25GB-500K.ext3:ro" \

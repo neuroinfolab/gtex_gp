@@ -110,6 +110,7 @@ def run_subject(
     coords_full = np.asarray(subject_bundle["coords_full"], dtype=np.float64)
     target_meta = subject_bundle["target_meta"]
     harmonizer = method_bundle["harmonizer"]
+    inverse_df = subject_bundle.get("inverse_df")
 
     idx_to_pos = {int(p): i for i, p in enumerate(obs_idx_full.tolist())}
     if fold_mask is None:
@@ -131,7 +132,7 @@ def run_subject(
         X_h = np.asarray(atlas_bundle["ahba_h_full"], dtype=np.float64).copy()
         subj_ids = np.asarray([subject] * X_h.shape[0], dtype=object)
         try:
-            X_raw = harmonizer.inverse_gtex(X_h, subject_ids=subj_ids)
+            X_raw = harmonizer.inverse_gtex(X_h, subject_ids=subj_ids, sample_df=inverse_df)
         except TypeError:
             X_raw = harmonizer.inverse_gtex(X_h)
         X_h[overwrite_idx, :] = X_train_h
@@ -234,7 +235,7 @@ def run_subject(
     X_full_h = X_full_h.astype(np.float64)
     subj_ids = np.asarray([subject] * X_full_h.shape[0], dtype=object)
     try:
-        X_full_raw = harmonizer.inverse_gtex(X_full_h, subject_ids=subj_ids)
+        X_full_raw = harmonizer.inverse_gtex(X_full_h, subject_ids=subj_ids, sample_df=inverse_df)
     except TypeError:
         X_full_raw = harmonizer.inverse_gtex(X_full_h)
 

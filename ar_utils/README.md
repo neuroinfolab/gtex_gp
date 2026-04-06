@@ -18,11 +18,16 @@ Default root:
 - `allgenes` or `hvg`
 
 Each `.npz` contains:
-- `predictions_subject_h` (`150 x G`): final fused map
+- `fullfit_subject_h` (`150 x G`): full-data completion/deployment map
+  - observed subject parcels are preserved
+  - missing parcels are imputed by the chosen model
+- `fullfit_subject_raw` (`150 x G`): covariate-aware inverse-GTEx version of `fullfit_subject_h`
+- `loro_fused_subject_h` (`150 x G`): final fused eval map
   - strict LORO predictions at `loro_eval_mask`
-  - model-specific fallback for non-LORO parcels
-- `fallback_subject_h` (`150 x G`): fallback-only full-brain completion
-- `truth_loro_h` (`150 x G`): held-out harmonized GTEx truth (`NaN` outside eval mask)
+  - `fullfit_subject_h` for non-LORO parcels
+- `loro_fused_subject_raw` (`150 x G`): covariate-aware inverse-GTEx version of `loro_fused_subject_h`
+- `loro_truth_subject_h` (`150 x G`): held-out harmonized GTEx truth (`NaN` outside eval mask)
+- `loro_truth_subject_raw` (`150 x G`): held-out parcel-averaged native GTEx truth (`NaN` outside eval mask)
 - `gtex_mask` (`150`): global GTEx-observed parcel mask (cohort-level)
 - `loro_eval_mask` (`150`): subject-specific strict LORO eval parcels
 - `imputed_mask` (`150`): complement of `loro_eval_mask`
@@ -78,5 +83,7 @@ MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch ru
 
 - Cache validity uses config hash + source signatures.
 - `use_cache=true` is default and skips valid subject/model recomputation.
+- Parcel aggregation defaults to `--atlas-agg mean` and can be switched to `--atlas-agg median`.
+- GTEx parcel assignment defaults to `--gtex-rep-mode medoid --gtex-hemi-mode native`.
 - Dynamic rank can be enabled for PLAM with `--dynamic-rank true` (or `DYNAMIC_RANK=true` in sbatch launchers).
 - This workflow is designed for modular downstream analysis, not only manuscript panel generation.

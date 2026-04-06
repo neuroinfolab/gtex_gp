@@ -273,7 +273,12 @@ def load_dataset_bundle(csv_path: str, hvg_path: str, cfg: Mapping[str, Any]) ->
     paths = _stage_paths(out_root, stage)
     bundle_csv = paths["cache_dir"] / "subject_eligibility.csv"
     header = io_utils.load_gene_header_and_hvg(csv_resolved, hvg_resolved)
-    df = io_utils.read_expression_subset(csv_resolved, header["genes_hvg"])
+    df = io_utils.read_expression_subset(
+        csv_resolved,
+        header["genes_hvg"],
+        rep_mode=str(cfg.get("gtex_rep_mode", "medoid")).lower(),
+        hemi_mode=str(cfg.get("gtex_hemi_mode", "native")).lower(),
+    )
     ahba_raw = df[df["dataset_upper"] == "AHBA"].copy().reset_index(drop=True)
     gtex_raw = df[df["dataset_upper"] == "GTEX"].copy().reset_index(drop=True)
     target = build_target_parcels(ahba_raw)

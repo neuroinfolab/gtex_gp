@@ -45,6 +45,8 @@ class EDAConfig:
     gene_scope: str = "hvg"  # hvg | allgenes
     min_observed_parcels: int = 5
     combat_use_covariates: bool = True
+    gtex_rep_mode: str = "medoid"
+    gtex_hemi_mode: str = "native"
 
 
 def set_academic_style() -> None:
@@ -142,7 +144,12 @@ def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
     if not genes:
         raise RuntimeError(f"No genes found for scope={cfg.gene_scope}")
 
-    df = io_utils.read_expression_subset(csv_path, genes)
+    df = io_utils.read_expression_subset(
+        csv_path,
+        genes,
+        rep_mode=str(cfg.gtex_rep_mode).lower(),
+        hemi_mode=str(cfg.gtex_hemi_mode).lower(),
+    )
     ahba_raw = df[df["dataset_upper"] == "AHBA"].copy().reset_index(drop=True)
     gtex_raw = df[df["dataset_upper"] == "GTEX"].copy().reset_index(drop=True)
 
@@ -879,8 +886,8 @@ def compute_subject_metrics_from_cache(cfg: EDAConfig, model: str) -> pd.DataFra
             except Exception:
                 meta = {}
         z = np.load(npz_path, allow_pickle=True)
-        pred = z["predictions_subject_h"].astype(np.float64)
-        truth = z["truth_loro_h"].astype(np.float64)
+        pred = z["loro_fused_subject_h"].astype(np.float64)
+        truth = z["loro_truth_subject_h"].astype(np.float64)
         mask = z["loro_eval_mask"].astype(bool)
         x = truth[mask, :].ravel()
         y = pred[mask, :].ravel()
@@ -944,8 +951,8 @@ def compute_subject_metrics_from_cache_gene_subset(
                 meta = {}
 
         z = np.load(npz_path, allow_pickle=True)
-        pred = z["predictions_subject_h"].astype(np.float64)
-        truth = z["truth_loro_h"].astype(np.float64)
+        pred = z["loro_fused_subject_h"].astype(np.float64)
+        truth = z["loro_truth_subject_h"].astype(np.float64)
         mask = z["loro_eval_mask"].astype(bool)
         gene_names = [str(g) for g in z["gene_names"].tolist()]
         n_total_genes = int(len(gene_names))
@@ -1218,8 +1225,8 @@ def compute_fold_combo_metrics_from_cache(
                 continue
 
             z = np.load(npz_path, allow_pickle=True)
-            pred = z["predictions_subject_h"].astype(np.float64)
-            truth = z["truth_loro_h"].astype(np.float64)
+            pred = z["loro_fused_subject_h"].astype(np.float64)
+            truth = z["loro_truth_subject_h"].astype(np.float64)
             mask = z["loro_eval_mask"].astype(bool)
             gene_names = [str(x) for x in z["gene_names"].tolist()]
 
@@ -1538,8 +1545,8 @@ def _subject_scatter_payload(
     if not p.exists():
         raise FileNotFoundError(p)
     z = np.load(p, allow_pickle=True)
-    pred = z["predictions_subject_h"].astype(np.float64)
-    truth = z["truth_loro_h"].astype(np.float64)
+    pred = z["loro_fused_subject_h"].astype(np.float64)
+    truth = z["loro_truth_subject_h"].astype(np.float64)
     mask = z["loro_eval_mask"].astype(bool)
     gene_names = [str(g) for g in z["gene_names"].tolist()]
 
@@ -1764,7 +1771,7 @@ def _load_subject_prediction_matrix(cfg: EDAConfig, model: str, subject_id: str,
             f"If using PLAM rank variants, set cfg.plam_cache_dirname (e.g., plam_rank4/plam_dynamicrank)."
         )
     z = np.load(npz_path, allow_pickle=True)
-    return np.asarray(z["predictions_subject_h"], dtype=np.float64)[:, gi]
+    return np.asarray(z["loro_fused_subject_h"], dtype=np.float64)[:, gi]
 
 
 def _reduce_gene_axis_for_render(

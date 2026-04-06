@@ -187,10 +187,28 @@ class CombatHarmonizer:
         out.loc[:, self.genes] = x_corr.astype(np.float32)
         return out
 
-    def inverse_gtex(self, x_h_matrix: np.ndarray, subject_ids: Optional[np.ndarray] = None) -> np.ndarray:
-        # Inverse in GTEx batch with covariate effect assumed zero if unavailable.
+    def _inverse_covariate_effect(self, x_h_matrix: np.ndarray, sample_df: Optional[pd.DataFrame]) -> np.ndarray:
+        n = int(np.asarray(x_h_matrix).shape[0])
+        if not bool(self.use_covariates) or sample_df is None:
+            return np.zeros((n, len(self.genes)), dtype=np.float64)
+        cov_df = sample_df.copy().reset_index(drop=True)
+        if len(cov_df) == 1 and n > 1:
+            cov_df = pd.concat([cov_df] * n, ignore_index=True)
+        if len(cov_df) != n:
+            raise ValueError(f"sample_df rows ({len(cov_df)}) must match x_h_matrix rows ({n})")
+        cov = _build_covariates(cov_df, use_covariates=self.use_covariates)
+        if cov.shape[1] == 0:
+            return np.zeros((n, len(self.genes)), dtype=np.float64)
+        return cov @ self.beta_cov
+
+    def inverse_gtex(
+        self,
+        x_h_matrix: np.ndarray,
+        subject_ids: Optional[np.ndarray] = None,
+        sample_df: Optional[pd.DataFrame] = None,
+    ) -> np.ndarray:
         z = (x_h_matrix - self.intercept[None, :]) / self.slope[None, :]
-        cov_e = np.zeros_like(z, dtype=np.float64)
+        cov_e = self._inverse_covariate_effect(z, sample_df)
         s_adj = (z - cov_e - self.grand_mean[None, :]) / self.pooled_sd[None, :]
         s = s_adj * np.sqrt(np.clip(self.delta_star[1][None, :], 1e-8, None)) + self.gamma_star[1][None, :]
         y_nocov = s * self.pooled_sd[None, :] + self.grand_mean[None, :]

@@ -102,9 +102,13 @@ def build_subject_observed_matrices(
     subj_h: pd.DataFrame,
     subj_raw: pd.DataFrame,
     gene_cols: List[str],
+    agg: str = "mean",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    grp_h = subj_h.groupby("parcel_idx")[gene_cols].mean()
-    grp_raw = subj_raw.groupby("parcel_idx")[gene_cols].mean()
+    if agg not in {"mean", "median"}:
+        raise ValueError(f"agg must be 'mean' or 'median', got {agg!r}")
+    reducer = "mean" if agg == "mean" else "median"
+    grp_h = getattr(subj_h.groupby("parcel_idx")[gene_cols], reducer)()
+    grp_raw = getattr(subj_raw.groupby("parcel_idx")[gene_cols], reducer)()
     common = sorted(set(grp_h.index.tolist()) & set(grp_raw.index.tolist()))
     if len(common) == 0:
         return np.array([], dtype=np.int32), np.zeros((0, len(gene_cols))), np.zeros((0, len(gene_cols)))

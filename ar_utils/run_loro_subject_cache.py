@@ -64,16 +64,30 @@ class SubjectCacheConfig:
     heteroscedastic: bool = True
     calibration_mode: str = "hier_affine_map"
     uncertainty_shrink: bool = False
+    atlas_agg: str = "mean"
+    gtex_rep_mode: str = "medoid"
+    gtex_hemi_mode: str = "native"
 
 
 def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
+    if str(cfg.atlas_agg).lower() not in {"mean", "median"}:
+        raise ValueError(f"atlas_agg must be 'mean' or 'median', got {cfg.atlas_agg!r}")
+    if str(cfg.gtex_rep_mode).lower() not in {"centroid", "medoid"}:
+        raise ValueError(f"gtex_rep_mode must be 'centroid' or 'medoid', got {cfg.gtex_rep_mode!r}")
+    if str(cfg.gtex_hemi_mode).lower() not in {"native", "mirror_left"}:
+        raise ValueError(f"gtex_hemi_mode must be 'native' or 'mirror_left', got {cfg.gtex_hemi_mode!r}")
     csv_path = _resolve_optional_path(cfg.csv_path, ["gxp_samples.csv"])
     hvg_path = _resolve_optional_path(cfg.hvg_path, ["data/raw/ahba_100hvg.txt", "ahba_100hvg.txt"])
     header = io_utils.load_gene_header_and_hvg(csv_path, hvg_path)
     genes = header["genes_all"] if str(cfg.gene_scope).lower() == "allgenes" else header["genes_hvg"]
     if not genes:
         raise RuntimeError(f"No genes found for gene_scope={cfg.gene_scope}")
-    df = io_utils.read_expression_subset(csv_path, genes)
+    df = io_utils.read_expression_subset(
+        csv_path,
+        genes,
+        rep_mode=str(cfg.gtex_rep_mode).lower(),
+        hemi_mode=str(cfg.gtex_hemi_mode).lower(),
+    )
     ahba_raw = df[df["dataset_upper"] == "AHBA"].copy().reset_index(drop=True)
     gtex_raw = df[df["dataset_upper"] == "GTEX"].copy().reset_index(drop=True)
     target = build_target_parcels(ahba_raw)
@@ -144,10 +158,38 @@ def _fit_full_harmonizer(ahba_raw: pd.DataFrame, gtex_raw: pd.DataFrame, genes: 
     return harm, ahba_h, gtex_h
 
 
-def _subject_full_obs_mats(gtex_h: pd.DataFrame, gtex_raw: pd.DataFrame, subject: str, genes: List[str]):
+def _subject_full_obs_mats(gtex_h: pd.DataFrame, gtex_raw: pd.DataFrame, subject: str, genes: List[str], agg: str):
     sub_h = gtex_h[gtex_h["subject"].astype(str) == str(subject)].copy()
     sub_raw = gtex_raw[gtex_raw["subject"].astype(str) == str(subject)].copy()
-    return build_subject_observed_matrices(sub_h, sub_raw, genes)
+    return build_subject_observed_matrices(sub_h, sub_raw, genes, agg=agg)
+
+
+def _agg_vector(df: pd.DataFrame, genes: List[str], agg: str) -> np.ndarray:
+    x = df[genes].to_numpy(dtype=np.float64)
+    if agg == "mean":
+        return np.nanmean(x, axis=0)
+    if agg == "median":
+        return np.nanmedian(x, axis=0)
+    raise ValueError(f"agg must be 'mean' or 'median', got {agg!r}")
+
+
+def _subject_inverse_df(gtex_raw: pd.DataFrame, subject: str, n_rows: int) -> pd.DataFrame:
+    sub = gtex_raw[gtex_raw["subject"].astype(str) == str(subject)].copy().reset_index(drop=True)
+    if len(sub) == 0:
+        raise ValueError(f"No GTEx rows found for subject={subject}")
+    row = sub.iloc[[0]][["subject", "age", "sex", "dataset", "tissue_or_parcel", "coordinates"]].copy()
+    return pd.concat([row] * int(n_rows), ignore_index=True)
+
+
+def _inverse_to_subject_raw(harm, x_h: np.ndarray, inverse_df: pd.DataFrame, subject: str) -> np.ndarray:
+    x_h_arr = np.asarray(x_h, dtype=np.float64)
+    if x_h_arr.ndim == 1:
+        x_h_arr = x_h_arr[None, :]
+    subj_ids = np.asarray([subject] * x_h_arr.shape[0], dtype=object)
+    try:
+        return np.asarray(harm.inverse_gtex(x_h_arr, subject_ids=subj_ids, sample_df=inverse_df), dtype=np.float64)
+    except TypeError:
+        return np.asarray(harm.inverse_gtex(x_h_arr, subject_ids=subj_ids), dtype=np.float64)
 
 
 def _full_model_fallback(
@@ -161,8 +203,9 @@ def _full_model_fallback(
     coords_full: np.ndarray,
     genes: List[str],
     subject: str,
-) -> np.ndarray:
-    obs_idx, xh, xr = _subject_full_obs_mats(gtex_h, gtex_raw, subject, genes)
+    inverse_df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray]:
+    obs_idx, xh, xr = _subject_full_obs_mats(gtex_h, gtex_raw, subject, genes, str(cfg.atlas_agg).lower())
     n_parcels = int(len(target_meta))
     n_genes = int(len(genes))
     if model_name == "naive":
@@ -170,7 +213,10 @@ def _full_model_fallback(
         pos = {int(p): i for i, p in enumerate(obs_idx.tolist())}
         for p in obs_idx.tolist():
             sub_mat[int(p), :] = xh[pos[int(p)], :]
-        return np.where(np.isfinite(sub_mat), sub_mat, ahba_h_full).astype(np.float64)
+        x_full_h = np.where(np.isfinite(sub_mat), sub_mat, ahba_h_full).astype(np.float64)
+        x_full_raw = _inverse_to_subject_raw(harm, x_full_h, inverse_df, subject)
+        x_full_raw[obs_idx, :] = xr
+        return x_full_h, x_full_raw
     if model_name == "dlam":
         y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
         ahba_pls = fit_subject_pls(ahba_h_full, y_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
@@ -182,6 +228,7 @@ def _full_model_fallback(
                 "X_obs_raw": xr,
                 "coords_full": coords_full,
                 "target_meta": target_meta,
+                "inverse_df": inverse_df,
             },
             {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"]},
             {
@@ -201,7 +248,7 @@ def _full_model_fallback(
             },
             asdict(cfg),
         )
-        return np.asarray(pred["X_full_h"], dtype=np.float64)
+        return np.asarray(pred["X_full_h"], dtype=np.float64), np.asarray(pred["X_full_raw"], dtype=np.float64)
     if model_name == "plam":
         if bool(cfg.dynamic_rank):
             k_use = int(min(max(1, int(cfg.plam_latent_dim_max)), max(1, int(len(obs_idx)))))
@@ -224,9 +271,11 @@ def _full_model_fallback(
         )
         atlas_model = fit_global_atlas_unified(ahba_h_full, coords_full, ucfg)
         res = infer_subject_unified({"obs_idx": obs_idx, "X_obs_h": xh}, atlas_model, ucfg)
-        xhat = np.asarray(res["x_hat_h_full"], dtype=np.float64)
-        xhat[obs_idx, :] = xh
-        return xhat
+        xhat_h = np.asarray(res["x_hat_h_full"], dtype=np.float64)
+        xhat_h[obs_idx, :] = xh
+        xhat_raw = _inverse_to_subject_raw(harm, xhat_h, inverse_df, subject)
+        xhat_raw[obs_idx, :] = xr
+        return xhat_h, xhat_raw
     raise ValueError(f"Unknown model_name={model_name}")
 
 
@@ -252,11 +301,13 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     genes = bundle["genes"]
     target_meta = bundle["target_meta"]
     coords_full = bundle["coords_full"]
+    atlas_agg = str(cfg.atlas_agg).lower()
     n_parcels = int(len(target_meta))
     n_genes = int(len(genes))
+    inverse_df_full = _subject_inverse_df(gtex_raw, subject, n_parcels)
 
     harm_full, ahba_h_df, gtex_h_df = _fit_full_harmonizer(ahba_raw, gtex_raw, genes, cfg.combat_use_covariates)
-    ahba_h_full, _ = build_region_matrix(ahba_h_df, genes, target_meta, agg="mean")
+    ahba_h_full, _ = build_region_matrix(ahba_h_df, genes, target_meta, agg=atlas_agg)
 
     obs_idx_all = np.sort(gtex_raw[gtex_raw["subject"].astype(str) == subject]["parcel_idx"].astype(np.int32).unique())
     global_obs_idx = np.sort(gtex_raw["parcel_idx"].astype(np.int32).unique())
@@ -264,7 +315,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     gtex_mask[global_obs_idx] = True
     coverage_tier = "ge_cmin" if int(len(obs_idx_all)) >= int(cfg.c_min) else "lt_cmin"
 
-    fallback_full = _full_model_fallback(
+    fullfit_subject_h, fullfit_subject_raw = _full_model_fallback(
         model_name=model_name,
         cfg=cfg,
         harm=harm_full,
@@ -275,10 +326,13 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         coords_full=coords_full,
         genes=genes,
         subject=subject,
+        inverse_df=inverse_df_full,
     )
 
     pred_loro = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
     truth_loro = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
+    pred_loro_raw = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
+    truth_loro_raw = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
     loro_eval_mask = np.zeros(n_parcels, dtype=bool)
     skipped_holds: List[int] = []
     plam_fold_latent_dim = np.full(n_parcels, -1, dtype=np.int32)
@@ -291,23 +345,27 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         harm = fit_harmonizer(ahba_raw, gtex_train, genes, method="combat", cfg=hcfg)
         ahba_h = harm.transform(ahba_raw, "AHBA")
         gtex_h = harm.transform(gtex_train, "GTEX")
-        ahba_h_mat, _ = build_region_matrix(ahba_h, genes, target_meta, agg="mean")
+        ahba_h_mat, _ = build_region_matrix(ahba_h, genes, target_meta, agg=atlas_agg)
 
         hold_raw = gtex_raw[(gtex_raw["subject"].astype(str) == subject) & (gtex_raw["parcel_idx"] == hold)].copy()
         if len(hold_raw) == 0:
             skipped_holds.append(hold)
             continue
         hold_h = harm.transform(hold_raw, "GTEX")
-        truth = hold_h[genes].to_numpy(dtype=np.float64).mean(axis=0)
+        truth = _agg_vector(hold_h, genes, atlas_agg)
+        truth_raw = _agg_vector(hold_raw, genes, atlas_agg)
+        inverse_df_fold_full = _subject_inverse_df(gtex_raw, subject, n_parcels)
+        inverse_df_fold_one = inverse_df_fold_full.iloc[[0]].copy()
 
         if model_name == "naive":
             pred = ahba_h_mat[hold, :]
+            pred_raw = _inverse_to_subject_raw(harm, pred, inverse_df_fold_one, subject).reshape(-1)
         elif model_name == "dlam":
             y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
             ahba_pls = fit_subject_pls(ahba_h_mat, y_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
             subj_h = gtex_h[gtex_h["subject"].astype(str) == subject].copy()
             subj_raw = gtex_train[gtex_train["subject"].astype(str) == subject].copy()
-            obs_idx, xh, xr = build_subject_observed_matrices(subj_h, subj_raw, genes)
+            obs_idx, xh, xr = build_subject_observed_matrices(subj_h, subj_raw, genes, agg=atlas_agg)
             if len(obs_idx) < 2:
                 skipped_holds.append(hold)
                 continue
@@ -319,6 +377,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                     "X_obs_raw": xr,
                     "coords_full": coords_full,
                     "target_meta": target_meta,
+                    "inverse_df": inverse_df_fold_full,
                 },
                 {"ahba_h_full": ahba_h_mat, "ahba_ref_T": ahba_pls["T"]},
                 {
@@ -340,10 +399,11 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                 fold_mask=hold,
             )
             pred = np.asarray(pred_full["X_full_h"], dtype=np.float64)[hold, :]
+            pred_raw = np.asarray(pred_full["X_full_raw"], dtype=np.float64)[hold, :]
         else:  # plam
             subj_h = gtex_h[gtex_h["subject"].astype(str) == subject].copy()
             subj_raw = gtex_train[gtex_train["subject"].astype(str) == subject].copy()
-            obs_idx, xh, _ = build_subject_observed_matrices(subj_h, subj_raw, genes)
+            obs_idx, xh, _ = build_subject_observed_matrices(subj_h, subj_raw, genes, agg=atlas_agg)
             if len(obs_idx) < 2:
                 skipped_holds.append(hold)
                 continue
@@ -374,18 +434,23 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                 fold_ctx={"prior_h": ahba_h_mat, "obs_idx": obs_idx},
             )
             pred = np.asarray(res["x_hat_h_full"], dtype=np.float64)[hold, :]
+            pred_raw = _inverse_to_subject_raw(harm, pred, inverse_df_fold_one, subject).reshape(-1)
             plam_fold_latent_dim[hold] = int(k_use)
 
         pred_loro[hold, :] = pred
         truth_loro[hold, :] = truth
+        pred_loro_raw[hold, :] = pred_raw
+        truth_loro_raw[hold, :] = truth_raw
         loro_eval_mask[hold] = True
         if model_name == "plam":
             print(f"[{model_name} fold] {subject} fold={fold_id} hold={hold} k={int(plam_fold_latent_dim[hold])}")
         else:
             print(f"[{model_name} fold] {subject} fold={fold_id} hold={hold}")
 
-    predictions_subject_h = fallback_full.copy()
-    predictions_subject_h[loro_eval_mask, :] = pred_loro[loro_eval_mask, :]
+    loro_fused_subject_h = fullfit_subject_h.copy()
+    loro_fused_subject_h[loro_eval_mask, :] = pred_loro[loro_eval_mask, :]
+    loro_fused_subject_raw = fullfit_subject_raw.copy()
+    loro_fused_subject_raw[loro_eval_mask, :] = pred_loro_raw[loro_eval_mask, :]
     imputed_mask = ~loro_eval_mask
 
     np.savez_compressed(
@@ -394,9 +459,12 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         model_name=np.asarray([model_name], dtype=object),
         gene_names=np.asarray(genes, dtype=object),
         parcel_idx=np.arange(n_parcels, dtype=np.int32),
-        predictions_subject_h=predictions_subject_h.astype(np.float32),
-        fallback_subject_h=fallback_full.astype(np.float32),
-        truth_loro_h=truth_loro.astype(np.float32),
+        fullfit_subject_h=fullfit_subject_h.astype(np.float32),
+        fullfit_subject_raw=fullfit_subject_raw.astype(np.float32),
+        loro_fused_subject_h=loro_fused_subject_h.astype(np.float32),
+        loro_fused_subject_raw=loro_fused_subject_raw.astype(np.float32),
+        loro_truth_subject_h=truth_loro.astype(np.float32),
+        loro_truth_subject_raw=truth_loro_raw.astype(np.float32),
         gtex_mask=gtex_mask.astype(np.int8),
         loro_eval_mask=loro_eval_mask.astype(np.int8),
         imputed_mask=imputed_mask.astype(np.int8),
@@ -456,6 +524,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--heteroscedastic", default=str(SubjectCacheConfig.heteroscedastic).lower())
     p.add_argument("--calibration-mode", default=SubjectCacheConfig.calibration_mode)
     p.add_argument("--uncertainty-shrink", default=str(SubjectCacheConfig.uncertainty_shrink).lower())
+    p.add_argument("--atlas-agg", choices=["mean", "median"], default=SubjectCacheConfig.atlas_agg)
+    p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=SubjectCacheConfig.gtex_rep_mode)
+    p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=SubjectCacheConfig.gtex_hemi_mode)
     return p.parse_args()
 
 
@@ -493,6 +564,9 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         heteroscedastic=_parse_bool(a.heteroscedastic),
         calibration_mode=str(a.calibration_mode),
         uncertainty_shrink=_parse_bool(a.uncertainty_shrink),
+        atlas_agg=str(a.atlas_agg).lower(),
+        gtex_rep_mode=str(a.gtex_rep_mode).lower(),
+        gtex_hemi_mode=str(a.gtex_hemi_mode).lower(),
     )
 
 

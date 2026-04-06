@@ -49,16 +49,26 @@ Near-term work is centered on:
    - `dynamic_rank=true|false`
    - `plam_latent_dim_max` (default cap `10`)
    - fold-level rank persisted as `plam_fold_latent_dim` in cache `.npz`.
-6. Root-level sbatch launchers now pass:
+6. Atlas/parcel reduction in the cache pipeline is configurable:
+   - `atlas_agg=mean|median`
+   - applied consistently to AHBA atlas parcel aggregation, subject observed parcel aggregation, and parcel-averaged LORO truth.
+7. GTEx parcel assignment is configurable in the shared loader and active fitting workflows:
+   - `gtex_rep_mode=centroid|medoid` (default `medoid`)
+   - `gtex_hemi_mode=native|mirror_left` (default `native`)
+   - the chosen representative point is computed before nearest-neighbor parcel mapping.
+8. Root-level sbatch launchers now pass:
    - `LATENT_DIM`
    - `DYNAMIC_RANK`
    - `PLAM_MAX_RANK`
-7. EDA config now supports model folder remapping (`*_cache_dirname`) for comparisons like:
+   - `ATLAS_AGG`
+   - `GTEX_REP_MODE`
+   - `GTEX_HEMI_MODE`
+9. EDA config now supports model folder remapping (`*_cache_dirname`) for comparisons like:
    - `plam_rank3`
    - `plam_rank4`
    - `plam_dynamicrank`
-8. Publication EDA workflow now emphasizes cache-backed plotting with minimal recomputation.
-9. DLAM diagnostics were added for single-subject full-fit/LORO latent-alignment inspection.
+10. Publication EDA workflow now emphasizes cache-backed plotting with minimal recomputation.
+11. DLAM diagnostics were added for single-subject full-fit/LORO latent-alignment inspection.
 
 ## Core LORO Semantics
 
@@ -67,7 +77,8 @@ Near-term work is centered on:
 - Harmonization is re-fit on fold training data.
 - Held-out truth is harmonized with that fold harmonizer.
 - Strict fold prediction is evaluated only at held-out parcel(s).
-- Final `predictions_subject_h` is a fused map (strict LORO where available + fallback elsewhere).
+- Final `loro_fused_subject_h` is a fused map (strict LORO where available + `fullfit_subject_h` elsewhere).
+- Raw-space companions (`*_subject_raw`) are also stored using covariate-aware inverse GTEx transforms for predictions and parcel-averaged native GTEx truth for held-out parcels.
 
 ## Data / Path Assumptions
 

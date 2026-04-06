@@ -15,6 +15,7 @@ dependencies = [
   "scikit-learn",
   "statsmodels",
   "matplotlib",
+  "plotly",
   "seaborn",
   "pyyaml",
   "nbformat",

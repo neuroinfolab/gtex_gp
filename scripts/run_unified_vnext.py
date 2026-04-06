@@ -74,6 +74,8 @@ class Config:
     smoke_subjects: int = 0
     whiten_eps: float = 1e-4
     combat_use_covariates: bool = True
+    gtex_rep_mode: str = "medoid"
+    gtex_hemi_mode: str = "native"
     hier_lambda_a: float = 10.0
     hier_lambda_b: float = 10.0
     hier_base_method: str = "robustz_affine"
@@ -118,6 +120,8 @@ def parse_args() -> Config:
     p.add_argument("--lambda-cal-b", type=float, default=Config.lambda_cal_b)
     p.add_argument("--smoke-subjects", type=int, default=Config.smoke_subjects)
     p.add_argument("--whiten-eps", type=float, default=Config.whiten_eps)
+    p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=Config.gtex_rep_mode)
+    p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=Config.gtex_hemi_mode)
     p.add_argument("--combat-use-covariates", default=str(Config.combat_use_covariates).lower())
     p.add_argument("--hier-lambda-a", type=float, default=Config.hier_lambda_a)
     p.add_argument("--hier-lambda-b", type=float, default=Config.hier_lambda_b)
@@ -291,7 +295,12 @@ def main() -> None:
     if len(genes_hvg) == 0:
         raise RuntimeError("No overlapping HVGs found.")
 
-    df = io_utils.read_expression_subset((root / cfg.csv_path).resolve(), genes_hvg)
+    df = io_utils.read_expression_subset(
+        (root / cfg.csv_path).resolve(),
+        genes_hvg,
+        rep_mode=str(cfg.gtex_rep_mode).lower(),
+        hemi_mode=str(cfg.gtex_hemi_mode).lower(),
+    )
     ahba_raw = df[df["dataset_upper"] == "AHBA"].copy().reset_index(drop=True)
     gtex_raw = df[df["dataset_upper"] == "GTEX"].copy().reset_index(drop=True)
     if len(ahba_raw) == 0 or len(gtex_raw) == 0:

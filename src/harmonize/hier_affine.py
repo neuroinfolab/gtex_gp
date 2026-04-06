@@ -108,9 +108,14 @@ class HierAffineHarmonizer:
         out.loc[:, self.genes] = x2.astype(np.float32)
         return out
 
-    def inverse_gtex(self, x_h_matrix: np.ndarray, subject_ids: Optional[np.ndarray] = None) -> np.ndarray:
+    def inverse_gtex(
+        self,
+        x_h_matrix: np.ndarray,
+        subject_ids: Optional[np.ndarray] = None,
+        sample_df: Optional[pd.DataFrame] = None,
+    ) -> np.ndarray:
         if subject_ids is None:
-            return self.base.inverse_gtex(x_h_matrix)
+            return self.base.inverse_gtex(x_h_matrix, sample_df=sample_df)
 
         xg = x_h_matrix.astype(np.float64).copy()
         sids = np.asarray(subject_ids).astype(str)
@@ -118,7 +123,7 @@ class HierAffineHarmonizer:
             idx = np.where(sids == sid)[0]
             a, b = self.subject_params.get(str(sid), (np.ones(len(self.genes)), np.zeros(len(self.genes))))
             xg[idx, :] = (x_h_matrix[idx, :] - b[None, :]) / a[None, :]
-        return self.base.inverse_gtex(xg)
+        return self.base.inverse_gtex(xg, sample_df=sample_df)
 
     def diagnostics(self) -> Dict[str, float]:
         slopes = []
