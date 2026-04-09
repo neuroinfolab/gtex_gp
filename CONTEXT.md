@@ -11,30 +11,25 @@
 ## Current Development Direction
 
 Near-term work is centered on:
-- expanding `ar_utils` wrappers and reusable analysis functions,
-- iterative feature development in `results_eda_cached_predictions_allgenes.ipynb`,
-- later synchronization of stable patterns into `results_eda_cached_predictions_hvg.ipynb`.
-- rank-comparison EDA via all-genes variants:
-  - `results_eda_cached_predictions_allgenes_rank3.ipynb`
-  - `results_eda_cached_predictions_allgenes_rank4.ipynb`
-  - `results_eda_cached_predictions_allgenes_dynamicrank.ipynb`
-- publication-facing cache EDA in:
-  - `results_eda_publication_ready.ipynb`
-- DLAM single-subject diagnostics in:
-  - `results_eda_dlam_single_subject_deepdive.ipynb`
+- expanding reusable analysis functions in `src/eval_utils`, `src/viz`, and `src/workflows`,
+- iterative feature development in `notebooks/results_eda_cached_predictions_allgenes.ipynb`,
+- inverse-space checks in `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb`,
+- GTEx/AHBA assignment inspection in `notebooks/coordinate_overlay_3d_mni.ipynb`,
+- older variants retained under `notebooks/ar_notebooks/` when historical comparison is useful.
 
 ## Main Entrypoints
 
 - `README.md` — top-level usage and commands
 - `notebooks/ahba_gtex_writeup_end_to_end.ipynb` — canonical manuscript workflow
 - `scripts/build_dual_model_loro_metric_panels.py` — manuscript LORO panel builder
-- `ar_utils/run_loro_subject_cache.py` — per-subject cache builder
-- `ar_utils/run_loro_cache_batch.py` — batch/array subject driver
-- `ar_utils/results_eda.py` — cache-based EDA utilities
-- `ar_utils/dlam_diagnostics.py` — DLAM diagnostics fit/cache/plot utilities
-- `results_eda_cached_predictions_allgenes.ipynb` — primary EDA notebook
-- `results_eda_cached_predictions_hvg.ipynb` — fast-scope counterpart
-- `results_eda_publication_ready.ipynb` — publication-ready cached prediction panels
+- `src/workflows/loro_cache.py` — per-subject cache builder
+- `scripts/run_loro_cache_batch.py` — batch/array subject driver
+- `src/eval_utils/results_eda.py` — cache-based EDA utilities
+- `src/eval_utils/dlam_diagnostics.py` — DLAM diagnostics fit/cache/plot utilities
+- `src/viz/coord_viz.py` — GTEx/AHBA coordinate overlay utilities
+- `notebooks/results_eda_cached_predictions_allgenes.ipynb` — primary harmonized-space EDA notebook
+- `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb` — raw/inverse-ComBat EDA notebook
+- `notebooks/coordinate_overlay_3d_mni.ipynb` — parcel-assignment visualization notebook
 
 ## Key Recent Changes (Important)
 
@@ -53,10 +48,10 @@ Near-term work is centered on:
    - `atlas_agg=mean|median`
    - applied consistently to AHBA atlas parcel aggregation, subject observed parcel aggregation, and parcel-averaged LORO truth.
 7. GTEx parcel assignment is configurable in the shared loader and active fitting workflows:
-   - `gtex_rep_mode=centroid|medoid` (default `medoid`)
-   - `gtex_hemi_mode=native|mirror_left` (default `native`)
+   - `gtex_rep_mode=centroid|medoid` (default `centroid`)
+   - `gtex_hemi_mode=native|mirror_left` (default `mirror_left`)
    - the chosen representative point is computed before nearest-neighbor parcel mapping.
-8. Root-level sbatch launchers now pass:
+8. Sbatch launchers under `scripts/sbatch/` now pass:
    - `LATENT_DIM`
    - `DYNAMIC_RANK`
    - `PLAM_MAX_RANK`
@@ -101,19 +96,19 @@ Default outputs:
 ## HPC Notes
 
 - Root sbatches are the current launch points:
-  - `run_loro_cache_single_subject.sbatch`
-  - `run_loro_cache_array.sbatch`
+  - `scripts/sbatch/run_loro_cache_single_subject.sbatch`
+  - `scripts/sbatch/run_loro_cache_array.sbatch`
 - Scripts are CPU-oriented; no required GPU path for current cache generation.
 - Array jobs are one subject per task and support `GENE_SCOPE=hvg|allgenes`.
 - Dynamic-rank PLAM launch example:
-  - `MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch run_loro_cache_array.sbatch`
+  - `MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch scripts/sbatch/run_loro_cache_array.sbatch`
 
 ## Quick Start (Agent Onboarding)
 
 1. Read `README.md` and this file.
-2. Inspect `ar_utils/results_eda.py` and the all-genes notebook first.
-3. Use `results_eda_publication_ready.ipynb` for publication panel iteration from caches.
-4. Use `results_eda_dlam_single_subject_deepdive.ipynb` for DLAM mechanism figures.
-5. Treat all-genes notebook as source of active iteration; port stable behavior into HVG notebook afterward.
+2. Inspect `src/eval_utils/results_eda.py` and `notebooks/results_eda_cached_predictions_allgenes.ipynb` first.
+3. Use `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb` only for secondary raw-space checks.
+4. Use `notebooks/coordinate_overlay_3d_mni.ipynb` when working on spatial assignment or matching changes.
+5. Treat `notebooks/ar_notebooks/` as historical variants unless you intentionally need one.
 
-Last updated at: 2026-03-30
+Last updated at: 2026-04-07

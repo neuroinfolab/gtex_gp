@@ -14,12 +14,12 @@ import pandas as pd
 
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from ar_utils.results_eda import EDAConfig, select_subject_by_model, set_academic_style
-from ar_utils.run_loro_subject_cache import SubjectCacheConfig, load_dataset
+from src.eval_utils.results_eda import EDAConfig, select_subject_by_model, set_academic_style
+from src.workflows.loro_cache import SubjectCacheConfig, load_dataset
 from src.harmonize import fit_harmonizer
 from src.latent.basis_maps import apply_linear, apply_scores, fit_basis_map
 from src.latent.pls import fit_subject_pls

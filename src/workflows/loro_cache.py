@@ -13,7 +13,7 @@ import pandas as pd
 
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -52,6 +52,7 @@ class SubjectCacheConfig:
     gp_noise: float = 1e-3
     seed: int = 123
     combat_use_covariates: bool = True
+    combat_inverse_slope_floor: float = 0.10
     latent_dim: int = 3
     dynamic_rank: bool = False
     plam_latent_dim_max: int = 10
@@ -65,8 +66,8 @@ class SubjectCacheConfig:
     calibration_mode: str = "hier_affine_map"
     uncertainty_shrink: bool = False
     atlas_agg: str = "mean"
-    gtex_rep_mode: str = "medoid"
-    gtex_hemi_mode: str = "native"
+    gtex_rep_mode: str = "centroid"
+    gtex_hemi_mode: str = "mirror_left"
 
 
 def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
@@ -150,8 +151,11 @@ def _cache_valid(npz_path: Path, cfg: SubjectCacheConfig, subject: str, model_na
     return True
 
 
-def _fit_full_harmonizer(ahba_raw: pd.DataFrame, gtex_raw: pd.DataFrame, genes: List[str], combat_use_covariates: bool):
-    hcfg = SimpleNamespace(combat_use_covariates=bool(combat_use_covariates))
+def _fit_full_harmonizer(ahba_raw: pd.DataFrame, gtex_raw: pd.DataFrame, genes: List[str], cfg: SubjectCacheConfig):
+    hcfg = SimpleNamespace(
+        combat_use_covariates=bool(cfg.combat_use_covariates),
+        combat_inverse_slope_floor=float(cfg.combat_inverse_slope_floor),
+    )
     harm = fit_harmonizer(ahba_raw, gtex_raw, genes, method="combat", cfg=hcfg)
     ahba_h = harm.transform(ahba_raw, "AHBA")
     gtex_h = harm.transform(gtex_raw, "GTEX")
@@ -306,7 +310,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     n_genes = int(len(genes))
     inverse_df_full = _subject_inverse_df(gtex_raw, subject, n_parcels)
 
-    harm_full, ahba_h_df, gtex_h_df = _fit_full_harmonizer(ahba_raw, gtex_raw, genes, cfg.combat_use_covariates)
+    harm_full, ahba_h_df, gtex_h_df = _fit_full_harmonizer(ahba_raw, gtex_raw, genes, cfg)
     ahba_h_full, _ = build_region_matrix(ahba_h_df, genes, target_meta, agg=atlas_agg)
 
     obs_idx_all = np.sort(gtex_raw[gtex_raw["subject"].astype(str) == subject]["parcel_idx"].astype(np.int32).unique())
@@ -341,7 +345,10 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         hold = int(hold)
         train_mask = ~((gtex_raw["subject"].astype(str) == subject) & (gtex_raw["parcel_idx"] == hold))
         gtex_train = gtex_raw[train_mask].copy()
-        hcfg = SimpleNamespace(combat_use_covariates=bool(cfg.combat_use_covariates))
+        hcfg = SimpleNamespace(
+            combat_use_covariates=bool(cfg.combat_use_covariates),
+            combat_inverse_slope_floor=float(cfg.combat_inverse_slope_floor),
+        )
         harm = fit_harmonizer(ahba_raw, gtex_train, genes, method="combat", cfg=hcfg)
         ahba_h = harm.transform(ahba_raw, "AHBA")
         gtex_h = harm.transform(gtex_train, "GTEX")
@@ -512,6 +519,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gp-noise", type=float, default=SubjectCacheConfig.gp_noise)
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
+    p.add_argument("--combat-inverse-slope-floor", type=float, default=SubjectCacheConfig.combat_inverse_slope_floor)
     p.add_argument("--latent-dim", type=int, default=SubjectCacheConfig.latent_dim)
     p.add_argument("--dynamic-rank", default=str(SubjectCacheConfig.dynamic_rank).lower())
     p.add_argument("--plam-latent-dim-max", type=int, default=SubjectCacheConfig.plam_latent_dim_max)
@@ -552,6 +560,7 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         gp_noise=float(a.gp_noise),
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
+        combat_inverse_slope_floor=float(a.combat_inverse_slope_floor),
         latent_dim=int(a.latent_dim),
         dynamic_rank=_parse_bool(a.dynamic_rank),
         plam_latent_dim_max=int(a.plam_latent_dim_max),

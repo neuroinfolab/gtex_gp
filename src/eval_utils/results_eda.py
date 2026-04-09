@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Sequence, Tuple
@@ -14,7 +18,7 @@ import seaborn as sns
 
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -45,8 +49,9 @@ class EDAConfig:
     gene_scope: str = "hvg"  # hvg | allgenes
     min_observed_parcels: int = 5
     combat_use_covariates: bool = True
-    gtex_rep_mode: str = "medoid"
-    gtex_hemi_mode: str = "native"
+    combat_inverse_slope_floor: float = 0.10
+    gtex_rep_mode: str = "centroid"
+    gtex_hemi_mode: str = "mirror_left"
 
 
 def set_academic_style() -> None:
@@ -70,6 +75,88 @@ def _resolve_repo_path(path_str: str) -> Path:
     return (REPO_ROOT / p).resolve()
 
 
+def _resolve_eval_gene_path(path_str: str) -> Path:
+    raw = str(path_str).strip()
+    if not raw:
+        raise ValueError("eval gene path/name cannot be empty")
+    candidates: List[Path] = []
+    p = Path(raw)
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        candidates.append((REPO_ROOT / p).resolve())
+        candidates.append((REPO_ROOT / "data" / "raw" / p).resolve())
+        if p.suffix == "":
+            candidates.append((REPO_ROOT / f"{raw}.txt").resolve())
+            candidates.append((REPO_ROOT / "data" / "raw" / f"{raw}.txt").resolve())
+    for c in candidates:
+        if c.exists():
+            return c
+    raise FileNotFoundError(f"Could not resolve eval gene file from {path_str!r}")
+
+
+@lru_cache(maxsize=32)
+def _cached_gene_header(csv_path_str: str, hvg_path_str: str) -> Dict[str, List[str]]:
+    return io_utils.load_gene_header_and_hvg(Path(csv_path_str), Path(hvg_path_str))
+
+
+@lru_cache(maxsize=64)
+def _load_gene_list_from_txt(path_str: str) -> Tuple[str, ...]:
+    p = _resolve_eval_gene_path(path_str)
+    genes = [line.strip() for line in p.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
+    if not genes:
+        raise ValueError(f"No genes found in eval gene file: {p}")
+    return tuple(genes)
+
+
+def _resolve_eval_gene_set(
+    cfg: EDAConfig,
+    eval_gene_mode: str = "all",
+    custom_gene_list: Sequence[str] | None = None,
+    eval_gene_path: str | None = None,
+) -> Tuple[str, str | None, set[str] | None]:
+    if eval_gene_path is not None and str(eval_gene_path).strip():
+        p = _resolve_eval_gene_path(str(eval_gene_path))
+        genes = set(str(g) for g in _load_gene_list_from_txt(str(p)))
+        return f"file:{p.stem}", str(p), genes
+
+    mode = str(eval_gene_mode).lower()
+    if mode not in {"all", "hvg", "custom"}:
+        raise ValueError("eval_gene_mode must be one of: all, hvg, custom")
+    if mode == "all":
+        return mode, None, None
+    if mode == "hvg":
+        hdr = _cached_gene_header(str(_resolve_repo_path(cfg.csv_path)), str(_resolve_repo_path(cfg.hvg_path)))
+        return mode, str(_resolve_repo_path(cfg.hvg_path)), set(str(g) for g in hdr["genes_hvg"])
+    if custom_gene_list is None:
+        raise ValueError("custom_gene_list is required when eval_gene_mode='custom'")
+    genes = set(str(g) for g in custom_gene_list)
+    if not genes:
+        raise ValueError("custom_gene_list is empty")
+    return mode, None, genes
+
+
+def _gene_indices_from_names(
+    gene_names: Sequence[str],
+    eval_gene_set: set[str] | None,
+    *,
+    context: str,
+) -> np.ndarray:
+    n_total_genes = int(len(gene_names))
+    if eval_gene_set is None:
+        return np.arange(n_total_genes, dtype=np.int32)
+    gi = np.asarray([i for i, g in enumerate(gene_names) if g in eval_gene_set], dtype=np.int32)
+    if int(gi.size) == 0:
+        raise RuntimeError(f"No overlap between requested eval genes and cache genes for {context}")
+    return gi
+
+
+def _maybe_clamp_zero(pred: np.ndarray, truth: np.ndarray, *, inverse_combat: bool, clamp_zero: bool) -> Tuple[np.ndarray, np.ndarray]:
+    if not (bool(inverse_combat) and bool(clamp_zero)):
+        return pred, truth
+    return np.maximum(pred, 0.0), np.maximum(truth, 0.0)
+
+
 def _cache_model_dirname(cfg: EDAConfig, model: str) -> str:
     m = str(model).lower()
     if m == "naive":
@@ -85,6 +172,29 @@ def _model_cache_root(cfg: EDAConfig, model: str) -> Path:
     return (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower() / _cache_model_dirname(cfg, model)).resolve()
 
 
+def _cache_pred_truth_arrays(z: np.lib.npyio.NpzFile, inverse_combat: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    pred_key = "loro_fused_subject_raw" if bool(inverse_combat) else "loro_fused_subject_h"
+    truth_key = "loro_truth_subject_raw" if bool(inverse_combat) else "loro_truth_subject_h"
+    return np.asarray(z[pred_key], dtype=np.float64), np.asarray(z[truth_key], dtype=np.float64)
+
+
+def _load_cache_meta(json_path: Path) -> Dict[str, object]:
+    if not json_path.exists():
+        return {}
+    try:
+        return json.loads(json_path.read_text())
+    except Exception:
+        return {}
+
+
+def _effective_n_jobs(n_items: int, n_jobs: int | None) -> int:
+    if n_items <= 1:
+        return 1
+    if n_jobs is None:
+        return max(1, min(8, n_items, os.cpu_count() or 1))
+    return max(1, min(int(n_jobs), n_items))
+
+
 def _pearson_safe(x: np.ndarray, y: np.ndarray) -> float:
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -98,6 +208,19 @@ def _pearson_safe(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.corrcoef(xx, yy)[0, 1])
 
 
+def _spearman_safe(x: np.ndarray, y: np.ndarray) -> float:
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    m = np.isfinite(x) & np.isfinite(y)
+    if int(m.sum()) < 2:
+        return np.nan
+    xx = pd.Series(x[m]).rank(method="average").to_numpy(dtype=np.float64)
+    yy = pd.Series(y[m]).rank(method="average").to_numpy(dtype=np.float64)
+    if float(np.std(xx)) < 1e-12 or float(np.std(yy)) < 1e-12:
+        return np.nan
+    return float(np.corrcoef(xx, yy)[0, 1])
+
+
 def _rmse_safe(x: np.ndarray, y: np.ndarray) -> float:
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -106,6 +229,95 @@ def _rmse_safe(x: np.ndarray, y: np.ndarray) -> float:
         return np.nan
     d = x[m] - y[m]
     return float(np.sqrt(np.mean(d**2)))
+
+
+def _r2_safe(x: np.ndarray, y: np.ndarray) -> float:
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    m = np.isfinite(x) & np.isfinite(y)
+    if int(m.sum()) < 2:
+        return np.nan
+    xx = x[m]
+    yy = y[m]
+    sst = float(np.sum((xx - np.mean(xx)) ** 2))
+    if sst < 1e-12:
+        return np.nan
+    sse = float(np.sum((xx - yy) ** 2))
+    return float(1.0 - (sse / sst))
+
+
+def _subject_metrics_row_from_npz(
+    npz_path_str: str,
+    model: str,
+    inverse_combat: bool = False,
+) -> Dict[str, object]:
+    npz_path = Path(npz_path_str)
+    sid = npz_path.stem
+    meta = _load_cache_meta(npz_path.with_suffix(".json"))
+    with np.load(npz_path, allow_pickle=True) as z:
+        pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
+        mask = z["loro_eval_mask"].astype(bool)
+        x = truth[mask, :].ravel()
+        y = pred[mask, :].ravel()
+        m = np.isfinite(x) & np.isfinite(y)
+        return {
+            "subject": sid,
+            "model": model,
+            "coverage": int(meta.get("n_gtex_observed_subject", int(mask.sum()))),
+            "n_loro_parcels": int(mask.sum()),
+            "inverse_combat": bool(inverse_combat),
+            "n_points": int(m.sum()),
+            "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+            "spearman_r": _spearman_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+            "r2": _r2_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+            "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+        }
+
+
+def _subject_metrics_subset_row_from_npz(
+    npz_path_str: str,
+    model: str,
+    mode_label: str,
+    eval_gene_path_resolved: str | None,
+    eval_gene_items: Tuple[str, ...] | None,
+    inverse_combat: bool = False,
+    clamp_zero: bool = False,
+) -> Dict[str, object]:
+    npz_path = Path(npz_path_str)
+    sid = npz_path.stem
+    meta = _load_cache_meta(npz_path.with_suffix(".json"))
+    eval_gene_set = None if eval_gene_items is None else set(eval_gene_items)
+    with np.load(npz_path, allow_pickle=True) as z:
+        pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
+        pred, truth = _maybe_clamp_zero(pred, truth, inverse_combat=inverse_combat, clamp_zero=clamp_zero)
+        mask = z["loro_eval_mask"].astype(bool)
+        gene_names = tuple(str(g) for g in z["gene_names"].tolist())
+        n_total_genes = int(len(gene_names))
+        gi = _gene_indices_from_names(
+            gene_names,
+            eval_gene_set,
+            context=f"subject={sid} model={model}",
+        )
+        x = truth[mask, :][:, gi].ravel()
+        y = pred[mask, :][:, gi].ravel()
+        m = np.isfinite(x) & np.isfinite(y)
+        return {
+            "subject": sid,
+            "model": model,
+            "coverage": int(meta.get("n_gtex_observed_subject", int(mask.sum()))),
+            "n_loro_parcels": int(mask.sum()),
+            "n_eval_genes": int(gi.size),
+            "n_total_genes": n_total_genes,
+            "eval_gene_mode": mode_label,
+            "eval_gene_path": eval_gene_path_resolved,
+            "inverse_combat": bool(inverse_combat),
+            "clamp_zero": bool(clamp_zero),
+            "n_points": int(m.sum()),
+            "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+            "spearman_r": _spearman_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+            "r2": _r2_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+            "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+        }
 
 
 def _metrics_panel_label(metrics_df: pd.DataFrame, panel_label: str | None = None) -> str:
@@ -185,7 +397,10 @@ def prepare_pre_post_harmonization(cfg: EDAConfig) -> Dict[str, object]:
     subjects = data["eligible_subjects"]
 
     gtex_eligible = gtex_raw[gtex_raw["subject"].astype(str).isin(subjects)].copy()
-    hcfg = SimpleNamespace(combat_use_covariates=bool(cfg.combat_use_covariates))
+    hcfg = SimpleNamespace(
+        combat_use_covariates=bool(cfg.combat_use_covariates),
+        combat_inverse_slope_floor=float(cfg.combat_inverse_slope_floor),
+    )
     harmonizer = fit_harmonizer(ahba_raw, gtex_eligible, genes, method="combat", cfg=hcfg)
     gtex_h = harmonizer.transform(gtex_eligible, "GTEX")
     ahba_h = harmonizer.transform(ahba_raw, "AHBA")
@@ -868,41 +1083,30 @@ def plot_region_covariance_side_by_side(
     return fig, axes
 
 
-def compute_subject_metrics_from_cache(cfg: EDAConfig, model: str) -> pd.DataFrame:
+def compute_subject_metrics_from_cache(
+    cfg: EDAConfig,
+    model: str,
+    inverse_combat: bool = False,
+    n_jobs: int | None = None,
+) -> pd.DataFrame:
     model = str(model).lower()
     root = _model_cache_root(cfg, model)
     if not root.exists():
         raise FileNotFoundError(f"Cache dir not found: {root}")
-    rows: List[Dict[str, object]] = []
-    for npz_path in sorted(root.glob("*.npz")):
-        sid = npz_path.stem
-        json_path = npz_path.with_suffix(".json")
-        meta = {}
-        if json_path.exists():
-            try:
-                import json
-
-                meta = json.loads(json_path.read_text())
-            except Exception:
-                meta = {}
-        z = np.load(npz_path, allow_pickle=True)
-        pred = z["loro_fused_subject_h"].astype(np.float64)
-        truth = z["loro_truth_subject_h"].astype(np.float64)
-        mask = z["loro_eval_mask"].astype(bool)
-        x = truth[mask, :].ravel()
-        y = pred[mask, :].ravel()
-        m = np.isfinite(x) & np.isfinite(y)
-        rows.append(
-            {
-                "subject": sid,
-                "model": model,
-                "coverage": int(meta.get("n_gtex_observed_subject", int(mask.sum()))),
-                "n_loro_parcels": int(mask.sum()),
-                "n_points": int(m.sum()),
-                "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-                "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-            }
-        )
+    npz_paths = [str(p) for p in sorted(root.glob("*.npz"))]
+    jobs = _effective_n_jobs(len(npz_paths), n_jobs)
+    if jobs == 1:
+        rows = [_subject_metrics_row_from_npz(p, model=model, inverse_combat=inverse_combat) for p in npz_paths]
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            rows = list(
+                ex.map(
+                    _subject_metrics_row_from_npz,
+                    npz_paths,
+                    [model] * len(npz_paths),
+                    [bool(inverse_combat)] * len(npz_paths),
+                )
+            )
     out = pd.DataFrame(rows).sort_values(["coverage", "subject"]).reset_index(drop=True)
     if len(out) == 0:
         raise RuntimeError(f"No npz files found under {root}")
@@ -914,75 +1118,53 @@ def compute_subject_metrics_from_cache_gene_subset(
     model: str,
     eval_gene_mode: str = "all",  # all | hvg | custom
     custom_gene_list: Sequence[str] | None = None,
+    inverse_combat: bool = False,
+    eval_gene_path: str | None = None,
+    clamp_zero: bool = False,
+    n_jobs: int | None = None,
 ) -> pd.DataFrame:
     model = str(model).lower()
     root = _model_cache_root(cfg, model)
     if not root.exists():
         raise FileNotFoundError(f"Cache dir not found: {root}")
 
-    mode = str(eval_gene_mode).lower()
-    if mode not in {"all", "hvg", "custom"}:
-        raise ValueError("eval_gene_mode must be one of: all, hvg, custom")
+    mode_label, eval_gene_path_resolved, eval_gene_set = _resolve_eval_gene_set(
+        cfg,
+        eval_gene_mode=eval_gene_mode,
+        custom_gene_list=custom_gene_list,
+        eval_gene_path=eval_gene_path,
+    )
 
-    eval_gene_set: set[str] | None = None
-    if mode == "hvg":
-        csv_path = _resolve_repo_path(cfg.csv_path)
-        hvg_path = _resolve_repo_path(cfg.hvg_path)
-        hdr = io_utils.load_gene_header_and_hvg(csv_path, hvg_path)
-        eval_gene_set = set(str(g) for g in hdr["genes_hvg"])
-    elif mode == "custom":
-        if custom_gene_list is None:
-            raise ValueError("custom_gene_list is required when eval_gene_mode='custom'")
-        eval_gene_set = set(str(g) for g in custom_gene_list)
-        if not eval_gene_set:
-            raise ValueError("custom_gene_list is empty")
-
-    rows: List[Dict[str, object]] = []
-    for npz_path in sorted(root.glob("*.npz")):
-        sid = npz_path.stem
-        json_path = npz_path.with_suffix(".json")
-        meta = {}
-        if json_path.exists():
-            try:
-                import json
-
-                meta = json.loads(json_path.read_text())
-            except Exception:
-                meta = {}
-
-        z = np.load(npz_path, allow_pickle=True)
-        pred = z["loro_fused_subject_h"].astype(np.float64)
-        truth = z["loro_truth_subject_h"].astype(np.float64)
-        mask = z["loro_eval_mask"].astype(bool)
-        gene_names = [str(g) for g in z["gene_names"].tolist()]
-        n_total_genes = int(len(gene_names))
-
-        if eval_gene_set is None:
-            gi = np.arange(n_total_genes, dtype=np.int32)
-        else:
-            gi = np.asarray([i for i, g in enumerate(gene_names) if g in eval_gene_set], dtype=np.int32)
-            if int(gi.size) == 0:
-                raise RuntimeError(
-                    f"No overlap between requested eval genes ({mode}) and cache genes for subject {sid} model {model}"
+    npz_paths = [str(p) for p in sorted(root.glob("*.npz"))]
+    jobs = _effective_n_jobs(len(npz_paths), n_jobs)
+    eval_gene_items = None if eval_gene_set is None else tuple(sorted(eval_gene_set))
+    if jobs == 1:
+        rows = [
+            _subject_metrics_subset_row_from_npz(
+                p,
+                model=model,
+                mode_label=mode_label,
+                eval_gene_path_resolved=eval_gene_path_resolved,
+                eval_gene_items=eval_gene_items,
+                inverse_combat=inverse_combat,
+                clamp_zero=clamp_zero,
+            )
+            for p in npz_paths
+        ]
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            rows = list(
+                ex.map(
+                    _subject_metrics_subset_row_from_npz,
+                    npz_paths,
+                    [model] * len(npz_paths),
+                    [mode_label] * len(npz_paths),
+                    [eval_gene_path_resolved] * len(npz_paths),
+                    [eval_gene_items] * len(npz_paths),
+                    [bool(inverse_combat)] * len(npz_paths),
+                    [bool(clamp_zero)] * len(npz_paths),
                 )
-
-        x = truth[mask, :][:, gi].ravel()
-        y = pred[mask, :][:, gi].ravel()
-        m = np.isfinite(x) & np.isfinite(y)
-        rows.append(
-            {
-                "subject": sid,
-                "model": model,
-                "coverage": int(meta.get("n_gtex_observed_subject", int(mask.sum()))),
-                "n_loro_parcels": int(mask.sum()),
-                "n_eval_genes": int(gi.size),
-                "n_total_genes": n_total_genes,
-                "eval_gene_mode": mode,
-                "n_points": int(m.sum()),
-                "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-                "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-            }
-        )
+            )
 
     out = pd.DataFrame(rows).sort_values(["coverage", "subject"]).reset_index(drop=True)
     if len(out) == 0:
@@ -1031,11 +1213,11 @@ def plot_coverage_vs_accuracy(
 
 def plot_loro_subject_summary_bars(
     metrics_df: pd.DataFrame,
-    figsize: Tuple[float, float] = (10.2, 4.2),
-    use_sem: bool = False,
+    figsize: Tuple[float, float] = (19.4, 4.4),
+    use_sem: bool = True,
     panel_label: str | None = None,
 ) -> Tuple[plt.Figure, np.ndarray, pd.DataFrame]:
-    need = {"model", "pearson_r", "rmse"}
+    need = {"model", "pearson_r", "spearman_r", "r2", "rmse"}
     if not need.issubset(set(metrics_df.columns)):
         raise ValueError(f"metrics_df must include columns: {sorted(need)}")
 
@@ -1048,6 +1230,10 @@ def plot_loro_subject_summary_bars(
         .agg(
             pearson_mean=("pearson_r", "mean"),
             pearson_std=("pearson_r", "std"),
+            spearman_mean=("spearman_r", "mean"),
+            spearman_std=("spearman_r", "std"),
+            r2_mean=("r2", "mean"),
+            r2_std=("r2", "std"),
             rmse_mean=("rmse", "mean"),
             rmse_std=("rmse", "std"),
             n_subjects=("subject", "nunique"),
@@ -1059,14 +1245,17 @@ def plot_loro_subject_summary_bars(
     if bool(use_sem):
         n = np.maximum(summ["n_subjects"].to_numpy(dtype=np.float64), 1.0)
         summ["pearson_err"] = summ["pearson_std"] / np.sqrt(n)
+        summ["spearman_err"] = summ["spearman_std"] / np.sqrt(n)
+        summ["r2_err"] = summ["r2_std"] / np.sqrt(n)
         summ["rmse_err"] = summ["rmse_std"] / np.sqrt(n)
-        err_lbl = "SEM"
     else:
         summ["pearson_err"] = summ["pearson_std"]
+        summ["spearman_err"] = summ["spearman_std"]
+        summ["r2_err"] = summ["r2_std"]
         summ["rmse_err"] = summ["rmse_std"]
-        err_lbl = "SD"
 
-    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+    fig, axes = plt.subplots(1, 4, figsize=figsize, constrained_layout=False)
+    fig.subplots_adjust(wspace=0.38)
     x = np.arange(len(summ), dtype=np.int32)
     labels = [MODEL_LABELS[m] for m in summ["model"].tolist()]
     colors = [MODEL_COLORS[m] for m in summ["model"].tolist()]
@@ -1074,77 +1263,81 @@ def plot_loro_subject_summary_bars(
     p_lbl = _metrics_panel_label(metrics_df, panel_label=panel_label)
     sfx = "" if p_lbl == "" else f" ({p_lbl})"
 
-    bar0 = axes[0].bar(
-        x,
-        summ["pearson_mean"].to_numpy(dtype=np.float64),
-        yerr=summ["pearson_err"].to_numpy(dtype=np.float64),
-        color=colors,
-        alpha=0.92,
-        capsize=4,
-        ecolor="#3a3a3a",
-    )
-    axes[0].set_title(f"Mean Subject LORO Pearson r ({err_lbl} bars){sfx}", fontsize=FONT["title"] + 3)
-    axes[0].set_ylabel("Pearson r", fontsize=FONT["label"] + 2)
-    axes[0].set_xticks(x.tolist())
-    axes[0].set_xticklabels(labels, rotation=0, fontsize=FONT["tick"] + 2)
-    axes[0].tick_params(axis="y", labelsize=FONT["tick"] + 2)
-    axes[0].grid(True, axis="y", alpha=0.2)
-
-    bar1 = axes[1].bar(
-        x,
-        summ["rmse_mean"].to_numpy(dtype=np.float64),
-        yerr=summ["rmse_err"].to_numpy(dtype=np.float64),
-        color=colors,
-        alpha=0.92,
-        capsize=4,
-        ecolor="#3a3a3a",
-    )
-    axes[1].set_title(f"Mean Subject LORO RMSE ({err_lbl} bars){sfx}", fontsize=FONT["title"] + 3)
-    axes[1].set_ylabel("RMSE", fontsize=FONT["label"] + 2)
-    axes[1].set_xticks(x.tolist())
-    axes[1].set_xticklabels(labels, rotation=0, fontsize=FONT["tick"] + 2)
-    axes[1].tick_params(axis="y", labelsize=FONT["tick"] + 2)
-    axes[1].grid(True, axis="y", alpha=0.2)
-
-    # Place value labels above each bar in form "(metric; n=...)".
-    p_mean = summ["pearson_mean"].to_numpy(dtype=np.float64)
-    p_err = np.nan_to_num(summ["pearson_err"].to_numpy(dtype=np.float64), nan=0.0)
-    r_mean = summ["rmse_mean"].to_numpy(dtype=np.float64)
-    r_err = np.nan_to_num(summ["rmse_err"].to_numpy(dtype=np.float64), nan=0.0)
     n_subs = summ["n_subjects"].to_numpy(dtype=np.int32)
+    metric_specs = [
+        ("pearson", "Pearson r", f"Mean Subject LORO Pearson r{sfx}", True),
+        ("spearman", "Spearman r", f"Mean Subject LORO Spearman r{sfx}", True),
+        ("r2", r"$R^2$", f"Mean Subject LORO $R^2${sfx}", True),
+        ("rmse", "RMSE", f"Mean Subject LORO RMSE{sfx}", False),
+    ]
 
-    p_top = p_mean + p_err
-    r_top = r_mean + r_err
-    p_pad = max(float(np.nanmax(np.abs(p_top))) * 0.08, 0.015)
-    r_pad = max(float(np.nanmax(np.abs(r_top))) * 0.08, 0.015)
-    # Pearson is bounded in [-1, 1]; fix top at 1.0 for consistent interpretability.
-    y0_lo, _ = axes[0].get_ylim()
-    axes[0].set_ylim(bottom=y0_lo, top=1.0)
-    axes[1].set_ylim(top=float(np.nanmax(r_top) + 3.2 * r_pad))
+    for ax, (prefix, ylabel, title, is_corr_like) in zip(axes, metric_specs):
+        mean = summ[f"{prefix}_mean"].to_numpy(dtype=np.float64)
+        err = np.nan_to_num(summ[f"{prefix}_err"].to_numpy(dtype=np.float64), nan=0.0)
+        top = mean + err
+        bot = mean - err
 
-    y0_lo, y0_hi = axes[0].get_ylim()
-    p_bot = p_mean - p_err
-    p_label_pad = max(0.012, 0.02 * (y0_hi - y0_lo))
-    for xi, val, bot, n_sub in zip(x.tolist(), p_mean.tolist(), p_bot.tolist(), n_subs.tolist()):
-        # Place label just below the lower error-bar cap ("bottom T"), clamped to axis range.
-        y_txt = max(float(bot - p_label_pad), float(y0_lo + 0.01 * (y0_hi - y0_lo)))
-        axes[0].text(
-            xi,
-            y_txt,
-            f"({val:.3f}; n={int(n_sub)})",
-            ha="center",
-            va="top",
-            fontsize=FONT["small"] + 2,
+        ax.bar(
+            x,
+            mean,
+            yerr=err,
+            color=colors,
+            alpha=0.92,
+            capsize=4,
+            ecolor="#3a3a3a",
         )
-    for xi, val, top, n_sub in zip(x.tolist(), r_mean.tolist(), r_top.tolist(), n_subs.tolist()):
-        axes[1].text(
-            xi,
-            float(top + r_pad),
-            f"({val:.3f}; n={int(n_sub)})",
-            ha="center",
-            va="bottom",
-            fontsize=FONT["small"] + 2,
-        )
+        ax.set_title(title, fontsize=FONT["title"] + 3)
+        ax.set_ylabel(ylabel, fontsize=FONT["label"] + 2)
+        ax.set_xticks(x.tolist())
+        ax.set_xticklabels(labels, rotation=0, fontsize=FONT["tick"] + 2)
+        ax.tick_params(axis="y", labelsize=FONT["tick"] + 2)
+        ax.grid(True, axis="y", alpha=0.2)
+
+        finite_top = top[np.isfinite(top)]
+        finite_bot = bot[np.isfinite(bot)]
+        if finite_top.size == 0 or finite_bot.size == 0:
+            y_lo, y_hi = (-1.0, 1.0) if is_corr_like else (0.0, 1.0)
+        else:
+            y_min = float(np.min(finite_bot))
+            y_max = float(np.max(finite_top))
+            span = max(y_max - y_min, 1e-6)
+            upper_pad = 0.12 * span
+            lower_pad = 0.20 * span
+            if is_corr_like:
+                y_lo = max(-1.0, y_min - lower_pad)
+                y_hi = min(1.0, y_max + 2.2 * upper_pad)
+                if y_hi - y_lo < 0.08:
+                    extra = 0.04
+                    y_lo = max(-1.0, y_lo - extra)
+                    y_hi = min(1.0, y_hi + extra)
+            else:
+                y_lo = max(0.0, y_min - lower_pad)
+                y_hi = y_max + 2.2 * upper_pad
+        ax.set_ylim(y_lo, y_hi)
+
+        y_lo, y_hi = ax.get_ylim()
+        label_pad = max(0.012, 0.02 * (y_hi - y_lo))
+        if is_corr_like:
+            for xi, val, low, n_sub in zip(x.tolist(), mean.tolist(), bot.tolist(), n_subs.tolist()):
+                y_txt = max(float(low - label_pad), float(y_lo + 0.01 * (y_hi - y_lo)))
+                ax.text(
+                    xi,
+                    y_txt,
+                    f"({val:.3f}; n={int(n_sub)})",
+                    ha="center",
+                    va="top",
+                    fontsize=FONT["small"] + 2,
+                )
+        else:
+            for xi, val, high, n_sub in zip(x.tolist(), mean.tolist(), top.tolist(), n_subs.tolist()):
+                ax.text(
+                    xi,
+                    float(high + label_pad),
+                    f"({val:.3f}; n={int(n_sub)})",
+                    ha="center",
+                    va="bottom",
+                    fontsize=FONT["small"] + 2,
+                )
 
     return fig, axes, summ
 
@@ -1186,22 +1379,17 @@ def compute_fold_combo_metrics_from_cache(
     coverage_min: int = 5,
     coverage_max: int = 11,
     models: Sequence[str] | None = None,
+    inverse_combat: bool = False,
+    eval_gene_path: str | None = None,
+    clamp_zero: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     model_list = [str(m).lower() for m in (models if models is not None else MODEL_ORDER)]
-    mode = str(eval_gene_mode).lower()
-    if mode not in {"all", "hvg", "custom"}:
-        raise ValueError("eval_gene_mode must be one of: all, hvg, custom")
-
-    eval_gene_set: set[str] | None = None
-    if mode == "hvg":
-        hdr = io_utils.load_gene_header_and_hvg(_resolve_repo_path(cfg.csv_path), _resolve_repo_path(cfg.hvg_path))
-        eval_gene_set = set(str(g) for g in hdr["genes_hvg"])
-    elif mode == "custom":
-        if custom_gene_list is None:
-            raise ValueError("custom_gene_list is required when eval_gene_mode='custom'")
-        eval_gene_set = set(str(g) for g in custom_gene_list)
-        if not eval_gene_set:
-            raise ValueError("custom_gene_list is empty")
+    mode_label, eval_gene_path_resolved, eval_gene_set = _resolve_eval_gene_set(
+        cfg,
+        eval_gene_mode=eval_gene_mode,
+        custom_gene_list=custom_gene_list,
+        eval_gene_path=eval_gene_path,
+    )
 
     g = prepost["gtex_eligible_raw"].copy()
     subj_obs = (
@@ -1215,6 +1403,8 @@ def compute_fold_combo_metrics_from_cache(
         model_root = _model_cache_root(cfg, model)
         if not model_root.exists():
             continue
+        cached_gene_names: Tuple[str, ...] | None = None
+        cached_gi: np.ndarray | None = None
         for sid, obs in subj_obs.items():
             n_obs = int(len(obs))
             if n_obs < int(coverage_min) or n_obs > int(coverage_max):
@@ -1224,41 +1414,52 @@ def compute_fold_combo_metrics_from_cache(
             if not npz_path.exists():
                 continue
 
-            z = np.load(npz_path, allow_pickle=True)
-            pred = z["loro_fused_subject_h"].astype(np.float64)
-            truth = z["loro_truth_subject_h"].astype(np.float64)
-            mask = z["loro_eval_mask"].astype(bool)
-            gene_names = [str(x) for x in z["gene_names"].tolist()]
+            with np.load(npz_path, allow_pickle=True) as z:
+                pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
+                pred, truth = _maybe_clamp_zero(pred, truth, inverse_combat=inverse_combat, clamp_zero=clamp_zero)
+                mask = z["loro_eval_mask"].astype(bool)
+                gene_names = tuple(str(x) for x in z["gene_names"].tolist())
 
-            if eval_gene_set is None:
-                gi = np.arange(len(gene_names), dtype=np.int32)
-            else:
-                gi = np.asarray([i for i, gname in enumerate(gene_names) if gname in eval_gene_set], dtype=np.int32)
-                if int(gi.size) == 0:
-                    continue
+                if cached_gene_names == gene_names and cached_gi is not None:
+                    gi = cached_gi
+                else:
+                    try:
+                        gi = _gene_indices_from_names(
+                            gene_names,
+                            eval_gene_set,
+                            context=f"subject={sid} model={model}",
+                        )
+                    except RuntimeError:
+                        continue
+                    cached_gene_names = gene_names
+                    cached_gi = gi
 
-            obs_set = set(int(x) for x in obs)
-            for hold in np.where(mask)[0].astype(int).tolist():
-                train = sorted(obs_set - {int(hold)})
-                train_key = ",".join(map(str, train))
-                fold_key = f"hold={int(hold)}|train={train_key}"
-                x = truth[int(hold), gi]
-                y = pred[int(hold), gi]
-                m = np.isfinite(x) & np.isfinite(y)
-                rows.append(
-                    {
-                        "subject": str(sid),
-                        "model": str(model),
-                        "coverage": n_obs,
-                        "hold_parcel": int(hold),
-                        "train_key": train_key,
-                        "fold_key": fold_key,
-                        "n_eval_genes": int(gi.size),
-                        "n_points": int(m.sum()),
-                        "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-                        "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-                    }
-                )
+                obs_set = set(int(x) for x in obs)
+                for hold in np.where(mask)[0].astype(int).tolist():
+                    train = sorted(obs_set - {int(hold)})
+                    train_key = ",".join(map(str, train))
+                    fold_key = f"hold={int(hold)}|train={train_key}"
+                    x = truth[int(hold), gi]
+                    y = pred[int(hold), gi]
+                    m = np.isfinite(x) & np.isfinite(y)
+                    rows.append(
+                        {
+                            "subject": str(sid),
+                            "model": str(model),
+                            "coverage": n_obs,
+                            "hold_parcel": int(hold),
+                            "train_key": train_key,
+                            "fold_key": fold_key,
+                            "n_eval_genes": int(gi.size),
+                            "eval_gene_mode": mode_label,
+                            "eval_gene_path": eval_gene_path_resolved,
+                            "inverse_combat": bool(inverse_combat),
+                            "clamp_zero": bool(clamp_zero),
+                            "n_points": int(m.sum()),
+                            "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+                            "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+                        }
+                    )
 
     fold_perf_df = pd.DataFrame(rows)
     if len(fold_perf_df) == 0:
@@ -1277,7 +1478,10 @@ def compute_fold_combo_metrics_from_cache(
         .sort_values(["model", "coverage", "fold_key"])
         .reset_index(drop=True)
     )
-    combo_df["eval_gene_mode"] = mode
+    combo_df["eval_gene_mode"] = mode_label
+    combo_df["eval_gene_path"] = eval_gene_path_resolved
+    combo_df["inverse_combat"] = bool(inverse_combat)
+    combo_df["clamp_zero"] = bool(clamp_zero)
     return fold_perf_df, combo_df
 
 
@@ -1515,8 +1719,14 @@ def plot_heldout_region_grouped_bars(
     return fig, ax, dd
 
 
-def select_subject_by_model(cfg: EDAConfig, mode: str = "median", metric: str = "pearson_r", model: str = "plam") -> str:
-    dlam_df = compute_subject_metrics_from_cache(cfg, model=str(model))
+def select_subject_by_model(
+    cfg: EDAConfig,
+    mode: str = "median",
+    metric: str = "pearson_r",
+    model: str = "plam",
+    inverse_combat: bool = False,
+) -> str:
+    dlam_df = compute_subject_metrics_from_cache(cfg, model=str(model), inverse_combat=inverse_combat)
     if metric not in {"pearson_r", "rmse"}:
         raise ValueError("metric must be one of: pearson_r, rmse")
     d = dlam_df.dropna(subset=[metric]).copy()
@@ -1540,34 +1750,30 @@ def _subject_scatter_payload(
     subject: str,
     eval_gene_mode: str = "all",  # all | hvg | custom
     custom_gene_list: Sequence[str] | None = None,
+    inverse_combat: bool = False,
+    eval_gene_path: str | None = None,
+    clamp_zero: bool = False,
 ) -> Dict[str, np.ndarray]:
     p = (_model_cache_root(cfg, str(model).lower()) / f"{subject}.npz").resolve()
     if not p.exists():
         raise FileNotFoundError(p)
-    z = np.load(p, allow_pickle=True)
-    pred = z["loro_fused_subject_h"].astype(np.float64)
-    truth = z["loro_truth_subject_h"].astype(np.float64)
-    mask = z["loro_eval_mask"].astype(bool)
-    gene_names = [str(g) for g in z["gene_names"].tolist()]
+    with np.load(p, allow_pickle=True) as z:
+        pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
+        pred, truth = _maybe_clamp_zero(pred, truth, inverse_combat=inverse_combat, clamp_zero=clamp_zero)
+        mask = z["loro_eval_mask"].astype(bool)
+        gene_names = tuple(str(g) for g in z["gene_names"].tolist())
 
-    mode = str(eval_gene_mode).lower()
-    if mode not in {"all", "hvg", "custom"}:
-        raise ValueError("eval_gene_mode must be one of: all, hvg, custom")
-    if mode == "all":
-        gi = np.arange(len(gene_names), dtype=np.int32)
-    elif mode == "hvg":
-        hdr = io_utils.load_gene_header_and_hvg(_resolve_repo_path(cfg.csv_path), _resolve_repo_path(cfg.hvg_path))
-        hvg_set = set(str(g) for g in hdr["genes_hvg"])
-        gi = np.asarray([i for i, g in enumerate(gene_names) if g in hvg_set], dtype=np.int32)
-        if int(gi.size) == 0:
-            raise RuntimeError(f"No HVG overlap found in cache gene_names for subject={subject}, model={model}")
-    else:
-        if custom_gene_list is None:
-            raise ValueError("custom_gene_list is required when eval_gene_mode='custom'")
-        cset = set(str(g) for g in custom_gene_list)
-        gi = np.asarray([i for i, g in enumerate(gene_names) if g in cset], dtype=np.int32)
-        if int(gi.size) == 0:
-            raise RuntimeError(f"No custom gene overlap found in cache gene_names for subject={subject}, model={model}")
+    _, _, eval_gene_set = _resolve_eval_gene_set(
+        cfg,
+        eval_gene_mode=eval_gene_mode,
+        custom_gene_list=custom_gene_list,
+        eval_gene_path=eval_gene_path,
+    )
+    gi = _gene_indices_from_names(
+        gene_names,
+        eval_gene_set,
+        context=f"subject={subject} model={model}",
+    )
 
     g = int(gi.size)
     parcel_ids = np.where(mask)[0]
@@ -1601,12 +1807,21 @@ def plot_single_subject_scatter_triplet(
     top_n: int = 10,
     eval_gene_mode: str = "all",  # all | hvg | custom
     custom_gene_list: Sequence[str] | None = None,
+    inverse_combat: bool = False,
+    eval_gene_path: str | None = None,
+    clamp_zero: bool = False,
     density_gridsize: int = 70,
     density_cmap: str = "magma",
     density_mincnt: int = 1,
     figsize: Tuple[float, float] = (15.0, 4.8),
 ) -> Tuple[plt.Figure, np.ndarray, str]:
-    subject = str(subject_id) if subject_id else select_subject_by_model(cfg, mode=str(subject_mode), metric="pearson_r", model=str(rank_model))
+    subject = str(subject_id) if subject_id else select_subject_by_model(
+        cfg,
+        mode=str(subject_mode),
+        metric="pearson_r",
+        model=str(rank_model),
+        inverse_combat=inverse_combat,
+    )
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
     mode_eval = str(eval_gene_mode).lower()
     mode_color = str(color_by).lower()
@@ -1628,6 +1843,9 @@ def plot_single_subject_scatter_triplet(
             subject=subject,
             eval_gene_mode=eval_gene_mode,
             custom_gene_list=custom_gene_list,
+            inverse_combat=inverse_combat,
+            eval_gene_path=eval_gene_path,
+            clamp_zero=clamp_zero,
         )
         x = p["x"]
         y = p["y"]

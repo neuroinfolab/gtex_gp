@@ -49,6 +49,7 @@ def _build_covariates(df: pd.DataFrame, use_covariates: bool) -> np.ndarray:
 class CombatHarmonizer:
     genes: List[str]
     use_covariates: bool
+    inverse_slope_floor: float
     grand_mean: np.ndarray
     pooled_sd: np.ndarray
     gamma_hat: np.ndarray
@@ -66,6 +67,7 @@ class CombatHarmonizer:
         gtex_df: pd.DataFrame,
         gene_cols: List[str],
         use_covariates: bool = True,
+        inverse_slope_floor: float = 0.10,
     ) -> "CombatHarmonizer":
         a = ahba_df.copy()
         g = gtex_df.copy()
@@ -156,6 +158,7 @@ class CombatHarmonizer:
         return cls(
             genes=list(gene_cols),
             use_covariates=bool(use_covariates),
+            inverse_slope_floor=float(max(inverse_slope_floor, 0.0)),
             grand_mean=grand_mean,
             pooled_sd=pooled_sd,
             gamma_hat=gamma_hat,
@@ -207,7 +210,17 @@ class CombatHarmonizer:
         subject_ids: Optional[np.ndarray] = None,
         sample_df: Optional[pd.DataFrame] = None,
     ) -> np.ndarray:
-        z = (x_h_matrix - self.intercept[None, :]) / self.slope[None, :]
+        slope = np.asarray(self.slope, dtype=np.float64)
+        floor = float(max(self.inverse_slope_floor, 0.0))
+        if floor > 0.0:
+            slope_abs = np.abs(slope)
+            slope_safe = slope.copy()
+            unstable = slope_abs < floor
+            slope_safe[unstable] = np.sign(slope_safe[unstable]) * floor
+            slope_safe[slope_safe == 0.0] = floor
+        else:
+            slope_safe = slope
+        z = (x_h_matrix - self.intercept[None, :]) / slope_safe[None, :]
         cov_e = self._inverse_covariate_effect(z, sample_df)
         s_adj = (z - cov_e - self.grand_mean[None, :]) / self.pooled_sd[None, :]
         s = s_adj * np.sqrt(np.clip(self.delta_star[1][None, :], 1e-8, None)) + self.gamma_star[1][None, :]
@@ -223,4 +236,6 @@ class CombatHarmonizer:
             "gamma_var_batch1": float(np.nanvar(self.gamma_star[1, :])),
             "delta_mean_batch0": float(np.nanmean(self.delta_star[0, :])),
             "delta_mean_batch1": float(np.nanmean(self.delta_star[1, :])),
+            "inverse_slope_floor": float(self.inverse_slope_floor),
+            "n_inverse_slope_clipped": int(np.sum(np.abs(self.slope) < float(self.inverse_slope_floor))),
         }

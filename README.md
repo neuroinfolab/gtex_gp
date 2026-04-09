@@ -10,39 +10,27 @@ This repository contains the AHBA<->GTEx atlas-alignment workflow used for manus
 Primary write-up pipeline:
 - `notebooks/ahba_gtex_writeup_end_to_end.ipynb`
 
-Primary iterative analysis surface (current default for new work):
-- `results_eda_cached_predictions_allgenes.ipynb`
+Active analysis notebooks:
+- `notebooks/results_eda_cached_predictions_allgenes.ipynb` — default harmonized-space cache EDA
+- `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb` — raw/inverse-ComBat cache EDA
+- `notebooks/coordinate_overlay_3d_mni.ipynb` — GTEx/AHBA spatial assignment inspection
 
-Rank-specific all-genes EDA variants:
-- `results_eda_cached_predictions_allgenes_rank3.ipynb`
-- `results_eda_cached_predictions_allgenes_rank4.ipynb`
-- `results_eda_cached_predictions_allgenes_dynamicrank.ipynb`
-
-Companion fast-scope notebook:
-- `results_eda_cached_predictions_hvg.ipynb`
-
-Publication-ready cached-results notebook:
-- `results_eda_publication_ready.ipynb`
-
-Single-subject cache smoke/debug notebook:
-- `loro_single_subject_test.ipynb`
-
-DLAM single-subject diagnostics notebook:
-- `results_eda_dlam_single_subject_deepdive.ipynb`
+Legacy or exploratory notebook variants now live under:
+- `notebooks/ar_notebooks/`
 
 ## Recent Workflow Additions (High Level)
 
 - Subject-wise LORO caches now support stable downstream EDA without re-running full notebook workflows.
 - PLAM rank experiments are supported via cache directories such as `plam_rank3`, `plam_rank4`, and `plam_dynamicrank`.
-- `ar_utils/dlam_diagnostics.py` provides DLAM full-fit/LORO diagnostics with reusable plotting utilities.
+- `src/eval_utils/dlam_diagnostics.py` provides DLAM full-fit/LORO diagnostics with reusable plotting utilities.
 - Publication-facing EDA is now centralized in `results_eda_publication_ready.ipynb` using cache-backed utilities.
 
 ## Repository Layout
 
-- `src/`: reusable preprocessing, harmonization, models, evaluation
-- `scripts/`: manuscript/workflow CLIs (including LORO panel builder)
-- `ar_utils/`: subject-wise LORO cache builders + EDA utilities
-- `notebooks/`: write-up notebook and paired Python source
+- `src/`: reusable preprocessing, harmonization, models, workflows, evaluation utilities, visualization
+- `scripts/`: manuscript/workflow CLIs and cache-generation entrypoints
+- `scripts/sbatch/`: Slurm launchers for cache experiments
+- `notebooks/`: write-up and active analysis notebooks
 - `docs/manuscript/`: TeX manuscript and mapping docs
 - `configs/`: notebook workflow configs
 - `tests/`: smoke/regression tests
@@ -56,7 +44,7 @@ Expected defaults:
 
 Legacy root-level fallbacks (`gxp_samples.csv`, `ahba_100hvg.txt`) remain supported for migration, but default code paths use `data/raw/`.
 
-## Subject-Wise LORO Cache Workflow (`ar_utils`)
+## Subject-Wise LORO Cache Workflow
 
 Subject/model caches are written to:
 - `out/loro_subject_cache/<gene_scope>/<model>/<subject>.npz`
@@ -81,12 +69,21 @@ Fusion behavior:
 - strict LORO predictions at `loro_eval_mask`
 - single full-data fallback model for all non-LORO parcels
 
+Core implementation modules:
+- `src/workflows/loro_cache.py`
+- `scripts/run_loro_cache_batch.py`
+- `scripts/sbatch/run_loro_cache_single_subject.sbatch`
+- `scripts/sbatch/run_loro_cache_array.sbatch`
+- `src/eval_utils/results_eda.py`
+- `src/eval_utils/dlam_diagnostics.py`
+- `src/viz/coord_viz.py`
+
 Current defaults:
 - eligible subjects: `min_observed_parcels=5`
 - DLAM model gate: `c_min=4`
 - atlas/parcel aggregation: `atlas_agg=mean` (switchable to `median`)
-- GTEx representative point for parcel assignment: `gtex_rep_mode=medoid`
-- GTEx hemisphere preprocessing for parcel assignment: `gtex_hemi_mode=native` (switchable to `mirror_left`)
+- GTEx representative point for parcel assignment: `gtex_rep_mode=centroid`
+- GTEx hemisphere preprocessing for parcel assignment: `gtex_hemi_mode=mirror_left`
 - PLAM dynamic rank: opt-in (`dynamic_rank=false` by default)
 - dynamic-rank cap when enabled: `plam_latent_dim_max=10` (or `PLAM_MAX_RANK=10` in sbatch)
 
@@ -94,7 +91,7 @@ Current defaults:
 
 - Target parcels are defined from AHBA (`tissue_or_parcel`) with parcel centroids.
 - GTEx samples are mapped by nearest-neighbor in 3D to AHBA parcel centroids.
-- If a row has multiple coordinates in `coordinates`, `gtex_gp` uses the **centroid of all listed coordinates** (not just the first coordinate) before nearest-neighbor assignment.
+- If a row has multiple coordinates in `coordinates`, `gtex_gp` uses the configured representative point across all listed coordinates before nearest-neighbor assignment (`gtex_rep_mode=centroid|medoid`).
 - GTEx native tissue labels are retained and can be inspected alongside mapped AHBA parcel labels.
 
 ## Quick Commands
@@ -102,52 +99,63 @@ Current defaults:
 Single subject (local):
 
 ```bash
-python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --use-cache true
+python3 scripts/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --use-cache true
 ```
 
 Median aggregation variant:
 
 ```bash
-python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --atlas-agg median
+python3 scripts/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --atlas-agg median
 ```
 
-Mirrored-left GTEx assignment with medoids:
+Historical/original behavior before these new spatial options:
+
+- representative point: `centroid`
+- hemisphere preprocessing: `native`
+
+Current default fitting behavior:
 
 ```bash
-python3 ar_utils/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --gtex-rep-mode medoid --gtex-hemi-mode mirror_left
+python3 scripts/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes
+```
+
+Override example:
+
+```bash
+python3 scripts/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-scope allgenes --gtex-rep-mode medoid --gtex-hemi-mode native
 ```
 
 Single-subject sbatch:
 
 ```bash
-SUBJECT_ID=GTEX-14ASI MODEL_NAME=all GENE_SCOPE=allgenes sbatch run_loro_cache_single_subject.sbatch
+SUBJECT_ID=GTEX-14ASI MODEL_NAME=all GENE_SCOPE=allgenes sbatch scripts/sbatch/run_loro_cache_single_subject.sbatch
 ```
 
 All-subject array sbatch:
 
 ```bash
-GENE_SCOPE=allgenes sbatch run_loro_cache_array.sbatch
+GENE_SCOPE=allgenes sbatch scripts/sbatch/run_loro_cache_array.sbatch
 ```
 
 Dynamic-rank PLAM array run (all-genes):
 
 ```bash
-MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch run_loro_cache_array.sbatch
+MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch scripts/sbatch/run_loro_cache_array.sbatch
 ```
 
 HVG array run:
 
 ```bash
-GENE_SCOPE=hvg sbatch run_loro_cache_array.sbatch
+GENE_SCOPE=hvg sbatch scripts/sbatch/run_loro_cache_array.sbatch
 ```
 
 ## Notes for Contributors
 
 - Current iterative development target is **all-genes** EDA/utilities first.
-- After steady-state behavior is reached, mirror updates into HVG notebook defaults.
-- `EDAConfig` in `ar_utils/results_eda.py` supports model-directory overrides:
+- Keep new work in the active notebooks under `notebooks/`; treat `notebooks/ar_notebooks/` as older exploratory variants unless explicitly reviving one.
+- `EDAConfig` in `src/eval_utils/results_eda.py` supports model-directory overrides:
   - `naive_cache_dirname`, `dlam_cache_dirname`, `plam_cache_dirname`
   - useful for side-by-side rank experiments (`plam_rank3`, `plam_rank4`, `plam_dynamicrank`)
 - See `CONTEXT.md` for a fast onboarding summary intended for parallel agents.
 
-Last updated at: 2026-03-30
+Last updated at: 2026-04-07

@@ -97,8 +97,8 @@ def read_expression_subset(
     hemi_mode: str | None = None,
 ) -> pd.DataFrame:
     gene_cols = list(gene_cols)
-    rep_mode_resolved = _resolve_gtex_spatial_option(rep_mode, "GTEX_REP_MODE", "medoid")
-    hemi_mode_resolved = _resolve_gtex_spatial_option(hemi_mode, "GTEX_HEMI_MODE", "native")
+    rep_mode_resolved = _resolve_gtex_spatial_option(rep_mode, "GTEX_REP_MODE", "centroid")
+    hemi_mode_resolved = _resolve_gtex_spatial_option(hemi_mode, "GTEX_HEMI_MODE", "mirror_left")
     usecols = META_COLS + gene_cols
     dtype_map = {
         "subject": "string",

@@ -74,8 +74,9 @@ class Config:
     unc_m0: float = 0.5
     unc_tau: float = 0.15
     combat_use_covariates: bool = True
-    gtex_rep_mode: str = "medoid"
-    gtex_hemi_mode: str = "native"
+    combat_inverse_slope_floor: float = 0.10
+    gtex_rep_mode: str = "centroid"
+    gtex_hemi_mode: str = "mirror_left"
     hier_lambda_a: float = 10.0
     hier_lambda_b: float = 10.0
     hier_base_method: str = "robustz_affine"
@@ -113,6 +114,7 @@ def parse_args() -> Config:
     p.add_argument("--unc-m0", type=float, default=Config.unc_m0)
     p.add_argument("--unc-tau", type=float, default=Config.unc_tau)
     p.add_argument("--combat-use-covariates", type=lambda s: str(s).lower() in {"1", "true", "yes", "y"}, default=Config.combat_use_covariates)
+    p.add_argument("--combat-inverse-slope-floor", type=float, default=Config.combat_inverse_slope_floor)
     p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=Config.gtex_rep_mode)
     p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=Config.gtex_hemi_mode)
     p.add_argument("--hier-lambda-a", type=float, default=Config.hier_lambda_a)

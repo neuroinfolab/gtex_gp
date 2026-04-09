@@ -232,6 +232,9 @@ def plot_ahba_gtex_overlay(
     gtex_opacity: float = 0.78,
     ahba_symbol: str = "circle",
     gtex_symbol: str = "circle",
+    draw_match_lines: bool = False,
+    match_line_color: str = "#1e3a8a",
+    match_line_width: float = 1.0,
     title: str | None = None,
 ):
     go, _ = _plotly_import()
@@ -294,6 +297,37 @@ def plot_ahba_gtex_overlay(
             ),
         )
     )
+
+    if bool(draw_match_lines):
+        ahba_lookup = (
+            ahba.drop_duplicates(subset=["parcel_idx"])
+            .set_index("parcel_idx")[["coord_x", "coord_y", "coord_z"]]
+            .to_dict("index")
+        )
+        line_x: List[float | None] = []
+        line_y: List[float | None] = []
+        line_z: List[float | None] = []
+        for _, row in gtex.iterrows():
+            parcel_idx = int(row["parcel_idx"])
+            if parcel_idx not in ahba_lookup:
+                continue
+            target = ahba_lookup[parcel_idx]
+            line_x.extend([float(row["coord_x"]), float(target["coord_x"]), None])
+            line_y.extend([float(row["coord_y"]), float(target["coord_y"]), None])
+            line_z.extend([float(row["coord_z"]), float(target["coord_z"]), None])
+        if line_x:
+            fig.add_trace(
+                go.Scatter3d(
+                    x=line_x,
+                    y=line_y,
+                    z=line_z,
+                    mode="lines",
+                    name="GTEx to AHBA match",
+                    line={"color": match_line_color, "width": match_line_width},
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
 
     groups = sorted(gtex[color_col].astype(str).unique().tolist())
     color_map = dict(zip(groups, _qualitative_colors(len(groups), palette_name=palette_name)))

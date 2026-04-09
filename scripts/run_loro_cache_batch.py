@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from ar_utils.run_loro_subject_cache import MODEL_NAMES, SubjectCacheConfig, list_eligible_subjects, process_subject_model
+from src.workflows.loro_cache import MODEL_NAMES, SubjectCacheConfig, list_eligible_subjects, process_subject_model
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gp-noise", type=float, default=SubjectCacheConfig.gp_noise)
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
+    p.add_argument("--combat-inverse-slope-floor", type=float, default=SubjectCacheConfig.combat_inverse_slope_floor)
     p.add_argument("--latent-dim", type=int, default=SubjectCacheConfig.latent_dim)
     p.add_argument("--dynamic-rank", default=str(SubjectCacheConfig.dynamic_rank).lower())
     p.add_argument("--plam-latent-dim-max", type=int, default=SubjectCacheConfig.plam_latent_dim_max)
@@ -76,6 +77,7 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         gp_noise=float(a.gp_noise),
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
+        combat_inverse_slope_floor=float(a.combat_inverse_slope_floor),
         latent_dim=int(a.latent_dim),
         dynamic_rank=_parse_bool(a.dynamic_rank),
         plam_latent_dim_max=int(a.plam_latent_dim_max),
