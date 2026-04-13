@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,9 +47,48 @@ def _build_covariates(df: pd.DataFrame, use_covariates: bool) -> np.ndarray:
 
 @dataclass
 class CombatHarmonizer:
+    """
+    ComBat-style harmonizer with an additional GTEx->AHBA overlap affine.
+    Forward fit / transform, gene by gene: Let x_{i,g} be expression for sample i and gene g, with batch b(i) in {AHBA, GTEx}.
+    Let c_i be the row covariates (currently age, sex).
+    
+    1. Fit covariate effects on the pooled table:
+        x_{i,g} ~= beta0_g + c_i^T beta_cov,g + residual_{i,g}
+       Store beta_cov,g and define the covariate effect
+        cov_e(i, g) = c_i^T beta_cov,g
+    
+    2. Remove covariates and compute pooled standardization statistics:
+        y_{i,g} = x_{i,g} - cov_e(i, g)
+        grand_mean_g = mean_i y_{i,g}
+        pooled_sd_g  = std_i  y_{i,g}
+        s_{i,g} = (y_{i,g} - grand_mean_g) / pooled_sd_g
+    
+    3. Estimate per-batch mean / variance effects in standardized space:
+        gamma_hat_{b,g} = mean_{i: b(i)=b} s_{i,g}
+        delta_hat_{b,g} = var_{i: b(i)=b}  s_{i,g}
+       Then shrink to gamma_star, delta_star.
+    
+    4. Remove batch effects:
+        s_adj_{i,g} =
+            (s_{i,g} - gamma_star_{b(i),g}) / sqrt(delta_star_{b(i),g})
+    
+    5. Reconstruct corrected expression in the shared corrected space:
+        x_corr_{i,g} =
+            s_adj_{i,g} * pooled_sd_g + grand_mean_g + cov_e(i, g)
+    
+    6. Fit a second gene-wise affine map on overlapping parcels only:
+        AHBA_parcel_mean_{r,g} ~= slope_g * GTEx_parcel_mean_{r,g} + intercept_g
+       This is a post-ComBat calibration from corrected GTEx to corrected AHBA
+       on shared parcel support.
+
+    7. Final forward transform:
+       AHBA:
+           x_h = x_corr
+       GTEx:
+           x_h = slope * x_corr + intercept
+    """
     genes: List[str]
     use_covariates: bool
-    inverse_slope_floor: float
     grand_mean: np.ndarray
     pooled_sd: np.ndarray
     gamma_hat: np.ndarray
@@ -67,7 +106,6 @@ class CombatHarmonizer:
         gtex_df: pd.DataFrame,
         gene_cols: List[str],
         use_covariates: bool = True,
-        inverse_slope_floor: float = 0.10,
     ) -> "CombatHarmonizer":
         a = ahba_df.copy()
         g = gtex_df.copy()
@@ -158,7 +196,6 @@ class CombatHarmonizer:
         return cls(
             genes=list(gene_cols),
             use_covariates=bool(use_covariates),
-            inverse_slope_floor=float(max(inverse_slope_floor, 0.0)),
             grand_mean=grand_mean,
             pooled_sd=pooled_sd,
             gamma_hat=gamma_hat,
@@ -190,43 +227,6 @@ class CombatHarmonizer:
         out.loc[:, self.genes] = x_corr.astype(np.float32)
         return out
 
-    def _inverse_covariate_effect(self, x_h_matrix: np.ndarray, sample_df: Optional[pd.DataFrame]) -> np.ndarray:
-        n = int(np.asarray(x_h_matrix).shape[0])
-        if not bool(self.use_covariates) or sample_df is None:
-            return np.zeros((n, len(self.genes)), dtype=np.float64)
-        cov_df = sample_df.copy().reset_index(drop=True)
-        if len(cov_df) == 1 and n > 1:
-            cov_df = pd.concat([cov_df] * n, ignore_index=True)
-        if len(cov_df) != n:
-            raise ValueError(f"sample_df rows ({len(cov_df)}) must match x_h_matrix rows ({n})")
-        cov = _build_covariates(cov_df, use_covariates=self.use_covariates)
-        if cov.shape[1] == 0:
-            return np.zeros((n, len(self.genes)), dtype=np.float64)
-        return cov @ self.beta_cov
-
-    def inverse_gtex(
-        self,
-        x_h_matrix: np.ndarray,
-        subject_ids: Optional[np.ndarray] = None,
-        sample_df: Optional[pd.DataFrame] = None,
-    ) -> np.ndarray:
-        slope = np.asarray(self.slope, dtype=np.float64)
-        floor = float(max(self.inverse_slope_floor, 0.0))
-        if floor > 0.0:
-            slope_abs = np.abs(slope)
-            slope_safe = slope.copy()
-            unstable = slope_abs < floor
-            slope_safe[unstable] = np.sign(slope_safe[unstable]) * floor
-            slope_safe[slope_safe == 0.0] = floor
-        else:
-            slope_safe = slope
-        z = (x_h_matrix - self.intercept[None, :]) / slope_safe[None, :]
-        cov_e = self._inverse_covariate_effect(z, sample_df)
-        s_adj = (z - cov_e - self.grand_mean[None, :]) / self.pooled_sd[None, :]
-        s = s_adj * np.sqrt(np.clip(self.delta_star[1][None, :], 1e-8, None)) + self.gamma_star[1][None, :]
-        y_nocov = s * self.pooled_sd[None, :] + self.grand_mean[None, :]
-        return y_nocov + cov_e
-
     def diagnostics(self) -> Dict[str, float]:
         return {
             "method": "combat",
@@ -236,6 +236,4 @@ class CombatHarmonizer:
             "gamma_var_batch1": float(np.nanvar(self.gamma_star[1, :])),
             "delta_mean_batch0": float(np.nanmean(self.delta_star[0, :])),
             "delta_mean_batch1": float(np.nanmean(self.delta_star[1, :])),
-            "inverse_slope_floor": float(self.inverse_slope_floor),
-            "n_inverse_slope_clipped": int(np.sum(np.abs(self.slope) < float(self.inverse_slope_floor))),
         }

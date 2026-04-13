@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -73,15 +73,6 @@ class WhitenZCAAffineHarmonizer:
             h = z * self.slope + self.intercept
         out.loc[:, self.genes] = h.astype(np.float32)
         return out
-
-    def inverse_gtex(
-        self,
-        x_h_matrix: np.ndarray,
-        subject_ids: Optional[np.ndarray] = None,
-        sample_df: Optional[pd.DataFrame] = None,
-    ) -> np.ndarray:
-        z = (x_h_matrix - self.intercept) / self.slope
-        return z @ self.gtex_Winv + self.gtex_mu[None, :]
 
     def diagnostics(self) -> Dict[str, float]:
         return {

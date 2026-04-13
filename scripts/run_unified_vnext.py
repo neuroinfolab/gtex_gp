@@ -74,7 +74,6 @@ class Config:
     smoke_subjects: int = 0
     whiten_eps: float = 1e-4
     combat_use_covariates: bool = True
-    combat_inverse_slope_floor: float = 0.10
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
     hier_lambda_a: float = 10.0
@@ -121,7 +120,6 @@ def parse_args() -> Config:
     p.add_argument("--lambda-cal-b", type=float, default=Config.lambda_cal_b)
     p.add_argument("--smoke-subjects", type=int, default=Config.smoke_subjects)
     p.add_argument("--whiten-eps", type=float, default=Config.whiten_eps)
-    p.add_argument("--combat-inverse-slope-floor", type=float, default=Config.combat_inverse_slope_floor)
     p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=Config.gtex_rep_mode)
     p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=Config.gtex_hemi_mode)
     p.add_argument("--combat-use-covariates", default=str(Config.combat_use_covariates).lower())

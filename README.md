@@ -11,8 +11,8 @@ Primary write-up pipeline:
 - `notebooks/ahba_gtex_writeup_end_to_end.ipynb`
 
 Active analysis notebooks:
-- `notebooks/results_eda_cached_predictions_allgenes.ipynb` — default harmonized-space cache EDA
-- `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb` — raw/inverse-ComBat cache EDA
+- `results_eda_cached_predictions.ipynb` — default harmonized-space cache EDA
+- `results_eda_cached_predictions_raw.ipynb` — mixed-space raw-truth cache EDA
 - `notebooks/coordinate_overlay_3d_mni.ipynb` — GTEx/AHBA spatial assignment inspection
 
 Legacy or exploratory notebook variants now live under:
@@ -54,9 +54,7 @@ Subject/model caches are written to:
 
 Each `.npz` includes:
 - `fullfit_subject_h` (`parcel x gene`): full-data completion/deployment map
-- `fullfit_subject_raw`: covariate-aware inverse-GTEx version of `fullfit_subject_h`
 - `loro_fused_subject_h`: final eval-ready fused map
-- `loro_fused_subject_raw`: covariate-aware inverse-GTEx version of `loro_fused_subject_h`
 - `loro_truth_subject_h`: held-out harmonized truth (`NaN` outside `loro_eval_mask`)
 - `loro_truth_subject_raw`: held-out parcel-averaged native GTEx truth (`NaN` outside `loro_eval_mask`)
 - `gtex_mask`: global GTEx-observed parcel mask (cohort-level)
@@ -158,4 +156,4 @@ GENE_SCOPE=hvg sbatch scripts/sbatch/run_loro_cache_array.sbatch
   - useful for side-by-side rank experiments (`plam_rank3`, `plam_rank4`, `plam_dynamicrank`)
 - See `CONTEXT.md` for a fast onboarding summary intended for parallel agents.
 
-Last updated at: 2026-04-07
+Last updated at: 2026-04-13

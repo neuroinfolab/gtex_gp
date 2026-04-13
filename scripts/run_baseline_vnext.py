@@ -74,7 +74,6 @@ class Config:
     unc_m0: float = 0.5
     unc_tau: float = 0.15
     combat_use_covariates: bool = True
-    combat_inverse_slope_floor: float = 0.10
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
     hier_lambda_a: float = 10.0
@@ -114,7 +113,6 @@ def parse_args() -> Config:
     p.add_argument("--unc-m0", type=float, default=Config.unc_m0)
     p.add_argument("--unc-tau", type=float, default=Config.unc_tau)
     p.add_argument("--combat-use-covariates", type=lambda s: str(s).lower() in {"1", "true", "yes", "y"}, default=Config.combat_use_covariates)
-    p.add_argument("--combat-inverse-slope-floor", type=float, default=Config.combat_inverse_slope_floor)
     p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=Config.gtex_rep_mode)
     p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=Config.gtex_hemi_mode)
     p.add_argument("--hier-lambda-a", type=float, default=Config.hier_lambda_a)
@@ -344,7 +342,6 @@ def main() -> None:
                     ahba_ref_T = ahba_pls["T"]
 
                     stack_h = []
-                    stack_raw = []
                     calib_true = []
                     calib_pred = []
 
@@ -389,7 +386,6 @@ def main() -> None:
 
                         full_pred, _ = run_subject(subject_bundle, atlas_bundle, method_bundle, cfg_dict)
                         stack_h.append(full_pred["X_full_h"])
-                        stack_raw.append(full_pred["X_full_raw"])
 
                         idx_to_pos = {int(p): i for i, p in enumerate(obs_idx.tolist())}
 
@@ -474,7 +470,6 @@ def main() -> None:
 
                     if len(stack_h) > 0:
                         mean_h = np.nanmean(np.stack(stack_h, axis=0), axis=0)
-                        mean_raw = np.nanmean(np.stack(stack_raw, axis=0), axis=0)
                         gtex_h_tbl = pd.concat(
                             [
                                 target_meta[["parcel_idx", "tissue_or_parcel", "coord_x", "coord_y", "coord_z"]].rename(columns={"tissue_or_parcel": "parcel_name"}).reset_index(drop=True),
@@ -482,15 +477,7 @@ def main() -> None:
                             ],
                             axis=1,
                         )
-                        gtex_raw_tbl = pd.concat(
-                            [
-                                target_meta[["parcel_idx", "tissue_or_parcel", "coord_x", "coord_y", "coord_z"]].rename(columns={"tissue_or_parcel": "parcel_name"}).reset_index(drop=True),
-                                pd.DataFrame(mean_raw, columns=genes_hvg),
-                            ],
-                            axis=1,
-                        )
                         gtex_h_tbl.to_csv(table_dir / f"aggregate_hvg_{combo}_mean_harmonized.csv", index=False)
-                        gtex_raw_tbl.to_csv(table_dir / f"aggregate_hvg_{combo}_mean_raw.csv", index=False)
 
                         region_corr = np.zeros(mean_h.shape[0], dtype=np.float64)
                         for r in range(mean_h.shape[0]):

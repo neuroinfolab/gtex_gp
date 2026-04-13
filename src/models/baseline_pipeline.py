@@ -106,11 +106,8 @@ def run_subject(
     subject = str(subject_bundle["subject"])
     obs_idx_full = np.asarray(subject_bundle["obs_idx"], dtype=np.int32)
     X_obs_h_full = np.asarray(subject_bundle["X_obs_h"], dtype=np.float64)
-    X_obs_raw_full = np.asarray(subject_bundle["X_obs_raw"], dtype=np.float64)
     coords_full = np.asarray(subject_bundle["coords_full"], dtype=np.float64)
     target_meta = subject_bundle["target_meta"]
-    harmonizer = method_bundle["harmonizer"]
-    inverse_df = subject_bundle.get("inverse_df")
 
     idx_to_pos = {int(p): i for i, p in enumerate(obs_idx_full.tolist())}
     if fold_mask is None:
@@ -122,7 +119,6 @@ def run_subject(
 
     train_pos = np.asarray([idx_to_pos[int(p)] for p in train_idx.tolist()], dtype=np.int32)
     X_train_h = X_obs_h_full[train_pos, :]
-    X_train_raw = X_obs_raw_full[train_pos, :]
     coords_obs = coords_full[train_idx, :]
 
     c_min = int(method_bundle.get("c_min", cfg.get("c_min", 8)))
@@ -130,14 +126,8 @@ def run_subject(
     if len(train_idx) < c_min:
         deployment_mode = "atlas_prior"
         X_h = np.asarray(atlas_bundle["ahba_h_full"], dtype=np.float64).copy()
-        subj_ids = np.asarray([subject] * X_h.shape[0], dtype=object)
-        try:
-            X_raw = harmonizer.inverse_gtex(X_h, subject_ids=subj_ids, sample_df=inverse_df)
-        except TypeError:
-            X_raw = harmonizer.inverse_gtex(X_h)
         X_h[overwrite_idx, :] = X_train_h
-        X_raw[overwrite_idx, :] = X_train_raw
-        return {"X_full_h": X_h, "X_full_raw": X_raw}, {
+        return {"X_full_h": X_h}, {
             "deployment_mode": deployment_mode,
             "n_train_obs": int(len(train_idx)),
             "leak_flag": False,
@@ -233,16 +223,9 @@ def run_subject(
         uvar = np.mean(U_std_full**2, axis=1) if U_std_full is not None else np.zeros(coords_full.shape[0], dtype=np.float64)
 
     X_full_h = X_full_h.astype(np.float64)
-    subj_ids = np.asarray([subject] * X_full_h.shape[0], dtype=object)
-    try:
-        X_full_raw = harmonizer.inverse_gtex(X_full_h, subject_ids=subj_ids, sample_df=inverse_df)
-    except TypeError:
-        X_full_raw = harmonizer.inverse_gtex(X_full_h)
-
     X_full_h[overwrite_idx, :] = X_train_h
-    X_full_raw[overwrite_idx, :] = X_train_raw
 
-    return {"X_full_h": X_full_h, "X_full_raw": X_full_raw}, {
+    return {"X_full_h": X_full_h}, {
         "deployment_mode": deployment_mode,
         "n_train_obs": int(len(train_idx)),
         "n_comp": int(k),

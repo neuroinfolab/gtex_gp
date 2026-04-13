@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, to_rgb
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
@@ -49,7 +50,6 @@ class EDAConfig:
     gene_scope: str = "hvg"  # hvg | allgenes
     min_observed_parcels: int = 5
     combat_use_covariates: bool = True
-    combat_inverse_slope_floor: float = 0.10
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
 
@@ -151,12 +151,6 @@ def _gene_indices_from_names(
     return gi
 
 
-def _maybe_clamp_zero(pred: np.ndarray, truth: np.ndarray, *, inverse_combat: bool, clamp_zero: bool) -> Tuple[np.ndarray, np.ndarray]:
-    if not (bool(inverse_combat) and bool(clamp_zero)):
-        return pred, truth
-    return np.maximum(pred, 0.0), np.maximum(truth, 0.0)
-
-
 def _cache_model_dirname(cfg: EDAConfig, model: str) -> str:
     m = str(model).lower()
     if m == "naive":
@@ -172,10 +166,42 @@ def _model_cache_root(cfg: EDAConfig, model: str) -> Path:
     return (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower() / _cache_model_dirname(cfg, model)).resolve()
 
 
-def _cache_pred_truth_arrays(z: np.lib.npyio.NpzFile, inverse_combat: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-    pred_key = "loro_fused_subject_raw" if bool(inverse_combat) else "loro_fused_subject_h"
-    truth_key = "loro_truth_subject_raw" if bool(inverse_combat) else "loro_truth_subject_h"
-    return np.asarray(z[pred_key], dtype=np.float64), np.asarray(z[truth_key], dtype=np.float64)
+def _cache_pred_truth_arrays(z: np.lib.npyio.NpzFile) -> Tuple[np.ndarray, np.ndarray]:
+    return (
+        np.asarray(z["loro_fused_subject_h"], dtype=np.float64),
+        np.asarray(z["loro_truth_subject_h"], dtype=np.float64),
+    )
+
+
+def _normalize_mixed_space_mode(mixed_space_mode: str | None) -> str | None:
+    if mixed_space_mode is None:
+        return None
+    m = str(mixed_space_mode).strip().lower()
+    if m in {"", "none"}:
+        return None
+    if m not in {
+        "harmonized_pred_vs_raw_truth_corr",
+        "harmonized_pred_vs_raw_truth_refz_corr",
+    }:
+        raise ValueError(
+            "mixed_space_mode must be one of: "
+            "harmonized_pred_vs_raw_truth_corr, "
+            "harmonized_pred_vs_raw_truth_refz_corr"
+        )
+    return m
+
+
+def _cache_pred_truth_arrays_with_mode(
+    z: np.lib.npyio.NpzFile,
+    *,
+    mixed_space_mode: str | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
+    if msm is None:
+        return _cache_pred_truth_arrays(z)
+    pred = np.asarray(z["loro_fused_subject_h"], dtype=np.float64)
+    truth = np.asarray(z["loro_truth_subject_raw"], dtype=np.float64)
+    return pred, truth
 
 
 def _load_cache_meta(json_path: Path) -> Dict[str, object]:
@@ -246,26 +272,119 @@ def _r2_safe(x: np.ndarray, y: np.ndarray) -> float:
     return float(1.0 - (sse / sst))
 
 
+def _zscore_cols(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float64)
+    mu = np.nanmean(arr, axis=0)
+    sd = np.nanstd(arr, axis=0)
+    sd = np.where(sd > 1e-12, sd, np.nan)
+    return (arr - mu[None, :]) / sd[None, :]
+
+
+def _zscore_cols_with_ref(x: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float64)
+    mu_arr = np.asarray(mu, dtype=np.float64)
+    sd_arr = np.asarray(sd, dtype=np.float64)
+    sd_arr = np.where(sd_arr > 1e-12, sd_arr, np.nan)
+    return (arr - mu_arr[None, :]) / sd_arr[None, :]
+
+
+def _reference_gene_stats(prepost: Dict[str, object], refz_noise_quantile: float = 0.10) -> Dict[str, np.ndarray]:
+    genes = list(prepost["genes"])
+    raw_grp = (
+        prepost["gtex_eligible_raw"]
+        .groupby(["subject", "parcel_idx"], as_index=False)[genes]
+        .mean(numeric_only=True)
+    )
+    harm_grp = (
+        prepost["gtex_eligible_h"]
+        .groupby(["subject", "parcel_idx"], as_index=False)[genes]
+        .mean(numeric_only=True)
+    )
+    raw_mat = raw_grp[genes].to_numpy(dtype=np.float64)
+    harm_mat = harm_grp[genes].to_numpy(dtype=np.float64)
+    mu_raw = np.nanmean(raw_mat, axis=0)
+    sd_raw = np.nanstd(raw_mat, axis=0)
+    mu_h = np.nanmean(harm_mat, axis=0)
+    sd_h = np.nanstd(harm_mat, axis=0)
+    sd_raw = np.where(sd_raw > 1e-12, sd_raw, np.nan)
+    sd_h = np.where(sd_h > 1e-12, sd_h, np.nan)
+    q = float(refz_noise_quantile)
+    if not (0.0 <= q < 1.0):
+        raise ValueError("refz_noise_quantile must be in [0.0, 1.0)")
+    finite_raw = sd_raw[np.isfinite(sd_raw)]
+    finite_h = sd_h[np.isfinite(sd_h)]
+    thr_raw = float(np.nanquantile(finite_raw, q)) if finite_raw.size else np.nan
+    thr_h = float(np.nanquantile(finite_h, q)) if finite_h.size else np.nan
+    keep_mask = np.isfinite(sd_raw) & np.isfinite(sd_h)
+    if np.isfinite(thr_raw):
+        keep_mask &= sd_raw >= thr_raw
+    if np.isfinite(thr_h):
+        keep_mask &= sd_h >= thr_h
+    return {
+        "gene_names": np.asarray(genes, dtype=object),
+        "mu_raw": np.asarray(mu_raw, dtype=np.float64),
+        "sd_raw": np.asarray(sd_raw, dtype=np.float64),
+        "mu_h": np.asarray(mu_h, dtype=np.float64),
+        "sd_h": np.asarray(sd_h, dtype=np.float64),
+        "keep_mask": np.asarray(keep_mask, dtype=bool),
+        "refz_noise_quantile": float(q),
+        "thr_raw": float(thr_raw) if np.isfinite(thr_raw) else np.nan,
+        "thr_h": float(thr_h) if np.isfinite(thr_h) else np.nan,
+    }
+
+
+def _reference_gene_stats_subset(
+    ref_stats: Dict[str, np.ndarray] | None,
+    gene_names: Sequence[str],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    if ref_stats is None:
+        return None
+    ref_gene_names = tuple(str(x) for x in ref_stats["gene_names"].tolist())
+    idx_map = {g: i for i, g in enumerate(ref_gene_names)}
+    gi = np.asarray([idx_map[str(g)] for g in gene_names], dtype=np.int32)
+    return (
+        np.asarray(ref_stats["mu_raw"], dtype=np.float64)[gi],
+        np.asarray(ref_stats["sd_raw"], dtype=np.float64)[gi],
+        np.asarray(ref_stats["mu_h"], dtype=np.float64)[gi],
+        np.asarray(ref_stats["sd_h"], dtype=np.float64)[gi],
+        np.asarray(ref_stats["keep_mask"], dtype=bool)[gi],
+    )
+
+
 def _subject_metrics_row_from_npz(
     npz_path_str: str,
     model: str,
-    inverse_combat: bool = False,
+    mixed_space_mode: str | None = None,
+    ref_stats: Dict[str, np.ndarray] | None = None,
 ) -> Dict[str, object]:
     npz_path = Path(npz_path_str)
     sid = npz_path.stem
     meta = _load_cache_meta(npz_path.with_suffix(".json"))
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
     with np.load(npz_path, allow_pickle=True) as z:
-        pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
+        pred, truth = _cache_pred_truth_arrays_with_mode(z, mixed_space_mode=msm)
         mask = z["loro_eval_mask"].astype(bool)
-        x = truth[mask, :].ravel()
-        y = pred[mask, :].ravel()
+        pred_use = pred[mask, :]
+        truth_use = truth[mask, :]
+        if msm == "harmonized_pred_vs_raw_truth_refz_corr":
+            gene_names = tuple(str(g) for g in z["gene_names"].tolist())
+            ref = _reference_gene_stats_subset(ref_stats, gene_names)
+            if ref is None:
+                raise ValueError("prepost/reference stats are required for mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr'")
+            mu_raw, sd_raw, mu_h, sd_h, keep_mask = ref
+            if not np.any(keep_mask):
+                raise ValueError("No genes remain after refz low-variance filtering")
+            pred_use = _zscore_cols_with_ref(pred_use[:, keep_mask], mu_h[keep_mask], sd_h[keep_mask])
+            truth_use = _zscore_cols_with_ref(truth_use[:, keep_mask], mu_raw[keep_mask], sd_raw[keep_mask])
+        x = truth_use.ravel()
+        y = pred_use.ravel()
         m = np.isfinite(x) & np.isfinite(y)
         return {
             "subject": sid,
             "model": model,
             "coverage": int(meta.get("n_gtex_observed_subject", int(mask.sum()))),
             "n_loro_parcels": int(mask.sum()),
-            "inverse_combat": bool(inverse_combat),
+            "mixed_space_mode": msm,
             "n_points": int(m.sum()),
             "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
             "spearman_r": _spearman_safe(x[m], y[m]) if int(m.sum()) else np.nan,
@@ -280,16 +399,16 @@ def _subject_metrics_subset_row_from_npz(
     mode_label: str,
     eval_gene_path_resolved: str | None,
     eval_gene_items: Tuple[str, ...] | None,
-    inverse_combat: bool = False,
-    clamp_zero: bool = False,
+    mixed_space_mode: str | None = None,
+    ref_stats: Dict[str, np.ndarray] | None = None,
 ) -> Dict[str, object]:
     npz_path = Path(npz_path_str)
     sid = npz_path.stem
     meta = _load_cache_meta(npz_path.with_suffix(".json"))
     eval_gene_set = None if eval_gene_items is None else set(eval_gene_items)
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
     with np.load(npz_path, allow_pickle=True) as z:
-        pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
-        pred, truth = _maybe_clamp_zero(pred, truth, inverse_combat=inverse_combat, clamp_zero=clamp_zero)
+        pred, truth = _cache_pred_truth_arrays_with_mode(z, mixed_space_mode=msm)
         mask = z["loro_eval_mask"].astype(bool)
         gene_names = tuple(str(g) for g in z["gene_names"].tolist())
         n_total_genes = int(len(gene_names))
@@ -298,8 +417,20 @@ def _subject_metrics_subset_row_from_npz(
             eval_gene_set,
             context=f"subject={sid} model={model}",
         )
-        x = truth[mask, :][:, gi].ravel()
-        y = pred[mask, :][:, gi].ravel()
+        pred_use = pred[mask, :][:, gi]
+        truth_use = truth[mask, :][:, gi]
+        if msm == "harmonized_pred_vs_raw_truth_refz_corr":
+            ref = _reference_gene_stats_subset(ref_stats, gene_names)
+            if ref is None:
+                raise ValueError("prepost/reference stats are required for mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr'")
+            mu_raw, sd_raw, mu_h, sd_h, keep_mask = ref
+            keep_sel = keep_mask[gi]
+            if not np.any(keep_sel):
+                raise ValueError("No selected genes remain after refz low-variance filtering")
+            pred_use = _zscore_cols_with_ref(pred_use[:, keep_sel], mu_h[gi][keep_sel], sd_h[gi][keep_sel])
+            truth_use = _zscore_cols_with_ref(truth_use[:, keep_sel], mu_raw[gi][keep_sel], sd_raw[gi][keep_sel])
+        x = truth_use.ravel()
+        y = pred_use.ravel()
         m = np.isfinite(x) & np.isfinite(y)
         return {
             "subject": sid,
@@ -310,14 +441,64 @@ def _subject_metrics_subset_row_from_npz(
             "n_total_genes": n_total_genes,
             "eval_gene_mode": mode_label,
             "eval_gene_path": eval_gene_path_resolved,
-            "inverse_combat": bool(inverse_combat),
-            "clamp_zero": bool(clamp_zero),
+            "mixed_space_mode": msm,
             "n_points": int(m.sum()),
             "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
             "spearman_r": _spearman_safe(x[m], y[m]) if int(m.sum()) else np.nan,
             "r2": _r2_safe(x[m], y[m]) if int(m.sum()) else np.nan,
             "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
         }
+
+
+def _fold_rows_for_subject_npz(
+    npz_path_str: str,
+    model: str,
+    subject_id: str,
+    obs: Sequence[int],
+    mode_label: str,
+    eval_gene_path_resolved: str | None,
+    eval_gene_items: Tuple[str, ...] | None,
+) -> List[Dict[str, object]]:
+    npz_path = Path(npz_path_str)
+    eval_gene_set = None if eval_gene_items is None else set(eval_gene_items)
+    obs_set = set(int(x) for x in obs)
+    n_obs = int(len(obs_set))
+    rows: List[Dict[str, object]] = []
+    with np.load(npz_path, allow_pickle=True) as z:
+        pred, truth = _cache_pred_truth_arrays(z)
+        mask = z["loro_eval_mask"].astype(bool)
+        gene_names = tuple(str(x) for x in z["gene_names"].tolist())
+        gi = _gene_indices_from_names(
+            gene_names,
+            eval_gene_set,
+            context=f"subject={subject_id} model={model}",
+        )
+        for hold in np.where(mask)[0].astype(int).tolist():
+            train = sorted(obs_set - {int(hold)})
+            train_key = ",".join(map(str, train))
+            fold_key = f"hold={int(hold)}|train={train_key}"
+            x = truth[int(hold), gi]
+            y = pred[int(hold), gi]
+            m = np.isfinite(x) & np.isfinite(y)
+            rows.append(
+                {
+                    "subject": str(subject_id),
+                    "model": str(model),
+                    "coverage": n_obs,
+                    "hold_parcel": int(hold),
+                    "train_key": train_key,
+                    "fold_key": fold_key,
+                    "n_eval_genes": int(gi.size),
+                    "eval_gene_mode": mode_label,
+                    "eval_gene_path": eval_gene_path_resolved,
+                    "n_points": int(m.sum()),
+                    "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+                    "spearman_r": _spearman_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+                    "r2": _r2_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+                    "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
+                }
+            )
+    return rows
 
 
 def _metrics_panel_label(metrics_df: pd.DataFrame, panel_label: str | None = None) -> str:
@@ -399,7 +580,6 @@ def prepare_pre_post_harmonization(cfg: EDAConfig) -> Dict[str, object]:
     gtex_eligible = gtex_raw[gtex_raw["subject"].astype(str).isin(subjects)].copy()
     hcfg = SimpleNamespace(
         combat_use_covariates=bool(cfg.combat_use_covariates),
-        combat_inverse_slope_floor=float(cfg.combat_inverse_slope_floor),
     )
     harmonizer = fit_harmonizer(ahba_raw, gtex_eligible, genes, method="combat", cfg=hcfg)
     gtex_h = harmonizer.transform(gtex_eligible, "GTEX")
@@ -1086,17 +1266,34 @@ def plot_region_covariance_side_by_side(
 def compute_subject_metrics_from_cache(
     cfg: EDAConfig,
     model: str,
-    inverse_combat: bool = False,
+    mixed_space_mode: str | None = None,
+    prepost: Dict[str, object] | None = None,
+    refz_noise_quantile: float = 0.10,
     n_jobs: int | None = None,
 ) -> pd.DataFrame:
     model = str(model).lower()
     root = _model_cache_root(cfg, model)
     if not root.exists():
         raise FileNotFoundError(f"Cache dir not found: {root}")
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
+    if msm == "harmonized_pred_vs_raw_truth_refz_corr" and prepost is None:
+        raise ValueError(
+            "mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr' requires prepost=PREPOST "
+            "so reference raw/harmonized GTEx statistics can be computed explicitly"
+        )
+    ref_stats = _reference_gene_stats(prepost, refz_noise_quantile=refz_noise_quantile) if msm == "harmonized_pred_vs_raw_truth_refz_corr" else None
     npz_paths = [str(p) for p in sorted(root.glob("*.npz"))]
     jobs = _effective_n_jobs(len(npz_paths), n_jobs)
     if jobs == 1:
-        rows = [_subject_metrics_row_from_npz(p, model=model, inverse_combat=inverse_combat) for p in npz_paths]
+        rows = [
+            _subject_metrics_row_from_npz(
+                p,
+                model=model,
+                mixed_space_mode=msm,
+                ref_stats=ref_stats,
+            )
+            for p in npz_paths
+        ]
     else:
         with ProcessPoolExecutor(max_workers=jobs) as ex:
             rows = list(
@@ -1104,7 +1301,8 @@ def compute_subject_metrics_from_cache(
                     _subject_metrics_row_from_npz,
                     npz_paths,
                     [model] * len(npz_paths),
-                    [bool(inverse_combat)] * len(npz_paths),
+                    [msm] * len(npz_paths),
+                    [ref_stats] * len(npz_paths),
                 )
             )
     out = pd.DataFrame(rows).sort_values(["coverage", "subject"]).reset_index(drop=True)
@@ -1118,9 +1316,10 @@ def compute_subject_metrics_from_cache_gene_subset(
     model: str,
     eval_gene_mode: str = "all",  # all | hvg | custom
     custom_gene_list: Sequence[str] | None = None,
-    inverse_combat: bool = False,
     eval_gene_path: str | None = None,
-    clamp_zero: bool = False,
+    mixed_space_mode: str | None = None,
+    prepost: Dict[str, object] | None = None,
+    refz_noise_quantile: float = 0.10,
     n_jobs: int | None = None,
 ) -> pd.DataFrame:
     model = str(model).lower()
@@ -1134,6 +1333,13 @@ def compute_subject_metrics_from_cache_gene_subset(
         custom_gene_list=custom_gene_list,
         eval_gene_path=eval_gene_path,
     )
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
+    if msm == "harmonized_pred_vs_raw_truth_refz_corr" and prepost is None:
+        raise ValueError(
+            "mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr' requires prepost=PREPOST "
+            "so reference raw/harmonized GTEx statistics can be computed explicitly"
+        )
+    ref_stats = _reference_gene_stats(prepost, refz_noise_quantile=refz_noise_quantile) if msm == "harmonized_pred_vs_raw_truth_refz_corr" else None
 
     npz_paths = [str(p) for p in sorted(root.glob("*.npz"))]
     jobs = _effective_n_jobs(len(npz_paths), n_jobs)
@@ -1146,8 +1352,8 @@ def compute_subject_metrics_from_cache_gene_subset(
                 mode_label=mode_label,
                 eval_gene_path_resolved=eval_gene_path_resolved,
                 eval_gene_items=eval_gene_items,
-                inverse_combat=inverse_combat,
-                clamp_zero=clamp_zero,
+                mixed_space_mode=msm,
+                ref_stats=ref_stats,
             )
             for p in npz_paths
         ]
@@ -1161,8 +1367,8 @@ def compute_subject_metrics_from_cache_gene_subset(
                     [mode_label] * len(npz_paths),
                     [eval_gene_path_resolved] * len(npz_paths),
                     [eval_gene_items] * len(npz_paths),
-                    [bool(inverse_combat)] * len(npz_paths),
-                    [bool(clamp_zero)] * len(npz_paths),
+                    [msm] * len(npz_paths),
+                    [ref_stats] * len(npz_paths),
                 )
             )
 
@@ -1213,9 +1419,10 @@ def plot_coverage_vs_accuracy(
 
 def plot_loro_subject_summary_bars(
     metrics_df: pd.DataFrame,
-    figsize: Tuple[float, float] = (19.4, 4.4),
+    figsize: Tuple[float, float] = (19.4, 4.25),
     use_sem: bool = True,
     panel_label: str | None = None,
+    disable_metrics: Sequence[str] | None = None,
 ) -> Tuple[plt.Figure, np.ndarray, pd.DataFrame]:
     need = {"model", "pearson_r", "spearman_r", "r2", "rmse"}
     if not need.issubset(set(metrics_df.columns)):
@@ -1254,24 +1461,38 @@ def plot_loro_subject_summary_bars(
         summ["r2_err"] = summ["r2_std"]
         summ["rmse_err"] = summ["rmse_std"]
 
-    fig, axes = plt.subplots(1, 4, figsize=figsize, constrained_layout=False)
-    fig.subplots_adjust(wspace=0.38)
+    p_lbl = _metrics_panel_label(metrics_df, panel_label=panel_label)
+    disabled = {str(x).lower() for x in (disable_metrics or [])}
+    n_subs = summ["n_subjects"].to_numpy(dtype=np.int32)
+    metric_specs = [
+        ("pearson", "Pearson r", True),
+        ("spearman", "Spearman r", True),
+        ("r2", r"$R^2$", True),
+        ("rmse", "RMSE", False),
+    ]
+    metric_specs = [spec for spec in metric_specs if spec[0] not in disabled]
+    if len(metric_specs) == 0:
+        raise ValueError("All metrics were disabled; at least one panel must remain")
+
+    n_panels = int(len(metric_specs))
+    base_w, base_h = float(figsize[0]), float(figsize[1])
+    per_panel_w = base_w / 4.0
+    fig_w = per_panel_w * float(n_panels)
+    fig, axes = plt.subplots(1, n_panels, figsize=(fig_w, base_h), constrained_layout=False)
+    if n_panels == 1:
+        axes = np.asarray([axes], dtype=object)
+    else:
+        axes = np.asarray(axes, dtype=object)
+    fig.subplots_adjust(wspace=0.36, top=0.86)
     x = np.arange(len(summ), dtype=np.int32)
     labels = [MODEL_LABELS[m] for m in summ["model"].tolist()]
     colors = [MODEL_COLORS[m] for m in summ["model"].tolist()]
+    n_pool = int(np.nanmax(summ["n_subjects"].to_numpy(dtype=np.float64))) if len(summ) else 0
+    ttl_suffix = f"n={n_pool}" if p_lbl == "" else f"n={n_pool}; {p_lbl}"
+    main_title = f"Mean Subject-wise LORO ({ttl_suffix})"
+    fig.suptitle(main_title, fontsize=FONT["title"] + 8, y=0.98)
 
-    p_lbl = _metrics_panel_label(metrics_df, panel_label=panel_label)
-    sfx = "" if p_lbl == "" else f" ({p_lbl})"
-
-    n_subs = summ["n_subjects"].to_numpy(dtype=np.int32)
-    metric_specs = [
-        ("pearson", "Pearson r", f"Mean Subject LORO Pearson r{sfx}", True),
-        ("spearman", "Spearman r", f"Mean Subject LORO Spearman r{sfx}", True),
-        ("r2", r"$R^2$", f"Mean Subject LORO $R^2${sfx}", True),
-        ("rmse", "RMSE", f"Mean Subject LORO RMSE{sfx}", False),
-    ]
-
-    for ax, (prefix, ylabel, title, is_corr_like) in zip(axes, metric_specs):
+    for ax, (prefix, ylabel, is_corr_like) in zip(axes, metric_specs):
         mean = summ[f"{prefix}_mean"].to_numpy(dtype=np.float64)
         err = np.nan_to_num(summ[f"{prefix}_err"].to_numpy(dtype=np.float64), nan=0.0)
         top = mean + err
@@ -1286,11 +1507,10 @@ def plot_loro_subject_summary_bars(
             capsize=4,
             ecolor="#3a3a3a",
         )
-        ax.set_title(title, fontsize=FONT["title"] + 3)
-        ax.set_ylabel(ylabel, fontsize=FONT["label"] + 2)
+        ax.set_ylabel(ylabel, fontsize=FONT["label"] + 4)
         ax.set_xticks(x.tolist())
-        ax.set_xticklabels(labels, rotation=0, fontsize=FONT["tick"] + 2)
-        ax.tick_params(axis="y", labelsize=FONT["tick"] + 2)
+        ax.set_xticklabels(labels, rotation=0, fontsize=FONT["tick"] + 4)
+        ax.tick_params(axis="y", labelsize=FONT["tick"] + 3)
         ax.grid(True, axis="y", alpha=0.2)
 
         finite_top = top[np.isfinite(top)]
@@ -1318,25 +1538,25 @@ def plot_loro_subject_summary_bars(
         y_lo, y_hi = ax.get_ylim()
         label_pad = max(0.012, 0.02 * (y_hi - y_lo))
         if is_corr_like:
-            for xi, val, low, n_sub in zip(x.tolist(), mean.tolist(), bot.tolist(), n_subs.tolist()):
+            for xi, val, low in zip(x.tolist(), mean.tolist(), bot.tolist()):
                 y_txt = max(float(low - label_pad), float(y_lo + 0.01 * (y_hi - y_lo)))
                 ax.text(
                     xi,
                     y_txt,
-                    f"({val:.3f}; n={int(n_sub)})",
+                    f"({val:.3f})",
                     ha="center",
                     va="top",
-                    fontsize=FONT["small"] + 2,
+                    fontsize=FONT["small"] + 3,
                 )
         else:
-            for xi, val, high, n_sub in zip(x.tolist(), mean.tolist(), top.tolist(), n_subs.tolist()):
+            for xi, val, high in zip(x.tolist(), mean.tolist(), top.tolist()):
                 ax.text(
                     xi,
                     float(high + label_pad),
-                    f"({val:.3f}; n={int(n_sub)})",
+                    f"({val:.3f})",
                     ha="center",
                     va="bottom",
-                    fontsize=FONT["small"] + 2,
+                    fontsize=FONT["small"] + 3,
                 )
 
     return fig, axes, summ
@@ -1349,6 +1569,52 @@ def _parse_fold_key(fold_key: str) -> Tuple[int, List[int]]:
     train_str = parts[1].split("=")[1].strip() if len(parts) > 1 else ""
     train = [int(x) for x in train_str.split(",") if str(x).strip() != ""]
     return hold, train
+
+
+def _target_coords_matrix(prepost: Dict[str, object]) -> np.ndarray:
+    target = prepost["target_meta"].copy()
+    target = target.sort_values("parcel_idx").reset_index(drop=True)
+    parcel_idx = target["parcel_idx"].to_numpy(dtype=np.int32)
+    if not np.array_equal(parcel_idx, np.arange(len(target), dtype=np.int32)):
+        raise ValueError("target_meta parcel_idx must be contiguous and 0-based for fold-distance computation")
+    return target[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)
+
+
+def _fold_distance_metrics(
+    hold: int,
+    train: Sequence[int],
+    coords: np.ndarray,
+) -> Dict[str, float]:
+    train_idx = np.asarray([int(x) for x in train], dtype=np.int32)
+    if int(train_idx.size) == 0:
+        return {
+            "dist_to_nearest_train": np.nan,
+            "dist_to_centroid_train": np.nan,
+        }
+    hold_xyz = coords[int(hold), :]
+    train_xyz = coords[train_idx, :]
+    d = np.linalg.norm(train_xyz - hold_xyz[None, :], axis=1)
+    train_centroid_xyz = np.mean(train_xyz, axis=0)
+    return {
+        "dist_to_nearest_train": float(np.min(d)),
+        "dist_to_centroid_train": float(np.linalg.norm(train_centroid_xyz - hold_xyz)),
+    }
+
+
+def _attach_fold_distance_columns(df: pd.DataFrame, prepost: Dict[str, object]) -> pd.DataFrame:
+    if len(df) == 0 or "fold_key" not in df.columns:
+        return df
+    coords = _target_coords_matrix(prepost)
+    lookup: Dict[str, Dict[str, float]] = {}
+    for fk in pd.Series(df["fold_key"]).astype(str).drop_duplicates().tolist():
+        hold, train = _parse_fold_key(fk)
+        lookup[fk] = _fold_distance_metrics(hold, train, coords)
+    dist_df = (
+        pd.DataFrame.from_dict(lookup, orient="index")
+        .rename_axis("fold_key")
+        .reset_index()
+    )
+    return df.merge(dist_df, on="fold_key", how="left")
 
 
 def _parcel_to_gtex_label_map(prepost: Dict[str, object]) -> Dict[int, str]:
@@ -1377,11 +1643,10 @@ def compute_fold_combo_metrics_from_cache(
     eval_gene_mode: str = "all",  # all | hvg | custom
     custom_gene_list: Sequence[str] | None = None,
     coverage_min: int = 5,
-    coverage_max: int = 11,
+    coverage_max: int = 12,
     models: Sequence[str] | None = None,
-    inverse_combat: bool = False,
     eval_gene_path: str | None = None,
-    clamp_zero: bool = False,
+    n_jobs: int | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     model_list = [str(m).lower() for m in (models if models is not None else MODEL_ORDER)]
     mode_label, eval_gene_path_resolved, eval_gene_set = _resolve_eval_gene_set(
@@ -1399,12 +1664,12 @@ def compute_fold_combo_metrics_from_cache(
     )
 
     rows: List[Dict[str, object]] = []
+    eval_gene_items = None if eval_gene_set is None else tuple(sorted(eval_gene_set))
     for model in model_list:
         model_root = _model_cache_root(cfg, model)
         if not model_root.exists():
             continue
-        cached_gene_names: Tuple[str, ...] | None = None
-        cached_gi: np.ndarray | None = None
+        subject_jobs: List[tuple[str, str, List[int]]] = []
         for sid, obs in subj_obs.items():
             n_obs = int(len(obs))
             if n_obs < int(coverage_min) or n_obs > int(coverage_max):
@@ -1413,57 +1678,41 @@ def compute_fold_combo_metrics_from_cache(
             npz_path = model_root / f"{sid}.npz"
             if not npz_path.exists():
                 continue
+            subject_jobs.append((str(npz_path), str(sid), [int(x) for x in obs]))
 
-            with np.load(npz_path, allow_pickle=True) as z:
-                pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
-                pred, truth = _maybe_clamp_zero(pred, truth, inverse_combat=inverse_combat, clamp_zero=clamp_zero)
-                mask = z["loro_eval_mask"].astype(bool)
-                gene_names = tuple(str(x) for x in z["gene_names"].tolist())
-
-                if cached_gene_names == gene_names and cached_gi is not None:
-                    gi = cached_gi
-                else:
-                    try:
-                        gi = _gene_indices_from_names(
-                            gene_names,
-                            eval_gene_set,
-                            context=f"subject={sid} model={model}",
-                        )
-                    except RuntimeError:
-                        continue
-                    cached_gene_names = gene_names
-                    cached_gi = gi
-
-                obs_set = set(int(x) for x in obs)
-                for hold in np.where(mask)[0].astype(int).tolist():
-                    train = sorted(obs_set - {int(hold)})
-                    train_key = ",".join(map(str, train))
-                    fold_key = f"hold={int(hold)}|train={train_key}"
-                    x = truth[int(hold), gi]
-                    y = pred[int(hold), gi]
-                    m = np.isfinite(x) & np.isfinite(y)
-                    rows.append(
-                        {
-                            "subject": str(sid),
-                            "model": str(model),
-                            "coverage": n_obs,
-                            "hold_parcel": int(hold),
-                            "train_key": train_key,
-                            "fold_key": fold_key,
-                            "n_eval_genes": int(gi.size),
-                            "eval_gene_mode": mode_label,
-                            "eval_gene_path": eval_gene_path_resolved,
-                            "inverse_combat": bool(inverse_combat),
-                            "clamp_zero": bool(clamp_zero),
-                            "n_points": int(m.sum()),
-                            "pearson_r": _pearson_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-                            "rmse": _rmse_safe(x[m], y[m]) if int(m.sum()) else np.nan,
-                        }
+        jobs = _effective_n_jobs(len(subject_jobs), n_jobs)
+        if jobs == 1:
+            for npz_path_str, sid, obs in subject_jobs:
+                rows.extend(
+                    _fold_rows_for_subject_npz(
+                        npz_path_str,
+                        model=model,
+                        subject_id=sid,
+                        obs=obs,
+                        mode_label=mode_label,
+                        eval_gene_path_resolved=eval_gene_path_resolved,
+                        eval_gene_items=eval_gene_items,
                     )
+                )
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as ex:
+                mapped = ex.map(
+                    _fold_rows_for_subject_npz,
+                    [p for p, _, _ in subject_jobs],
+                    [model] * len(subject_jobs),
+                    [sid for _, sid, _ in subject_jobs],
+                    [obs for _, _, obs in subject_jobs],
+                    [mode_label] * len(subject_jobs),
+                    [eval_gene_path_resolved] * len(subject_jobs),
+                    [eval_gene_items] * len(subject_jobs),
+                )
+                for block in mapped:
+                    rows.extend(block)
 
     fold_perf_df = pd.DataFrame(rows)
     if len(fold_perf_df) == 0:
         raise RuntimeError("No fold-level rows were computed from cache")
+    fold_perf_df = _attach_fold_distance_columns(fold_perf_df, prepost)
 
     combo_df = (
         fold_perf_df.groupby(["coverage", "fold_key", "model"], as_index=False)
@@ -1471,17 +1720,21 @@ def compute_fold_combo_metrics_from_cache(
             n_subjects=("subject", "nunique"),
             mean_pearson=("pearson_r", "mean"),
             std_pearson=("pearson_r", "std"),
+            mean_spearman=("spearman_r", "mean"),
+            std_spearman=("spearman_r", "std"),
+            mean_r2=("r2", "mean"),
+            std_r2=("r2", "std"),
             mean_rmse=("rmse", "mean"),
             std_rmse=("rmse", "std"),
             mean_points=("n_points", "mean"),
+            dist_to_nearest_train=("dist_to_nearest_train", "first"),
+            dist_to_centroid_train=("dist_to_centroid_train", "first"),
         )
         .sort_values(["model", "coverage", "fold_key"])
         .reset_index(drop=True)
     )
     combo_df["eval_gene_mode"] = mode_label
     combo_df["eval_gene_path"] = eval_gene_path_resolved
-    combo_df["inverse_combat"] = bool(inverse_combat)
-    combo_df["clamp_zero"] = bool(clamp_zero)
     return fold_perf_df, combo_df
 
 
@@ -1489,36 +1742,116 @@ def plot_fold_combo_ranked(
     combo_df: pd.DataFrame,
     prepost: Dict[str, object],
     model: str = "dlam",
-    metric: str = "mean_pearson",  # mean_pearson | mean_rmse
+    metric: str = "mean_pearson",  # mean_pearson | mean_spearman | mean_r2 | mean_rmse
     figsize: Tuple[float, float] = (13.8, 7.2),
+    dpi: int = 180,
     show_fold_xticklabels: bool = False,
     show_y_axis_label: bool = True,
+    style: str = "line+points",  # line+points | points | line
+    points_style: str = "solid",  # solid | coverage | dist_to_nearest_train | dist_to_centroid_train
+    show_running_average: bool = False,
+    running_average_window: int = 20,
 ) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
     m = str(model).lower()
-    if metric not in {"mean_pearson", "mean_rmse"}:
-        raise ValueError("metric must be one of: mean_pearson, mean_rmse")
+    if metric not in {"mean_pearson", "mean_spearman", "mean_r2", "mean_rmse"}:
+        raise ValueError("metric must be one of: mean_pearson, mean_spearman, mean_r2, mean_rmse")
+    style_l = str(style).lower()
+    if style_l not in {"line+points", "points", "line"}:
+        raise ValueError("style must be one of: line+points, points, line")
+    points_style_l = str(points_style).lower()
+    if points_style_l not in {"solid", "coverage", "dist_to_nearest_train", "dist_to_centroid_train"}:
+        raise ValueError("points_style must be one of: solid, coverage, dist_to_nearest_train, dist_to_centroid_train")
 
     d = combo_df[combo_df["model"].astype(str).str.lower() == m].copy()
     if len(d) == 0:
         raise RuntimeError(f"No combo rows found for model={m}")
 
     # Left->right worst->best.
-    if metric == "mean_pearson":
+    if metric in {"mean_pearson", "mean_spearman", "mean_r2"}:
         d = d.sort_values(metric, ascending=True).reset_index(drop=True)
-        ylab = "Mean fold Pearson r"
+        if metric == "mean_pearson":
+            ylab = "Mean fold Pearson r"
+        elif metric == "mean_spearman":
+            ylab = "Mean fold Spearman r"
+        else:
+            ylab = r"Mean fold $R^2$"
     else:
         d = d.sort_values(metric, ascending=False).reset_index(drop=True)
         ylab = "Mean fold RMSE"
 
     x = np.arange(len(d), dtype=np.int32)
     y = d[metric].to_numpy(dtype=np.float64)
+    running_average_window = max(1, int(running_average_window))
+    point_size = 12.0 if bool(show_running_average) and style_l in {"line+points", "points"} else (10.0 if style_l == "points" else 6.5)
+    y_plot = (
+        pd.Series(y).rolling(window=running_average_window, min_periods=1).mean().to_numpy(dtype=np.float64)
+        if bool(show_running_average)
+        else y
+    )
 
-    fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=False)
-    ax.plot(x, y, color=MODEL_COLORS.get(m, "#333333"), linewidth=1.7, alpha=0.98)
-    ax.scatter(x, y, s=6.0, color=MODEL_COLORS.get(m, "#333333"), alpha=0.62, linewidths=0)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi), constrained_layout=False)
+    base_color = MODEL_COLORS.get(m, "#333333")
+    if style_l in {"line+points", "line"}:
+        ax.plot(x, y_plot, color=base_color, linewidth=1.7, alpha=0.98)
+    if style_l in {"line+points", "points"}:
+        if points_style_l in {"coverage", "dist_to_nearest_train", "dist_to_centroid_train"}:
+            if points_style_l == "coverage":
+                cvals = d["coverage"].to_numpy(dtype=np.float64)
+                cbar_label = "Coverage"
+            elif points_style_l == "dist_to_nearest_train":
+                cvals = d["dist_to_nearest_train"].to_numpy(dtype=np.float64)
+                cbar_label = "Dist to Nearest Train"
+            else:
+                cvals = d["dist_to_centroid_train"].to_numpy(dtype=np.float64)
+                cbar_label = "Dist to Centroid Train"
+            cmin = float(np.nanmin(cvals))
+            cmax = float(np.nanmax(cvals))
+            if np.isfinite(cmin) and np.isfinite(cmax) and cmax > cmin:
+                base_rgb = np.asarray(to_rgb(base_color), dtype=np.float64)
+                light_rgb = 1.0 - 0.22 * (1.0 - base_rgb)
+                dark_rgb = np.clip(base_rgb * 0.78, 0.0, 1.0)
+                model_cmap = LinearSegmentedColormap.from_list(
+                    f"{m}_{points_style_l}",
+                    [tuple(light_rgb.tolist()), tuple(base_rgb.tolist()), tuple(dark_rgb.tolist())],
+                )
+                sc = ax.scatter(
+                    x,
+                    y_plot,
+                    s=point_size,
+                    c=cvals,
+                    cmap=model_cmap,
+                    vmin=cmin,
+                    vmax=cmax,
+                    alpha=0.88 if style_l == "points" else 0.76,
+                    linewidths=0,
+                )
+                cbar = fig.colorbar(sc, ax=ax, shrink=0.82, pad=0.015)
+                cbar.set_label(cbar_label, fontsize=FONT["label"] + 1)
+                cbar.ax.tick_params(labelsize=FONT["tick"] + 1)
+            else:
+                ax.scatter(
+                    x,
+                    y_plot,
+                    s=point_size,
+                    color=base_color,
+                    alpha=0.88 if style_l == "points" else 0.76,
+                    linewidths=0,
+                )
+        else:
+            ax.scatter(
+                x,
+                y_plot,
+                s=point_size,
+                color=base_color,
+                alpha=0.88 if style_l == "points" else 0.70,
+                linewidths=0,
+            )
     n_combo = int(len(d))
+    title_suffix = f"{style_l}"
+    if bool(show_running_average):
+        title_suffix += f" + trailing mean({running_average_window})"
     ax.set_title(
-        f"{MODEL_LABELS.get(m, m.upper())}: fold-combo ranking ({metric}; n={n_combo:,})",
+        f"{MODEL_LABELS.get(m, m.upper())}: fold-combo ranking ({metric}; LORO combinations={n_combo:,}; {title_suffix})",
         fontsize=FONT["title"] + 6,
     )
     ax.set_xlabel("Fold combo (worst -> best)", fontsize=FONT["label"] + 5)
@@ -1605,7 +1938,7 @@ def summarize_heldout_region_performance(
     fold_perf_df: pd.DataFrame,
     prepost: Dict[str, object],
 ) -> pd.DataFrame:
-    need = {"model", "hold_parcel", "pearson_r", "rmse", "subject"}
+    need = {"model", "hold_parcel", "pearson_r", "spearman_r", "r2", "rmse", "subject"}
     if not need.issubset(set(fold_perf_df.columns)):
         raise ValueError(f"fold_perf_df must include columns: {sorted(need)}")
 
@@ -1629,6 +1962,10 @@ def summarize_heldout_region_performance(
             n_folds=("subject", "size"),
             mean_pearson=("pearson_r", "mean"),
             std_pearson=("pearson_r", "std"),
+            mean_spearman=("spearman_r", "mean"),
+            std_spearman=("spearman_r", "std"),
+            mean_r2=("r2", "mean"),
+            std_r2=("r2", "std"),
             mean_rmse=("rmse", "mean"),
             std_rmse=("rmse", "std"),
         )
@@ -1641,14 +1978,14 @@ def summarize_heldout_region_performance(
 
 def plot_heldout_region_grouped_bars(
     heldout_df: pd.DataFrame,
-    metric: str = "mean_pearson",  # mean_pearson | mean_rmse
+    metric: str = "mean_pearson",  # mean_pearson | mean_spearman | mean_r2 | mean_rmse
     sort_by_model: str = "dlam",
     use_error_bars: bool = False,
     error_kind: str = "std",  # std | sem
     figsize: Tuple[float, float] = (16.0, 7.2),
 ) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
-    if metric not in {"mean_pearson", "mean_rmse"}:
-        raise ValueError("metric must be one of: mean_pearson, mean_rmse")
+    if metric not in {"mean_pearson", "mean_spearman", "mean_r2", "mean_rmse"}:
+        raise ValueError("metric must be one of: mean_pearson, mean_spearman, mean_r2, mean_rmse")
     if error_kind not in {"std", "sem"}:
         raise ValueError("error_kind must be one of: std, sem")
 
@@ -1665,7 +2002,7 @@ def plot_heldout_region_grouped_bars(
         sort_col = [c for c in MODEL_ORDER if c in pivot.columns][0]
 
     # Worst->best on x-axis.
-    asc = True if metric == "mean_pearson" else False
+    asc = True if metric in {"mean_pearson", "mean_spearman", "mean_r2"} else False
     pivot = pivot.sort_values(sort_col, ascending=asc).reset_index(drop=True)
 
     # long form aligned to sorted region order
@@ -1677,12 +2014,19 @@ def plot_heldout_region_grouped_bars(
     # error bars
     err_col = None
     if use_error_bars:
-        base = "std_pearson" if metric == "mean_pearson" else "std_rmse"
+        if metric == "mean_pearson":
+            base = "std_pearson"
+        elif metric == "mean_spearman":
+            base = "std_spearman"
+        elif metric == "mean_r2":
+            base = "std_r2"
+        else:
+            base = "std_rmse"
         if error_kind == "std":
             err_col = base
             dd["err"] = dd[err_col].astype(float)
         else:
-            n = np.maximum(dd["n_folds"].to_numpy(dtype=np.float64), 1.0)
+            n = np.maximum(dd["n_subjects"].to_numpy(dtype=np.float64), 1.0)
             dd["err"] = dd[base].to_numpy(dtype=np.float64) / np.sqrt(n)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
@@ -1705,16 +2049,55 @@ def plot_heldout_region_grouped_bars(
 
     ax.set_title(
         f"Held-out region performance by model ({metric}, sorted by {sort_col.upper()} worst->best)",
-        fontsize=FONT["title"] + 1,
+        fontsize=FONT["title"] + 5,
     )
-    ax.set_xlabel("Held-out region (GTEx label, sorted)", fontsize=FONT["label"] + 1)
-    ax.set_ylabel("Mean Pearson r" if metric == "mean_pearson" else "Mean RMSE", fontsize=FONT["label"] + 1)
+    ax.set_xlabel("Held-out region (GTEx label, sorted)", fontsize=FONT["label"] + 4)
+    if metric == "mean_pearson":
+        ylab = "Mean Pearson r"
+    elif metric == "mean_spearman":
+        ylab = "Mean Spearman r"
+    elif metric == "mean_r2":
+        ylab = r"Mean $R^2$"
+    else:
+        ylab = "Mean RMSE"
+    ax.set_ylabel(ylab, fontsize=FONT["label"] + 4)
     ax.grid(True, axis="y", alpha=0.2)
-    ax.legend(frameon=False, ncol=3, loc="upper left")
+    ax.legend(frameon=False, ncol=3, loc="upper left", fontsize=FONT["legend"] + 4)
+    ax.tick_params(axis="y", labelsize=FONT["tick"] + 4)
+
+    y_all = dd[metric].to_numpy(dtype=np.float64)
+    if use_error_bars and "err" in dd.columns:
+        y_err = dd["err"].to_numpy(dtype=np.float64)
+        y_lo = y_all - y_err
+        y_hi = y_all + y_err
+    else:
+        y_lo = y_all
+        y_hi = y_all
+    finite_lo = y_lo[np.isfinite(y_lo)]
+    finite_hi = y_hi[np.isfinite(y_hi)]
+    if finite_lo.size and finite_hi.size:
+        y_min = float(np.min(finite_lo))
+        y_max = float(np.max(finite_hi))
+        if metric in {"mean_pearson", "mean_spearman", "mean_r2"}:
+            pad = max(0.05, 0.16 * max(y_max - y_min, 1e-6))
+            lo = max(-1.0, y_min - pad)
+            hi = min(1.0, y_max + pad)
+            if hi - lo < 0.12:
+                mid = 0.5 * (hi + lo)
+                lo = max(-1.0, mid - 0.06)
+                hi = min(1.0, mid + 0.06)
+            ax.set_ylim(lo, hi)
+        else:
+            pad = max(0.05, 0.16 * max(y_max - y_min, 1e-6))
+            lo = max(0.0, y_min - pad)
+            hi = y_max + pad
+            if hi - lo < 0.12:
+                hi = lo + 0.12
+            ax.set_ylim(lo, hi)
 
     labels = key_order["label"].astype(str).tolist()
     ax.set_xticks(x.tolist())
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=FONT["tick"])
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=FONT["tick"] + 4)
 
     return fig, ax, dd
 
@@ -1724,9 +2107,8 @@ def select_subject_by_model(
     mode: str = "median",
     metric: str = "pearson_r",
     model: str = "plam",
-    inverse_combat: bool = False,
 ) -> str:
-    dlam_df = compute_subject_metrics_from_cache(cfg, model=str(model), inverse_combat=inverse_combat)
+    dlam_df = compute_subject_metrics_from_cache(cfg, model=str(model))
     if metric not in {"pearson_r", "rmse"}:
         raise ValueError("metric must be one of: pearson_r, rmse")
     d = dlam_df.dropna(subset=[metric]).copy()
@@ -1750,16 +2132,13 @@ def _subject_scatter_payload(
     subject: str,
     eval_gene_mode: str = "all",  # all | hvg | custom
     custom_gene_list: Sequence[str] | None = None,
-    inverse_combat: bool = False,
     eval_gene_path: str | None = None,
-    clamp_zero: bool = False,
 ) -> Dict[str, np.ndarray]:
     p = (_model_cache_root(cfg, str(model).lower()) / f"{subject}.npz").resolve()
     if not p.exists():
         raise FileNotFoundError(p)
     with np.load(p, allow_pickle=True) as z:
-        pred, truth = _cache_pred_truth_arrays(z, inverse_combat=inverse_combat)
-        pred, truth = _maybe_clamp_zero(pred, truth, inverse_combat=inverse_combat, clamp_zero=clamp_zero)
+        pred, truth = _cache_pred_truth_arrays(z)
         mask = z["loro_eval_mask"].astype(bool)
         gene_names = tuple(str(g) for g in z["gene_names"].tolist())
 
@@ -1807,9 +2186,7 @@ def plot_single_subject_scatter_triplet(
     top_n: int = 10,
     eval_gene_mode: str = "all",  # all | hvg | custom
     custom_gene_list: Sequence[str] | None = None,
-    inverse_combat: bool = False,
     eval_gene_path: str | None = None,
-    clamp_zero: bool = False,
     density_gridsize: int = 70,
     density_cmap: str = "magma",
     density_mincnt: int = 1,
@@ -1820,7 +2197,6 @@ def plot_single_subject_scatter_triplet(
         mode=str(subject_mode),
         metric="pearson_r",
         model=str(rank_model),
-        inverse_combat=inverse_combat,
     )
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
     mode_eval = str(eval_gene_mode).lower()
@@ -1843,9 +2219,7 @@ def plot_single_subject_scatter_triplet(
             subject=subject,
             eval_gene_mode=eval_gene_mode,
             custom_gene_list=custom_gene_list,
-            inverse_combat=inverse_combat,
             eval_gene_path=eval_gene_path,
-            clamp_zero=clamp_zero,
         )
         x = p["x"]
         y = p["y"]

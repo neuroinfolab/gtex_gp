@@ -26,7 +26,7 @@ The full orchestration in `run_writeup_workflow(...)` is:
 
 - Manuscript section: Cross-Dataset Harmonization
 - Implementation:
-  - `src/harmonize/combat.py` (`CombatHarmonizer.fit`, `.transform`, `.inverse_gtex`)
+  - `src/harmonize/combat.py` (`CombatHarmonizer.fit`, `.transform`)
   - registry entrypoint: `src/harmonize/__init__.py` (`fit_harmonizer(..., method="combat", ...)`)
 - Workflow usage:
   - shared harmonization summary: `src/workflows/writeup_pipeline.py` -> `_shared_harmonized(...)`
@@ -126,4 +126,3 @@ The full orchestration in `run_writeup_workflow(...)` is:
   - `tests/test_writeup_workflow_smoke.py`
   - `tests/test_writeup_asset_inventory.py`
   - `tests/test_writeup_bundle_smoke.py`
-

@@ -25,7 +25,6 @@ PLAM_MAX_RANK="${PLAM_MAX_RANK:-10}"
 ATLAS_AGG="${ATLAS_AGG:-mean}"
 GTEX_REP_MODE="${GTEX_REP_MODE:-centroid}"
 GTEX_HEMI_MODE="${GTEX_HEMI_MODE:-mirror_left}"
-COMBAT_INVERSE_SLOPE_FLOOR="${COMBAT_INVERSE_SLOPE_FLOOR:-0.10}"
 
 cd "${REPO_ROOT}"
 mkdir -p out/slurm
@@ -43,8 +42,7 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py 
   --plam-latent-dim-max \"${PLAM_MAX_RANK}\" \
   --atlas-agg \"${ATLAS_AGG}\" \
   --gtex-rep-mode \"${GTEX_REP_MODE}\" \
-  --gtex-hemi-mode \"${GTEX_HEMI_MODE}\" \
-  --combat-inverse-slope-floor \"${COMBAT_INVERSE_SLOPE_FLOOR}\""
+  --gtex-hemi-mode \"${GTEX_HEMI_MODE}\""
 
 singularity exec --fakeroot \
   --overlay "/scratch/$USER/envs/vformer_env/overlay-25GB-500K.ext3:ro" \

@@ -12,8 +12,8 @@
 
 Near-term work is centered on:
 - expanding reusable analysis functions in `src/eval_utils`, `src/viz`, and `src/workflows`,
-- iterative feature development in `notebooks/results_eda_cached_predictions_allgenes.ipynb`,
-- inverse-space checks in `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb`,
+- iterative feature development in `results_eda_cached_predictions.ipynb`,
+- mixed-space raw-truth checks in `results_eda_cached_predictions_raw.ipynb`,
 - GTEx/AHBA assignment inspection in `notebooks/coordinate_overlay_3d_mni.ipynb`,
 - older variants retained under `notebooks/ar_notebooks/` when historical comparison is useful.
 
@@ -27,8 +27,8 @@ Near-term work is centered on:
 - `src/eval_utils/results_eda.py` — cache-based EDA utilities
 - `src/eval_utils/dlam_diagnostics.py` — DLAM diagnostics fit/cache/plot utilities
 - `src/viz/coord_viz.py` — GTEx/AHBA coordinate overlay utilities
-- `notebooks/results_eda_cached_predictions_allgenes.ipynb` — primary harmonized-space EDA notebook
-- `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb` — raw/inverse-ComBat EDA notebook
+- `results_eda_cached_predictions.ipynb` — primary harmonized-space EDA notebook
+- `results_eda_cached_predictions_raw.ipynb` — mixed-space raw-truth EDA notebook
 - `notebooks/coordinate_overlay_3d_mni.ipynb` — parcel-assignment visualization notebook
 
 ## Key Recent Changes (Important)
@@ -64,6 +64,7 @@ Near-term work is centered on:
    - `plam_dynamicrank`
 10. Publication EDA workflow now emphasizes cache-backed plotting with minimal recomputation.
 11. DLAM diagnostics were added for single-subject full-fit/LORO latent-alignment inspection.
+12. Raw-space evaluation now defaults to mixed-space comparisons against native GTEx truth in the EDA notebooks.
 
 ## Core LORO Semantics
 
@@ -73,7 +74,7 @@ Near-term work is centered on:
 - Held-out truth is harmonized with that fold harmonizer.
 - Strict fold prediction is evaluated only at held-out parcel(s).
 - Final `loro_fused_subject_h` is a fused map (strict LORO where available + `fullfit_subject_h` elsewhere).
-- Raw-space companions (`*_subject_raw`) are also stored using covariate-aware inverse GTEx transforms for predictions and parcel-averaged native GTEx truth for held-out parcels.
+- Native raw-space held-out truth is still stored as `loro_truth_subject_raw` for mixed-space evaluation against parcel-averaged GTEx truth.
 
 ## Data / Path Assumptions
 
@@ -106,9 +107,9 @@ Default outputs:
 ## Quick Start (Agent Onboarding)
 
 1. Read `README.md` and this file.
-2. Inspect `src/eval_utils/results_eda.py` and `notebooks/results_eda_cached_predictions_allgenes.ipynb` first.
-3. Use `notebooks/results_eda_cached_predictions_allgenes_inverse_combat.ipynb` only for secondary raw-space checks.
+2. Inspect `src/eval_utils/results_eda.py` and `results_eda_cached_predictions.ipynb` first.
+3. Use `results_eda_cached_predictions_raw.ipynb` for mixed-space raw-truth checks.
 4. Use `notebooks/coordinate_overlay_3d_mni.ipynb` when working on spatial assignment or matching changes.
 5. Treat `notebooks/ar_notebooks/` as historical variants unless you intentionally need one.
 
-Last updated at: 2026-04-07
+Last updated at: 2026-04-13
