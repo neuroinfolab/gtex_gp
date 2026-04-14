@@ -16,6 +16,8 @@ from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy.optimize import curve_fit
+from sklearn.decomposition import PCA
 
 import sys
 
@@ -499,6 +501,148 @@ def _fold_rows_for_subject_npz(
                 }
             )
     return rows
+
+
+def _pooled_pca_subject_block_from_npz(
+    npz_path_str: str,
+    model: str,
+    mode_label: str,
+    eval_gene_path_resolved: str | None,
+    eval_gene_items: Tuple[str, ...] | None,
+    mixed_space_mode: str | None = None,
+    ref_stats: Dict[str, np.ndarray] | None = None,
+) -> Dict[str, object]:
+    npz_path = Path(npz_path_str)
+    sid = npz_path.stem
+    eval_gene_set = None if eval_gene_items is None else set(eval_gene_items)
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
+    with np.load(npz_path, allow_pickle=True) as z:
+        pred, truth = _cache_pred_truth_arrays_with_mode(z, mixed_space_mode=msm)
+        mask = np.asarray(z["loro_eval_mask"], dtype=bool)
+        parcel_idx = np.asarray(z["parcel_idx"], dtype=np.int32)
+        gene_names = tuple(str(g) for g in z["gene_names"].tolist())
+        gi = _gene_indices_from_names(
+            gene_names,
+            eval_gene_set,
+            context=f"subject={sid} model={model}",
+        )
+        pred_use = np.asarray(pred[mask, :][:, gi], dtype=np.float64)
+        truth_use = np.asarray(truth[mask, :][:, gi], dtype=np.float64)
+        gene_names_use = tuple(gene_names[i] for i in gi.tolist())
+        if msm == "harmonized_pred_vs_raw_truth_refz_corr":
+            ref = _reference_gene_stats_subset(ref_stats, gene_names_use)
+            if ref is None:
+                raise ValueError(
+                    "prepost/reference stats are required for mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr'"
+                )
+            mu_raw, sd_raw, mu_h, sd_h, keep_mask = ref
+            if not np.any(keep_mask):
+                raise ValueError("No genes remain after refz low-variance filtering")
+            pred_use = _zscore_cols_with_ref(pred_use[:, keep_mask], mu_h[keep_mask], sd_h[keep_mask])
+            truth_use = _zscore_cols_with_ref(truth_use[:, keep_mask], mu_raw[keep_mask], sd_raw[keep_mask])
+            gene_names_use = tuple(np.asarray(gene_names_use, dtype=object)[keep_mask].tolist())
+        keys = [(str(sid), int(p)) for p in parcel_idx[mask].tolist()]
+        return {
+            "subject": str(sid),
+            "model": str(model),
+            "eval_gene_mode": mode_label,
+            "eval_gene_path": eval_gene_path_resolved,
+            "mixed_space_mode": msm,
+            "keys": keys,
+            "pred": pred_use,
+            "truth": truth_use,
+            "gene_names": gene_names_use,
+        }
+
+
+def _resolve_pooled_pca_truth_keys(
+    blocks_by_model: Dict[str, List[Dict[str, object]]],
+    model_list: Sequence[str],
+) -> List[Tuple[str, int]]:
+    key_sets: List[set[Tuple[str, int]]] = []
+    for model in model_list:
+        blocks = blocks_by_model.get(str(model), [])
+        keys_m: set[Tuple[str, int]] = set()
+        for block in blocks:
+            keys_m.update(block["keys"])
+        key_sets.append(keys_m)
+    if len(key_sets) == 0:
+        return []
+    common = set.intersection(*key_sets) if len(key_sets) > 1 else key_sets[0]
+    return sorted(common, key=lambda x: (str(x[0]), int(x[1])))
+
+
+def _build_pooled_truth_pred_mats(
+    blocks_by_model: Dict[str, List[Dict[str, object]]],
+    model_list: Sequence[str],
+    common_keys: Sequence[Tuple[str, int]],
+) -> Tuple[np.ndarray, Dict[str, np.ndarray], Tuple[str, ...]]:
+    if len(common_keys) == 0:
+        raise RuntimeError("No common strict LORO sample rows remain across the selected models")
+    key_order = {k: i for i, k in enumerate(common_keys)}
+    truth_mat: np.ndarray | None = None
+    pred_by_model: Dict[str, np.ndarray] = {}
+    gene_names_ref: Tuple[str, ...] | None = None
+    n_samples = int(len(common_keys))
+
+    for model in model_list:
+        blocks = blocks_by_model.get(str(model), [])
+        if len(blocks) == 0:
+            raise RuntimeError(f"No pooled PCA cache rows found for model={model}")
+        gene_names_this = tuple(blocks[0]["gene_names"])
+        if gene_names_ref is None:
+            gene_names_ref = gene_names_this
+        elif gene_names_this != gene_names_ref:
+            raise ValueError("Gene list mismatch across models while building pooled PCA matrices")
+        n_genes = int(len(gene_names_this))
+        truth_model = np.full((n_samples, n_genes), np.nan, dtype=np.float64)
+        pred_model = np.full((n_samples, n_genes), np.nan, dtype=np.float64)
+        for block in blocks:
+            keys = block["keys"]
+            truth = np.asarray(block["truth"], dtype=np.float64)
+            pred = np.asarray(block["pred"], dtype=np.float64)
+            for row_i, key in enumerate(keys):
+                pos = key_order.get(key)
+                if pos is None:
+                    continue
+                truth_model[pos, :] = truth[row_i, :]
+                pred_model[pos, :] = pred[row_i, :]
+        if np.any(~np.isfinite(truth_model)):
+            raise RuntimeError(f"Truth matrix has missing values after common-key alignment for model={model}")
+        if np.any(~np.isfinite(pred_model)):
+            raise RuntimeError(f"Prediction matrix has missing values after common-key alignment for model={model}")
+        pred_by_model[str(model)] = pred_model
+        if truth_mat is None:
+            truth_mat = truth_model
+    if truth_mat is None or gene_names_ref is None:
+        raise RuntimeError("Failed to assemble pooled PCA truth/prediction matrices")
+    return truth_mat, pred_by_model, gene_names_ref
+
+
+def _apply_pooled_pca_demean_mode(
+    X_true: np.ndarray,
+    pred_by_model: Dict[str, np.ndarray],
+    common_keys: Sequence[Tuple[str, int]],
+    demean_mode: str = "none",
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    mode = str(demean_mode).strip().lower()
+    if mode in {"", "none"}:
+        return X_true, pred_by_model
+    if mode != "within_parcel":
+        raise ValueError("demean_mode must be one of: none, within_parcel")
+
+    X_true_dm = np.asarray(X_true, dtype=np.float64).copy()
+    pred_dm = {str(k): np.asarray(v, dtype=np.float64).copy() for k, v in pred_by_model.items()}
+    parcel_idx = np.asarray([int(p) for _, p in common_keys], dtype=np.int32)
+    for p in np.unique(parcel_idx):
+        idx = np.where(parcel_idx == int(p))[0]
+        if int(idx.size) == 0:
+            continue
+        mu_p = np.nanmean(X_true_dm[idx, :], axis=0)
+        X_true_dm[idx, :] = X_true_dm[idx, :] - mu_p[None, :]
+        for model in pred_dm:
+            pred_dm[model][idx, :] = pred_dm[model][idx, :] - mu_p[None, :]
+    return X_true_dm, pred_dm
 
 
 def _metrics_panel_label(metrics_df: pd.DataFrame, panel_label: str | None = None) -> str:
@@ -1376,6 +1520,418 @@ def compute_subject_metrics_from_cache_gene_subset(
     if len(out) == 0:
         raise RuntimeError(f"No npz files found under {root}")
     return out
+
+
+def compute_pooled_pca_recovery_from_cache_gene_subset(
+    cfg: EDAConfig,
+    num_pcs: int = 10,
+    models: Sequence[str] | None = None,
+    eval_gene_mode: str = "all",
+    custom_gene_list: Sequence[str] | None = None,
+    eval_gene_path: str | None = None,
+    demean_mode: str = "none",
+    mixed_space_mode: str | None = None,
+    prepost: Dict[str, object] | None = None,
+    refz_noise_quantile: float = 0.20,
+    n_jobs: int | None = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Compute pooled ground-truth PCA recovery from cache-backed strict LORO rows.
+
+    Rows are pooled subject-parcel samples and columns are genes. PCA is fit on
+    the truth matrix and each model's pooled prediction matrix is projected into
+    that same truth PCA basis for component-wise comparison.
+
+    Demeaning behavior:
+    - `demean_mode="none"` uses standard PCA centering only. sklearn PCA
+      centers each gene column globally across all pooled samples.
+    - `demean_mode="within_parcel"` first subtracts the truth parcel mean
+      vector from both truth and prediction rows within each parcel, then PCA
+      applies its usual global centering step on the residual matrix.
+
+    Another way to say it:
+    - the first step projects out the parcel fixed effect
+    - the second step recenters the residual feature space for PCA
+    """
+    model_list = [str(m).lower() for m in (models if models is not None else MODEL_ORDER)]
+    mode_label, eval_gene_path_resolved, eval_gene_set = _resolve_eval_gene_set(
+        cfg,
+        eval_gene_mode=eval_gene_mode,
+        custom_gene_list=custom_gene_list,
+        eval_gene_path=eval_gene_path,
+    )
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
+    if msm == "harmonized_pred_vs_raw_truth_refz_corr" and prepost is None:
+        raise ValueError(
+            "mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr' requires prepost=PREPOST "
+            "so reference raw/harmonized GTEx statistics can be computed explicitly"
+        )
+    ref_stats = (
+        _reference_gene_stats(prepost, refz_noise_quantile=refz_noise_quantile)
+        if msm == "harmonized_pred_vs_raw_truth_refz_corr"
+        else None
+    )
+    eval_gene_items = None if eval_gene_set is None else tuple(sorted(eval_gene_set))
+
+    blocks_by_model: Dict[str, List[Dict[str, object]]] = {}
+    for model in model_list:
+        root = _model_cache_root(cfg, model)
+        if not root.exists():
+            raise FileNotFoundError(f"Cache dir not found: {root}")
+        npz_paths = [str(p) for p in sorted(root.glob("*.npz"))]
+        jobs = _effective_n_jobs(len(npz_paths), n_jobs)
+        if jobs == 1:
+            blocks = [
+                _pooled_pca_subject_block_from_npz(
+                    p,
+                    model=model,
+                    mode_label=mode_label,
+                    eval_gene_path_resolved=eval_gene_path_resolved,
+                    eval_gene_items=eval_gene_items,
+                    mixed_space_mode=msm,
+                    ref_stats=ref_stats,
+                )
+                for p in npz_paths
+            ]
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as ex:
+                blocks = list(
+                    ex.map(
+                        _pooled_pca_subject_block_from_npz,
+                        npz_paths,
+                        [model] * len(npz_paths),
+                        [mode_label] * len(npz_paths),
+                        [eval_gene_path_resolved] * len(npz_paths),
+                        [eval_gene_items] * len(npz_paths),
+                        [msm] * len(npz_paths),
+                        [ref_stats] * len(npz_paths),
+                    )
+                )
+        blocks_by_model[str(model)] = blocks
+
+    common_keys = _resolve_pooled_pca_truth_keys(blocks_by_model, model_list)
+    X_true, pred_by_model, _ = _build_pooled_truth_pred_mats(blocks_by_model, model_list, common_keys)
+    X_true, pred_by_model = _apply_pooled_pca_demean_mode(
+        X_true,
+        pred_by_model,
+        common_keys,
+        demean_mode=demean_mode,
+    )
+
+    n_samples = int(X_true.shape[0])
+    n_genes = int(X_true.shape[1])
+    max_pcs = int(min(n_samples, n_genes))
+    if int(num_pcs) < 1:
+        raise ValueError("num_pcs must be >= 1")
+    if int(num_pcs) > max_pcs:
+        raise ValueError(f"num_pcs ({num_pcs}) cannot exceed min(n_samples, n_genes) = {max_pcs}")
+
+    # Rows are pooled subject-parcel samples and columns are genes.
+    # sklearn PCA centers columns (genes) internally, so no extra transpose
+    # or manual centering step is needed here.
+    solver = "randomized" if int(num_pcs) < max_pcs else "full"
+    pca = PCA(n_components=int(num_pcs), svd_solver=solver, random_state=0)
+    C_true = np.asarray(pca.fit_transform(X_true), dtype=np.float64)
+    exp_var = np.asarray(pca.explained_variance_ratio_, dtype=np.float64)
+    cum_var = np.cumsum(exp_var)
+    cutoff_idx_95 = int(np.argmax(cum_var >= 0.95)) if np.any(cum_var >= 0.95) else int(len(cum_var) - 1)
+
+    rows: List[Dict[str, object]] = []
+    summary_rows: List[Dict[str, object]] = []
+    for model in model_list:
+        X_pred = np.asarray(pred_by_model[str(model)], dtype=np.float64)
+        C_pred = np.asarray(pca.transform(X_pred), dtype=np.float64)
+        pc_corrs: List[float] = []
+        weighted_corr_num = 0.0
+        weighted_corr_den = 0.0
+        for i in range(int(num_pcs)):
+            x = C_true[:, i]
+            y = C_pred[:, i]
+            pear = _pearson_safe(x, y)
+            spear = _spearman_safe(x, y)
+            r2 = _r2_safe(x, y)
+            rmse = _rmse_safe(x, y)
+            pc_corrs.append(pear)
+            if np.isfinite(pear) and np.isfinite(exp_var[i]):
+                weighted_corr_num += float(exp_var[i]) * float(pear)
+                weighted_corr_den += float(exp_var[i])
+            rows.append(
+                {
+                    "model": str(model),
+                    "component": int(i + 1),
+                    "score_pearson": pear,
+                    "score_spearman": spear,
+                    "score_r2": r2,
+                    "score_rmse": rmse,
+                    "explained_variance_ratio": float(exp_var[i]),
+                    "cumulative_variance": float(cum_var[i]),
+                    "pc95_cutoff": int(cutoff_idx_95 + 1),
+                    "n_samples": int(n_samples),
+                    "n_genes": int(n_genes),
+                    "eval_gene_mode": mode_label,
+                    "eval_gene_path": eval_gene_path_resolved,
+                    "demean_mode": str(demean_mode).lower(),
+                    "mixed_space_mode": msm,
+                }
+            )
+        summary_rows.append(
+            {
+                "model": str(model),
+                "mean_score_pearson": float(np.nanmean(pc_corrs)),
+                "var_weighted_score_pearson": float(weighted_corr_num / weighted_corr_den) if weighted_corr_den > 0 else np.nan,
+                "pc1_score_pearson": float(pc_corrs[0]) if len(pc_corrs) > 0 else np.nan,
+                "pc95_cutoff": int(cutoff_idx_95 + 1),
+                "n_samples": int(n_samples),
+                "n_genes": int(n_genes),
+                "num_pcs": int(num_pcs),
+                "eval_gene_mode": mode_label,
+                "eval_gene_path": eval_gene_path_resolved,
+                "demean_mode": str(demean_mode).lower(),
+                "mixed_space_mode": msm,
+            }
+        )
+
+    pc_df = pd.DataFrame(rows)
+    summary_df = (
+        pd.DataFrame(summary_rows)
+        .set_index("model")
+        .reindex(model_list)
+        .reset_index()
+    )
+    return pc_df, summary_df
+
+
+def collect_pooled_sample_prediction_dfs_from_cache_gene_subset(
+    cfg: EDAConfig,
+    model: str,
+    eval_gene_mode: str = "all",
+    custom_gene_list: Sequence[str] | None = None,
+    eval_gene_path: str | None = None,
+    mixed_space_mode: str | None = None,
+    prepost: Dict[str, object] | None = None,
+    refz_noise_quantile: float = 0.20,
+    n_jobs: int | None = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    model_name = str(model).lower()
+    root = _model_cache_root(cfg, model_name)
+    if not root.exists():
+        raise FileNotFoundError(f"Cache dir not found: {root}")
+
+    mode_label, eval_gene_path_resolved, eval_gene_set = _resolve_eval_gene_set(
+        cfg,
+        eval_gene_mode=eval_gene_mode,
+        custom_gene_list=custom_gene_list,
+        eval_gene_path=eval_gene_path,
+    )
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
+    if msm == "harmonized_pred_vs_raw_truth_refz_corr" and prepost is None:
+        raise ValueError(
+            "mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr' requires prepost=PREPOST "
+            "so reference raw/harmonized GTEx statistics can be computed explicitly"
+        )
+    ref_stats = (
+        _reference_gene_stats(prepost, refz_noise_quantile=refz_noise_quantile)
+        if msm == "harmonized_pred_vs_raw_truth_refz_corr"
+        else None
+    )
+    eval_gene_items = None if eval_gene_set is None else tuple(sorted(eval_gene_set))
+    npz_paths = [str(p) for p in sorted(root.glob("*.npz"))]
+    jobs = _effective_n_jobs(len(npz_paths), n_jobs)
+    if jobs == 1:
+        blocks = [
+            _pooled_pca_subject_block_from_npz(
+                p,
+                model=model_name,
+                mode_label=mode_label,
+                eval_gene_path_resolved=eval_gene_path_resolved,
+                eval_gene_items=eval_gene_items,
+                mixed_space_mode=msm,
+                ref_stats=ref_stats,
+            )
+            for p in npz_paths
+        ]
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            blocks = list(
+                ex.map(
+                    _pooled_pca_subject_block_from_npz,
+                    npz_paths,
+                    [model_name] * len(npz_paths),
+                    [mode_label] * len(npz_paths),
+                    [eval_gene_path_resolved] * len(npz_paths),
+                    [eval_gene_items] * len(npz_paths),
+                    [msm] * len(npz_paths),
+                    [ref_stats] * len(npz_paths),
+                )
+            )
+
+    truth_frames: List[pd.DataFrame] = []
+    pred_frames: List[pd.DataFrame] = []
+    gene_names_ref: Tuple[str, ...] | None = None
+    for block in blocks:
+        gene_names = tuple(block["gene_names"])
+        if gene_names_ref is None:
+            gene_names_ref = gene_names
+        elif gene_names != gene_names_ref:
+            raise ValueError("Gene list mismatch across subjects while collecting pooled sample dfs")
+        keys = list(block["keys"])
+        subjects = [str(s) for s, _ in keys]
+        parcels = [int(p) for _, p in keys]
+        sample_index = np.arange(len(keys), dtype=np.int32)
+        base = pd.DataFrame(
+            {
+                "subject": subjects,
+                "parcel_idx": parcels,
+                "sample_key": [f"{s}|{p}" for s, p in keys],
+                "sample_idx_subject": sample_index,
+                "model": str(model_name),
+                "eval_gene_mode": mode_label,
+                "eval_gene_path": eval_gene_path_resolved,
+                "mixed_space_mode": msm,
+            }
+        )
+        truth_df = pd.concat(
+            [base.copy(), pd.DataFrame(np.asarray(block["truth"], dtype=np.float64), columns=list(gene_names))],
+            axis=1,
+        )
+        pred_df = pd.concat(
+            [base.copy(), pd.DataFrame(np.asarray(block["pred"], dtype=np.float64), columns=list(gene_names))],
+            axis=1,
+        )
+        truth_frames.append(truth_df)
+        pred_frames.append(pred_df)
+
+    if len(truth_frames) == 0:
+        raise RuntimeError(f"No npz files found under {root}")
+
+    truth_all = (
+        pd.concat(truth_frames, ignore_index=True)
+        .sort_values(["subject", "parcel_idx"])
+        .reset_index(drop=True)
+    )
+    pred_all = (
+        pd.concat(pred_frames, ignore_index=True)
+        .sort_values(["subject", "parcel_idx"])
+        .reset_index(drop=True)
+    )
+    return truth_all, pred_all
+
+
+def plot_pooled_pca_recovery(
+    pc_df: pd.DataFrame,
+    metric: str = "score_pearson",
+    figsize: Tuple[float, float] = (9.2, 4.6),
+    dpi: int = 180,
+    panel_label: str | None = None,
+    show_decay_fit: bool = False,
+    x_label_stride: int = 10,
+) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
+    need = {"model", "component", "explained_variance_ratio", "cumulative_variance", "pc95_cutoff", metric}
+    if not need.issubset(set(pc_df.columns)):
+        raise ValueError(f"pc_df must include columns: {sorted(need)}")
+    if metric not in {"score_pearson", "score_spearman", "score_r2", "score_rmse"}:
+        raise ValueError("metric must be one of: score_pearson, score_spearman, score_r2, score_rmse")
+
+    d = pc_df.copy()
+    d["model"] = d["model"].astype(str).str.lower()
+    d = d[d["model"].isin(MODEL_ORDER)].copy()
+    if len(d) == 0:
+        raise RuntimeError("No pooled PCA rows available to plot")
+
+    d = d.sort_values(["model", "component"]).reset_index(drop=True)
+    n_samples = int(d["n_samples"].iloc[0]) if "n_samples" in d.columns else -1
+    n_genes = int(d["n_genes"].iloc[0]) if "n_genes" in d.columns else -1
+    cutoff = int(d["pc95_cutoff"].iloc[0]) if "pc95_cutoff" in d.columns else -1
+    p_lbl = _metrics_panel_label(d, panel_label=panel_label)
+    demean_mode = str(d["demean_mode"].iloc[0]) if "demean_mode" in d.columns else "none"
+
+    if metric == "score_pearson":
+        ylab = "PC Score Pearson r"
+    elif metric == "score_spearman":
+        ylab = "PC Score Spearman r"
+    elif metric == "score_r2":
+        ylab = r"PC Score $R^2$"
+    else:
+        ylab = "PC Score RMSE"
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi, constrained_layout=True)
+    for model in MODEL_ORDER:
+        sub = d[d["model"] == model].copy()
+        if len(sub) == 0:
+            continue
+        xx = sub["component"].to_numpy(dtype=np.float64)
+        yy = sub[metric].to_numpy(dtype=np.float64)
+        if bool(show_decay_fit):
+            ax.scatter(
+                xx,
+                yy,
+                s=26.0,
+                alpha=0.55,
+                color=MODEL_COLORS[model],
+                edgecolors="none",
+                label=MODEL_LABELS[model],
+            )
+
+            def _exp_decay(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+                return a * np.exp(-b * x) + c
+
+            try:
+                valid = np.isfinite(xx) & np.isfinite(yy)
+                if int(np.sum(valid)) >= 4:
+                    xfit = xx[valid]
+                    yfit = yy[valid]
+                    popt, _ = curve_fit(
+                        _exp_decay,
+                        xfit,
+                        yfit,
+                        p0=[float(yfit[0] - yfit[-1]), 0.15, float(yfit[-1])],
+                        maxfev=10000,
+                    )
+                    xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
+                    ys = _exp_decay(xs, *popt)
+                    ax.plot(
+                        xs,
+                        ys,
+                        linewidth=2.0,
+                        alpha=0.95,
+                        color=MODEL_COLORS[model],
+                    )
+            except Exception:
+                pass
+        else:
+            ax.plot(
+                xx,
+                yy,
+                marker="o",
+                markersize=4.0,
+                linewidth=1.8,
+                color=MODEL_COLORS[model],
+                label=MODEL_LABELS[model],
+            )
+
+    if cutoff >= 1:
+        ax.axvline(cutoff, color="#555555", linestyle="--", linewidth=1.1, alpha=0.8)
+
+    comp_ticks = sorted(set(d["component"].astype(int).tolist()))
+    stride = max(1, int(x_label_stride))
+    ax.set_xticks(comp_ticks)
+    ax.set_xticklabels([str(x) if (int(x) % stride == 0 or int(x) == 1) else "" for x in comp_ticks])
+    ax.tick_params(axis="x", which="major", length=4, width=0.9)
+    ax.set_xlabel("Principal Component")
+    ax.set_ylabel(ylab)
+    title = f"Ground-Truth PCA Recovery ({p_lbl}; n={n_samples}; genes={n_genes})"
+    if demean_mode not in {"", "none"}:
+        title += f" [{demean_mode}]"
+    ax.set_title(title)
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=False, loc="best")
+
+    if metric in {"score_pearson", "score_spearman", "score_r2"}:
+        ymin = float(np.nanmin(d[metric].to_numpy(dtype=np.float64)))
+        ymax = float(np.nanmax(d[metric].to_numpy(dtype=np.float64)))
+        ax.set_ylim(min(-0.05, ymin - 0.05), max(1.0, ymax + 0.03))
+
+    return fig, ax, d.copy()
 
 
 def plot_coverage_vs_accuracy(

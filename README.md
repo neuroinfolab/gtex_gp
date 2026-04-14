@@ -22,6 +22,7 @@ Legacy or exploratory notebook variants now live under:
 
 - Subject-wise LORO caches now support stable downstream EDA without re-running full notebook workflows.
 - PLAM rank experiments are supported via cache directories such as `plam_rank3`, `plam_rank4`, and `plam_dynamicrank`.
+- Active cache/eval workflows now keep harmonized predictions plus native raw held-out truth; inverse-mapped raw prediction outputs were retired.
 - `src/eval_utils/dlam_diagnostics.py` provides DLAM full-fit/LORO diagnostics with reusable plotting utilities.
 - Publication-facing EDA is now centralized in `results_eda_publication_ready.ipynb` using cache-backed utilities.
 
@@ -66,6 +67,10 @@ Each `.npz` includes:
 Fusion behavior:
 - strict LORO predictions at `loro_eval_mask`
 - single full-data fallback model for all non-LORO parcels
+
+Evaluation note:
+- harmonized-space evaluation remains the default
+- raw-space follow-up uses mixed-space correlation against `loro_truth_subject_raw` in `results_eda_cached_predictions_raw.ipynb`
 
 Core implementation modules:
 - `src/workflows/loro_cache.py`

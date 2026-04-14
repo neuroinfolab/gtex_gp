@@ -65,6 +65,7 @@ Near-term work is centered on:
 10. Publication EDA workflow now emphasizes cache-backed plotting with minimal recomputation.
 11. DLAM diagnostics were added for single-subject full-fit/LORO latent-alignment inspection.
 12. Raw-space evaluation now defaults to mixed-space comparisons against native GTEx truth in the EDA notebooks.
+13. Inverse-mapped raw prediction outputs were retired from the active cache/model pipeline; only native raw held-out truth is retained for mixed-space evaluation.
 
 ## Core LORO Semantics
 
