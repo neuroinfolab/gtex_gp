@@ -18,6 +18,10 @@ import pandas as pd
 import seaborn as sns
 from scipy.optimize import curve_fit
 from sklearn.decomposition import PCA
+try:
+    from statsmodels.nonparametric.smoothers_lowess import lowess as _sm_lowess
+except Exception:  # pragma: no cover - optional dependency
+    _sm_lowess = None
 
 import sys
 
@@ -1675,6 +1679,7 @@ def compute_pooled_pca_recovery_from_cache_gene_subset(
 
     rows: List[Dict[str, object]] = []
     summary_rows: List[Dict[str, object]] = []
+    truth_rows_added = False
     for model in model_list:
         X_pred = np.asarray(pred_by_model[str(model)], dtype=np.float64)
         C_pred = np.asarray(pca.transform(X_pred), dtype=np.float64)
@@ -1727,6 +1732,33 @@ def compute_pooled_pca_recovery_from_cache_gene_subset(
                 "mixed_space_mode": msm,
             }
         )
+        if not truth_rows_added:
+            for i in range(int(num_pcs)):
+                x = C_true[:, i]
+                pear_t = _pearson_safe(x, x)
+                spear_t = _spearman_safe(x, x)
+                r2_t = _r2_safe(x, x)
+                rmse_t = _rmse_safe(x, x)
+                rows.append(
+                    {
+                        "model": "truth",
+                        "component": int(i + 1),
+                        "score_pearson": pear_t,
+                        "score_spearman": spear_t,
+                        "score_r2": r2_t,
+                        "score_rmse": rmse_t,
+                        "explained_variance_ratio": float(exp_var[i]),
+                        "cumulative_variance": float(cum_var[i]),
+                        "pc95_cutoff": int(cutoff_idx_95 + 1),
+                        "n_samples": int(n_samples),
+                        "n_genes": int(n_genes),
+                        "eval_gene_mode": mode_label,
+                        "eval_gene_path": eval_gene_path_resolved,
+                        "demean_mode": str(demean_mode).lower(),
+                        "mixed_space_mode": msm,
+                    }
+                )
+            truth_rows_added = True
 
     pc_df = pd.DataFrame(rows)
     summary_df = (
@@ -1995,8 +2027,10 @@ def plot_pooled_pca_variance_spectra(
     figsize: Tuple[float, float] = (12.2, 4.6),
     dpi: int = 180,
     panel_label: str | None = None,
-    show_decay_fit: bool = False,
+    show_fit: str | None = None,
+    lowess_frac: float = 0.18,
     x_label_stride: int = 10,
+    x_tick_rotation: float = 45.0,
     source: str | None = None,
 ) -> Tuple[plt.Figure, np.ndarray, pd.DataFrame]:
     need = {"source", "component", "explained_variance_ratio", "cumulative_variance", "pc95_cutoff"}
@@ -2022,6 +2056,11 @@ def plot_pooled_pca_variance_spectra(
     label_map = {"truth": "Truth", **MODEL_LABELS}
 
     fig, axes = plt.subplots(1, 2, figsize=figsize, dpi=dpi, constrained_layout=True)
+    fit_style = None if show_fit is None else str(show_fit).strip().lower()
+    if fit_style not in {None, "lowess", "linear", "decay"}:
+        raise ValueError("show_fit must be one of: None, lowess, linear, decay")
+    if fit_style == "lowess" and _sm_lowess is None:
+        raise ImportError("show_fit='lowess' requires statsmodels to be installed")
 
     def _exp_decay(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
         return a * np.exp(-b * x) + c
@@ -2035,23 +2074,34 @@ def plot_pooled_pca_variance_spectra(
         color = color_map.get(source, "#333333")
         label = label_map.get(source, str(source))
 
-        if bool(show_decay_fit):
+        if fit_style is not None:
             axes[0].scatter(xx, yy, s=24.0, alpha=0.50, color=color, edgecolors="none", label=label)
             try:
-                valid = np.isfinite(xx) & np.isfinite(yy) & (yy > 0)
+                valid = np.isfinite(xx) & np.isfinite(yy)
+                if fit_style == "decay":
+                    valid = valid & (yy > 0)
                 if int(np.sum(valid)) >= 4:
                     xfit = xx[valid]
                     yfit = yy[valid]
-                    popt, _ = curve_fit(
-                        _exp_decay,
-                        xfit,
-                        yfit,
-                        p0=[float(max(yfit[0] - yfit[-1], 1e-8)), 0.10, float(max(yfit[-1], 1e-8))],
-                        bounds=([0.0, 0.0, 0.0], [10.0, 5.0, 1.0]),
-                        maxfev=10000,
-                    )
-                    xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
-                    ys = _exp_decay(xs, *popt)
+                    if fit_style == "lowess":
+                        smooth = _sm_lowess(yfit, xfit, frac=float(lowess_frac), return_sorted=True)
+                        xs = np.asarray(smooth[:, 0], dtype=np.float64)
+                        ys = np.asarray(smooth[:, 1], dtype=np.float64)
+                    elif fit_style == "linear":
+                        slope, intercept = np.polyfit(xfit, yfit, 1)
+                        xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
+                        ys = slope * xs + intercept
+                    else:
+                        popt, _ = curve_fit(
+                            _exp_decay,
+                            xfit,
+                            yfit,
+                            p0=[float(max(yfit[0] - yfit[-1], 1e-8)), 0.10, float(max(yfit[-1], 1e-8))],
+                            bounds=([0.0, 0.0, 0.0], [10.0, 5.0, 1.0]),
+                            maxfev=10000,
+                        )
+                        xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
+                        ys = _exp_decay(xs, *popt)
                     axes[0].plot(xs, ys, linewidth=2.0, alpha=0.95, color=color)
                 else:
                     axes[0].plot(xx, yy, marker="o", markersize=3.5, linewidth=1.5, color=color, alpha=0.9, label=label)
@@ -2078,7 +2128,11 @@ def plot_pooled_pca_variance_spectra(
     stride = max(1, int(x_label_stride))
     for ax in axes:
         ax.set_xticks(comp_ticks)
-        ax.set_xticklabels([str(x) if (int(x) % stride == 0 or int(x) == 1) else "" for x in comp_ticks])
+        ax.set_xticklabels(
+            [str(x) if (int(x) % stride == 0 or int(x) == 1) else "" for x in comp_ticks],
+            rotation=float(x_tick_rotation),
+            ha="right" if float(x_tick_rotation) != 0.0 else "center",
+        )
         ax.tick_params(axis="x", which="major", length=4, width=0.9)
         ax.grid(alpha=0.22)
 
@@ -2108,9 +2162,12 @@ def plot_pooled_pca_recovery(
     figsize: Tuple[float, float] = (9.2, 4.6),
     dpi: int = 180,
     panel_label: str | None = None,
-    show_decay_fit: bool = False,
+    show_fit: str | None = None,
+    lowess_frac: float = 0.18,
     show_lines: bool = True,
     x_label_stride: int = 10,
+    x_tick_rotation: float = 45.0,
+    show_truth: bool = False,
 ) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
     need = {"model", "component", "explained_variance_ratio", "cumulative_variance", "pc95_cutoff", metric}
     if not need.issubset(set(pc_df.columns)):
@@ -2120,16 +2177,23 @@ def plot_pooled_pca_recovery(
 
     d = pc_df.copy()
     d["model"] = d["model"].astype(str).str.lower()
+    d_truth = d[d["model"] == "truth"].copy()
     d = d[d["model"].isin(MODEL_ORDER)].copy()
-    if len(d) == 0:
+    if len(d) == 0 and (not bool(show_truth) or len(d_truth) == 0):
         raise RuntimeError("No pooled PCA rows available to plot")
 
     d = d.sort_values(["model", "component"]).reset_index(drop=True)
-    n_samples = int(d["n_samples"].iloc[0]) if "n_samples" in d.columns else -1
-    n_genes = int(d["n_genes"].iloc[0]) if "n_genes" in d.columns else -1
-    cutoff = int(d["pc95_cutoff"].iloc[0]) if "pc95_cutoff" in d.columns else -1
-    p_lbl = _metrics_panel_label(d, panel_label=panel_label)
-    demean_mode = str(d["demean_mode"].iloc[0]) if "demean_mode" in d.columns else "none"
+    d_ref = d if len(d) else d_truth
+    n_samples = int(d_ref["n_samples"].iloc[0]) if "n_samples" in d_ref.columns else -1
+    n_genes = int(d_ref["n_genes"].iloc[0]) if "n_genes" in d_ref.columns else -1
+    cutoff = int(d_ref["pc95_cutoff"].iloc[0]) if "pc95_cutoff" in d_ref.columns else -1
+    p_lbl = _metrics_panel_label(d_ref, panel_label=panel_label)
+    demean_mode = str(d_ref["demean_mode"].iloc[0]) if "demean_mode" in d_ref.columns else "none"
+    fit_style = None if show_fit is None else str(show_fit).strip().lower()
+    if fit_style not in {None, "lowess", "linear", "decay"}:
+        raise ValueError("show_fit must be one of: None, lowess, linear, decay")
+    if fit_style == "lowess" and _sm_lowess is None:
+        raise ImportError("show_fit='lowess' requires statsmodels to be installed")
 
     if metric == "score_pearson":
         ylab = "PC Score Pearson r"
@@ -2147,7 +2211,7 @@ def plot_pooled_pca_recovery(
             continue
         xx = sub["component"].to_numpy(dtype=np.float64)
         yy = sub[metric].to_numpy(dtype=np.float64)
-        if bool(show_decay_fit):
+        if fit_style is not None:
             ax.scatter(
                 xx,
                 yy,
@@ -2157,24 +2221,33 @@ def plot_pooled_pca_recovery(
                 edgecolors="none",
                 label=MODEL_LABELS[model],
             )
-
-            def _exp_decay(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
-                return a * np.exp(-b * x) + c
-
             try:
                 valid = np.isfinite(xx) & np.isfinite(yy)
+                if fit_style == "decay":
+                    valid = valid & (yy > 0)
                 if int(np.sum(valid)) >= 4:
                     xfit = xx[valid]
                     yfit = yy[valid]
-                    popt, _ = curve_fit(
-                        _exp_decay,
-                        xfit,
-                        yfit,
-                        p0=[float(yfit[0] - yfit[-1]), 0.15, float(yfit[-1])],
-                        maxfev=10000,
-                    )
-                    xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
-                    ys = _exp_decay(xs, *popt)
+                    if fit_style == "lowess":
+                        smooth = _sm_lowess(yfit, xfit, frac=float(lowess_frac), return_sorted=True)
+                        xs = np.asarray(smooth[:, 0], dtype=np.float64)
+                        ys = np.asarray(smooth[:, 1], dtype=np.float64)
+                    elif fit_style == "linear":
+                        slope, intercept = np.polyfit(xfit, yfit, 1)
+                        xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
+                        ys = slope * xs + intercept
+                    else:
+                        def _exp_decay(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+                            return a * np.exp(-b * x) + c
+                        popt, _ = curve_fit(
+                            _exp_decay,
+                            xfit,
+                            yfit,
+                            p0=[float(yfit[0] - yfit[-1]), 0.15, float(yfit[-1])],
+                            maxfev=10000,
+                        )
+                        xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
+                        ys = _exp_decay(xs, *popt)
                     ax.plot(
                         xs,
                         ys,
@@ -2206,6 +2279,37 @@ def plot_pooled_pca_recovery(
                     label=MODEL_LABELS[model],
                 )
 
+    if bool(show_truth):
+        if len(d_truth) == 0:
+            raise ValueError("show_truth=True requires pc_df to include computed truth rows")
+        d_truth = d_truth.sort_values("component").copy()
+        tx = d_truth["component"].to_numpy(dtype=np.float64)
+        ty = d_truth[metric].to_numpy(dtype=np.float64)
+        if fit_style is not None:
+            ax.scatter(
+                tx,
+                ty,
+                s=24.0,
+                alpha=0.75,
+                color="#111111",
+                edgecolors="white",
+                linewidths=0.3,
+                label="Truth",
+                zorder=4,
+            )
+        else:
+            ax.scatter(
+                tx,
+                ty,
+                s=30.0,
+                alpha=0.85,
+                color="#111111",
+                edgecolors="white",
+                linewidths=0.3,
+                label="Truth",
+                zorder=4,
+            )
+
     cutoff_label = None
     if cutoff >= 1:
         ax.axvline(cutoff, color="#555555", linestyle="--", linewidth=1.1, alpha=0.8)
@@ -2214,7 +2318,11 @@ def plot_pooled_pca_recovery(
     comp_ticks = sorted(set(d["component"].astype(int).tolist()))
     stride = max(1, int(x_label_stride))
     ax.set_xticks(comp_ticks)
-    ax.set_xticklabels([str(x) if (int(x) % stride == 0 or int(x) == 1) else "" for x in comp_ticks])
+    ax.set_xticklabels(
+        [str(x) if (int(x) % stride == 0 or int(x) == 1) else "" for x in comp_ticks],
+        rotation=float(x_tick_rotation),
+        ha="right" if float(x_tick_rotation) != 0.0 else "center",
+    )
     ax.tick_params(axis="x", which="major", length=4, width=0.9)
     ax.set_xlabel("Principal Component")
     ax.set_ylabel(ylab)
@@ -2230,8 +2338,12 @@ def plot_pooled_pca_recovery(
     ax.legend(handles, labels, frameon=False, loc="best")
 
     if metric in {"score_pearson", "score_spearman", "score_r2"}:
-        ymin = float(np.nanmin(d[metric].to_numpy(dtype=np.float64)))
-        ymax = float(np.nanmax(d[metric].to_numpy(dtype=np.float64)))
+        yvals = [d[metric].to_numpy(dtype=np.float64)]
+        if bool(show_truth) and len(d_truth) > 0:
+            yvals.append(d_truth[metric].to_numpy(dtype=np.float64))
+        y_all = np.concatenate(yvals)
+        ymin = float(np.nanmin(y_all))
+        ymax = float(np.nanmax(y_all))
         ax.set_ylim(min(-0.05, ymin - 0.05), max(1.0, ymax + 0.03))
 
     return fig, ax, d.copy()
