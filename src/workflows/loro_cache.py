@@ -39,7 +39,7 @@ MODEL_NAMES = ("naive", "dlam", "plam")
 @dataclass
 class SubjectCacheConfig:
     csv_path: str = "data/raw/gxp_samples.csv"
-    hvg_path: str = "data/raw/ahba_100hvg.txt"
+    hvg_path: str = "out/raw/gene_lists/ahba_100hvg.txt"
     out_root: str = "out/loro_subject_cache"
     gene_scope: str = "hvg"
     use_cache: bool = True
@@ -77,7 +77,10 @@ def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
     if str(cfg.gtex_hemi_mode).lower() not in {"native", "mirror_left"}:
         raise ValueError(f"gtex_hemi_mode must be 'native' or 'mirror_left', got {cfg.gtex_hemi_mode!r}")
     csv_path = _resolve_optional_path(cfg.csv_path, ["gxp_samples.csv"])
-    hvg_path = _resolve_optional_path(cfg.hvg_path, ["data/raw/ahba_100hvg.txt", "ahba_100hvg.txt"])
+    hvg_path = _resolve_optional_path(
+        cfg.hvg_path,
+        ["out/raw/gene_lists/ahba_100hvg.txt", "data/raw/ahba_100hvg.txt", "ahba_100hvg.txt"],
+    )
     header = io_utils.load_gene_header_and_hvg(csv_path, hvg_path)
     genes = header["genes_all"] if str(cfg.gene_scope).lower() == "allgenes" else header["genes_hvg"]
     if not genes:
@@ -178,6 +181,7 @@ def _agg_vector(df: pd.DataFrame, genes: List[str], agg: str) -> np.ndarray:
 def _full_model_fallback(
     model_name: str,
     cfg: SubjectCacheConfig,
+    harmonizer: object,
     ahba_h_full: np.ndarray,
     gtex_h: pd.DataFrame,
     gtex_raw: pd.DataFrame,
@@ -185,7 +189,7 @@ def _full_model_fallback(
     coords_full: np.ndarray,
     genes: List[str],
     subject: str,
-) -> np.ndarray:
+) -> tuple[np.ndarray, Dict[str, object]]:
     obs_idx, xh, _ = _subject_full_obs_mats(gtex_h, gtex_raw, subject, genes, str(cfg.atlas_agg).lower())
     n_parcels = int(len(target_meta))
     n_genes = int(len(genes))
@@ -194,7 +198,8 @@ def _full_model_fallback(
         pos = {int(p): i for i, p in enumerate(obs_idx.tolist())}
         for p in obs_idx.tolist():
             sub_mat[int(p), :] = xh[pos[int(p)], :]
-        return np.where(np.isfinite(sub_mat), sub_mat, ahba_h_full).astype(np.float64)
+        out = np.where(np.isfinite(sub_mat), sub_mat, ahba_h_full).astype(np.float64)
+        return out, {}
     if model_name == "dlam":
         y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
         ahba_pls = fit_subject_pls(ahba_h_full, y_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
@@ -207,8 +212,8 @@ def _full_model_fallback(
                     "target_meta": target_meta,
                 },
             {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"]},
-            {
-                "harmonizer": harm,
+                {
+                "harmonizer": harmonizer,
                 "basis_model": "affine_gl3",
                 "strategy": "constrained_anchor",
                 "spatial_method": "rbf",
@@ -224,7 +229,7 @@ def _full_model_fallback(
             },
             asdict(cfg),
         )
-        return np.asarray(pred["X_full_h"], dtype=np.float64)
+        return np.asarray(pred["X_full_h"], dtype=np.float64), {}
     if model_name == "plam":
         if bool(cfg.dynamic_rank):
             k_use = int(min(max(1, int(cfg.plam_latent_dim_max)), max(1, int(len(obs_idx)))))
@@ -249,7 +254,10 @@ def _full_model_fallback(
         res = infer_subject_unified({"obs_idx": obs_idx, "X_obs_h": xh}, atlas_model, ucfg)
         xhat_h = np.asarray(res["x_hat_h_full"], dtype=np.float64)
         xhat_h[obs_idx, :] = xh
-        return xhat_h
+        return xhat_h, {
+            "plam_fullfit_uvar_latent": np.asarray(res.get("uvar_full", np.zeros((n_parcels, k_use))), dtype=np.float64),
+            "plam_fullfit_latent_dim": int(k_use),
+        }
     raise ValueError(f"Unknown model_name={model_name}")
 
 
@@ -288,9 +296,10 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     gtex_mask[global_obs_idx] = True
     coverage_tier = "ge_cmin" if int(len(obs_idx_all)) >= int(cfg.c_min) else "lt_cmin"
 
-    fullfit_subject_h = _full_model_fallback(
+    fullfit_subject_h, fullfit_diag = _full_model_fallback(
         model_name=model_name,
         cfg=cfg,
+        harmonizer=harm_full,
         ahba_h_full=ahba_h_full,
         gtex_h=gtex_h_df,
         gtex_raw=gtex_raw,
@@ -306,6 +315,17 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     loro_eval_mask = np.zeros(n_parcels, dtype=bool)
     skipped_holds: List[int] = []
     plam_fold_latent_dim = np.full(n_parcels, -1, dtype=np.int32)
+    plam_unc_kmax = int(max(1, int(cfg.plam_latent_dim_max), int(cfg.latent_dim)))
+    plam_loro_uvar_latent = np.full((n_parcels, plam_unc_kmax), np.nan, dtype=np.float64)
+    plam_fullfit_uvar_latent = np.full((n_parcels, plam_unc_kmax), np.nan, dtype=np.float64)
+    plam_fullfit_latent_dim = -1
+    if model_name == "plam":
+        uvar_fullfit = np.asarray(fullfit_diag.get("plam_fullfit_uvar_latent", np.zeros((0, 0))), dtype=np.float64)
+        if uvar_fullfit.ndim == 2 and uvar_fullfit.shape[0] == n_parcels:
+            kk = int(min(plam_unc_kmax, uvar_fullfit.shape[1]))
+            if kk > 0:
+                plam_fullfit_uvar_latent[:, :kk] = uvar_fullfit[:, :kk]
+        plam_fullfit_latent_dim = int(fullfit_diag.get("plam_fullfit_latent_dim", -1))
 
     for fold_id, hold in enumerate(obs_idx_all.tolist()):
         hold = int(hold)
@@ -400,6 +420,11 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                 fold_ctx={"prior_h": ahba_h_mat, "obs_idx": obs_idx},
             )
             pred = np.asarray(res["x_hat_h_full"], dtype=np.float64)[hold, :]
+            uvar_fold = np.asarray(res.get("uvar_full", np.zeros((0, 0))), dtype=np.float64)
+            if uvar_fold.ndim == 2 and hold < uvar_fold.shape[0]:
+                kk = int(min(plam_unc_kmax, uvar_fold.shape[1]))
+                if kk > 0:
+                    plam_loro_uvar_latent[hold, :kk] = uvar_fold[hold, :kk]
             plam_fold_latent_dim[hold] = int(k_use)
 
         pred_loro[hold, :] = pred
@@ -415,22 +440,27 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     loro_fused_subject_h[loro_eval_mask, :] = pred_loro[loro_eval_mask, :]
     imputed_mask = ~loro_eval_mask
 
-    np.savez_compressed(
-        npz_path,
-        subject_id=np.asarray([subject], dtype=object),
-        model_name=np.asarray([model_name], dtype=object),
-        gene_names=np.asarray(genes, dtype=object),
-        parcel_idx=np.arange(n_parcels, dtype=np.int32),
-        fullfit_subject_h=fullfit_subject_h.astype(np.float32),
-        loro_fused_subject_h=loro_fused_subject_h.astype(np.float32),
-        loro_truth_subject_h=truth_loro.astype(np.float32),
-        loro_truth_subject_raw=truth_loro_raw.astype(np.float32),
-        gtex_mask=gtex_mask.astype(np.int8),
-        loro_eval_mask=loro_eval_mask.astype(np.int8),
-        imputed_mask=imputed_mask.astype(np.int8),
-        skipped_holds=np.asarray(sorted(set(skipped_holds)), dtype=np.int32),
-        plam_fold_latent_dim=plam_fold_latent_dim.astype(np.int32),
-    )
+    save_payload = {
+        "subject_id": np.asarray([subject], dtype=object),
+        "model_name": np.asarray([model_name], dtype=object),
+        "gene_names": np.asarray(genes, dtype=object),
+        "parcel_idx": np.arange(n_parcels, dtype=np.int32),
+        "fullfit_subject_h": fullfit_subject_h.astype(np.float32),
+        "loro_fused_subject_h": loro_fused_subject_h.astype(np.float32),
+        "loro_truth_subject_h": truth_loro.astype(np.float32),
+        "loro_truth_subject_raw": truth_loro_raw.astype(np.float32),
+        "gtex_mask": gtex_mask.astype(np.int8),
+        "loro_eval_mask": loro_eval_mask.astype(np.int8),
+        "imputed_mask": imputed_mask.astype(np.int8),
+        "skipped_holds": np.asarray(sorted(set(skipped_holds)), dtype=np.int32),
+        "plam_fold_latent_dim": plam_fold_latent_dim.astype(np.int32),
+    }
+    if model_name == "plam":
+        save_payload["plam_fullfit_uvar_latent"] = plam_fullfit_uvar_latent.astype(np.float32)
+        save_payload["plam_loro_uvar_latent"] = plam_loro_uvar_latent.astype(np.float32)
+        save_payload["plam_fullfit_latent_dim"] = np.asarray([plam_fullfit_latent_dim], dtype=np.int32)
+        save_payload["plam_uncertainty_kmax"] = np.asarray([plam_unc_kmax], dtype=np.int32)
+    np.savez_compressed(npz_path, **save_payload)
     meta = {
         "status": "ok",
         "subject": subject,

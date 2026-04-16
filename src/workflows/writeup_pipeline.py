@@ -262,7 +262,10 @@ def _shared_harmonized(bundle: DatasetBundle, cfg: Mapping[str, Any]) -> Dict[st
 
 def load_dataset_bundle(csv_path: str, hvg_path: str, cfg: Mapping[str, Any]) -> DatasetBundle:
     csv_resolved = _resolve_optional_path(csv_path, ["gxp_samples.csv"])
-    hvg_resolved = _resolve_optional_path(hvg_path, ["data/raw/ahba_100hvg.txt", "ahba_100hvg.txt"])
+    hvg_resolved = _resolve_optional_path(
+        hvg_path,
+        ["out/raw/gene_lists/ahba_100hvg.txt", "data/raw/ahba_100hvg.txt", "ahba_100hvg.txt"],
+    )
     out_root = Path(str(cfg.get("out_root", _repo_root() / "out" / "notebook_writeup"))).resolve()
     stage = "bundle"
     stage_sources = {
@@ -814,7 +817,11 @@ def load_workflow_config(path: str | Path) -> Dict[str, Any]:
 
 
 def run_writeup_workflow(cfg: Mapping[str, Any]) -> Dict[str, Any]:
-    bundle = load_dataset_bundle(str(cfg.get("csv_path", "data/raw/gxp_samples.csv")), str(cfg.get("hvg_path", "data/raw/ahba_100hvg.txt")), cfg)
+    bundle = load_dataset_bundle(
+        str(cfg.get("csv_path", "data/raw/gxp_samples.csv")),
+        str(cfg.get("hvg_path", "out/raw/gene_lists/ahba_100hvg.txt")),
+        cfg,
+    )
     summarize_shared_harmonization(bundle, cfg)
     naive = run_naive_fill(bundle, cfg)
     dlam = run_dlam(bundle, cfg)

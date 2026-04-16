@@ -31,7 +31,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg: Dict[str, Any] = load_workflow_config(Path(args.config))
-    bundle = load_dataset_bundle(str(cfg.get("csv_path", "data/raw/gxp_samples.csv")), str(cfg.get("hvg_path", "data/raw/ahba_100hvg.txt")), cfg)
+    bundle = load_dataset_bundle(
+        str(cfg.get("csv_path", "data/raw/gxp_samples.csv")),
+        str(cfg.get("hvg_path", "out/raw/gene_lists/ahba_100hvg.txt")),
+        cfg,
+    )
     model_results = {
         "naive": run_naive_fill(bundle, cfg),
         "dlam": run_dlam(bundle, cfg),

@@ -35,7 +35,7 @@ FONT = {"title": 16, "label": 14, "tick": 13, "legend": 13, "small": 12}
 @dataclass
 class DlamDiagnosticsConfig:
     csv_path: str = "data/raw/gxp_samples.csv"
-    hvg_path: str = "data/raw/ahba_100hvg.txt"
+    hvg_path: str = "out/raw/gene_lists/ahba_100hvg.txt"
     cache_root: str = "out/loro_subject_cache"
     gene_scope: str = "allgenes"
     min_observed_parcels: int = 5

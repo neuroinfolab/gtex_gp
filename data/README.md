@@ -11,7 +11,7 @@ The canonical tracked smoke fixtures live under:
 
 The workflow defaults to:
 - `data/raw/gxp_samples.csv`
-- `data/raw/ahba_100hvg.txt`
+- `out/raw/gene_lists/ahba_100hvg.txt`
 
 It also supports the legacy root-level fallbacks `gxp_samples.csv` and `ahba_100hvg.txt` for local migration convenience.
 
@@ -61,3 +61,34 @@ Row semantics differ by dataset:
 ### Downstream Note
 
 In `gtex_gp`, the GTEx `coordinates` list is later reduced to a single centroid and then mapped to one AHBA parcel by nearest-neighbor distance. So the spatial assignment used by the modeling pipeline is a downstream simplification of the atlas-derived coordinate lists stored in this CSV.
+
+## Parcel Ordering Contract (Aligned With `out/README.md`)
+
+For model/cache outputs (especially `.npz` matrices under `out/loro_subject_cache/`), parcel row order is defined by pipeline `parcel_idx`, not by row order in atlas CSV files.
+
+`parcel_idx` is built from AHBA labels in `data/raw/gxp_samples.csv`:
+1. filter rows with `dataset == "AHBA"` (or `dataset_upper == "AHBA"`)
+2. take unique `tissue_or_parcel`
+3. sort labels alphabetically
+4. assign contiguous indices `0..P-1`
+
+Important implication for visualization:
+- `atlas-4S156Parcels_dseg_reformatted.csv` (`label` column) is not guaranteed to be in this same order.
+- To align atlas metadata to `.npz` parcel rows, filter atlas labels to the AHBA-used set and sort by label ascending.
+
+See `out/README.md` for cache-structure and `.npz` key definitions.
+
+### Atlas Labels Missing From AHBA Samples
+
+Comparing:
+- `gxp_samples.csv` with `dataset == "AHBA"` using `tissue_or_parcel`
+- `atlas-4S156Parcels_dseg_reformatted.csv` using `label`
+
+`150/156` labels overlap exactly. The following `6` atlas labels are present in the reformatted atlas CSV but absent from AHBA sample `tissue_or_parcel`:
+
+- `Cerebellar_Region9`
+- `LH-MN`
+- `RH-EXA`
+- `RH-STH`
+- `RH-VeP`
+- `RH_SomMot_2`

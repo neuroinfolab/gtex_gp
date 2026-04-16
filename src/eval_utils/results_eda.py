@@ -44,7 +44,7 @@ FONT = {"title": 11, "label": 10, "tick": 9, "legend": 9, "small": 8}
 @dataclass
 class EDAConfig:
     csv_path: str = "data/raw/gxp_samples.csv"
-    hvg_path: str = "data/raw/ahba_100hvg.txt"
+    hvg_path: str = "out/raw/gene_lists/ahba_100hvg.txt"
     cache_root: str = "out/loro_subject_cache"
     naive_cache_dirname: str = "naive"
     dlam_cache_dirname: str = "dlam"
@@ -87,14 +87,51 @@ def _resolve_eval_gene_path(path_str: str) -> Path:
         candidates.append(p)
     else:
         candidates.append((REPO_ROOT / p).resolve())
+        candidates.append((REPO_ROOT.parent / "out" / "raw" / "gene_lists" / p).resolve())
+        candidates.append((REPO_ROOT / "out" / "raw" / "gene_lists" / p).resolve())
+        candidates.append((REPO_ROOT / "data" / "raw" / "gene_lists" / p).resolve())
         candidates.append((REPO_ROOT / "data" / "raw" / p).resolve())
         if p.suffix == "":
             candidates.append((REPO_ROOT / f"{raw}.txt").resolve())
+            candidates.append((REPO_ROOT.parent / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve())
+            candidates.append((REPO_ROOT / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve())
+            candidates.append((REPO_ROOT / "data" / "raw" / "gene_lists" / f"{raw}.txt").resolve())
             candidates.append((REPO_ROOT / "data" / "raw" / f"{raw}.txt").resolve())
     for c in candidates:
         if c.exists():
             return c
     raise FileNotFoundError(f"Could not resolve eval gene file from {path_str!r}")
+
+
+def _resolve_hvg_path(path_str: str) -> Path:
+    raw = str(path_str).strip()
+    candidates: List[Path] = []
+    if raw:
+        p = Path(raw)
+        if p.is_absolute():
+            candidates.append(p)
+        else:
+            candidates.append((REPO_ROOT / p).resolve())
+    candidates.extend(
+        [
+            (REPO_ROOT.parent / "out" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
+            (REPO_ROOT / "out" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
+            (REPO_ROOT / "data" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
+            (REPO_ROOT / "data" / "raw" / "ahba_100hvg.txt").resolve(),
+            (REPO_ROOT / "ahba_100hvg.txt").resolve(),
+        ]
+    )
+    seen: set[Path] = set()
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        if c.exists():
+            return c
+    raise FileNotFoundError(
+        "Could not resolve HVG gene list path. Tried: "
+        + ", ".join(str(c) for c in candidates)
+    )
 
 
 @lru_cache(maxsize=32)
@@ -675,7 +712,7 @@ def _pretty_gtex_label(name: str) -> str:
 
 def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
     csv_path = _resolve_repo_path(cfg.csv_path)
-    hvg_path = _resolve_repo_path(cfg.hvg_path)
+    hvg_path = _resolve_hvg_path(cfg.hvg_path)
     header = io_utils.load_gene_header_and_hvg(csv_path, hvg_path)
     genes = header["genes_all"] if str(cfg.gene_scope).lower() == "allgenes" else header["genes_hvg"]
     if not genes:
@@ -1701,6 +1738,142 @@ def compute_pooled_pca_recovery_from_cache_gene_subset(
     return pc_df, summary_df
 
 
+def compute_pooled_pca_variance_spectra_from_cache_gene_subset(
+    cfg: EDAConfig,
+    num_pcs: int = 50,
+    models: Sequence[str] | None = None,
+    eval_gene_mode: str = "all",
+    custom_gene_list: Sequence[str] | None = None,
+    eval_gene_path: str | None = None,
+    demean_mode: str = "none",
+    mixed_space_mode: str | None = None,
+    prepost: Dict[str, object] | None = None,
+    refz_noise_quantile: float = 0.20,
+    n_jobs: int | None = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    model_list = [str(m).lower() for m in (models if models is not None else MODEL_ORDER)]
+    mode_label, eval_gene_path_resolved, eval_gene_set = _resolve_eval_gene_set(
+        cfg,
+        eval_gene_mode=eval_gene_mode,
+        custom_gene_list=custom_gene_list,
+        eval_gene_path=eval_gene_path,
+    )
+    msm = _normalize_mixed_space_mode(mixed_space_mode)
+    if msm == "harmonized_pred_vs_raw_truth_refz_corr" and prepost is None:
+        raise ValueError(
+            "mixed_space_mode='harmonized_pred_vs_raw_truth_refz_corr' requires prepost=PREPOST "
+            "so reference raw/harmonized GTEx statistics can be computed explicitly"
+        )
+    ref_stats = (
+        _reference_gene_stats(prepost, refz_noise_quantile=refz_noise_quantile)
+        if msm == "harmonized_pred_vs_raw_truth_refz_corr"
+        else None
+    )
+    eval_gene_items = None if eval_gene_set is None else tuple(sorted(eval_gene_set))
+
+    blocks_by_model: Dict[str, List[Dict[str, object]]] = {}
+    for model in model_list:
+        root = _model_cache_root(cfg, model)
+        if not root.exists():
+            raise FileNotFoundError(f"Cache dir not found: {root}")
+        npz_paths = [str(p) for p in sorted(root.glob("*.npz"))]
+        jobs = _effective_n_jobs(len(npz_paths), n_jobs)
+        if jobs == 1:
+            blocks = [
+                _pooled_pca_subject_block_from_npz(
+                    p,
+                    model=model,
+                    mode_label=mode_label,
+                    eval_gene_path_resolved=eval_gene_path_resolved,
+                    eval_gene_items=eval_gene_items,
+                    mixed_space_mode=msm,
+                    ref_stats=ref_stats,
+                )
+                for p in npz_paths
+            ]
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as ex:
+                blocks = list(
+                    ex.map(
+                        _pooled_pca_subject_block_from_npz,
+                        npz_paths,
+                        [model] * len(npz_paths),
+                        [mode_label] * len(npz_paths),
+                        [eval_gene_path_resolved] * len(npz_paths),
+                        [eval_gene_items] * len(npz_paths),
+                        [msm] * len(npz_paths),
+                        [ref_stats] * len(npz_paths),
+                    )
+                )
+        blocks_by_model[str(model)] = blocks
+
+    common_keys = _resolve_pooled_pca_truth_keys(blocks_by_model, model_list)
+    X_true, pred_by_model, _ = _build_pooled_truth_pred_mats(blocks_by_model, model_list, common_keys)
+    X_true, pred_by_model = _apply_pooled_pca_demean_mode(
+        X_true,
+        pred_by_model,
+        common_keys,
+        demean_mode=demean_mode,
+    )
+    n_samples = int(X_true.shape[0])
+    n_genes = int(X_true.shape[1])
+    max_pcs = int(min(n_samples, n_genes))
+    if int(num_pcs) < 1:
+        raise ValueError("num_pcs must be >= 1")
+    if int(num_pcs) > max_pcs:
+        raise ValueError(f"num_pcs ({num_pcs}) cannot exceed min(n_samples, n_genes) = {max_pcs}")
+
+    solver = "randomized" if int(num_pcs) < max_pcs else "full"
+    sources: Dict[str, np.ndarray] = {"truth": np.asarray(X_true, dtype=np.float64)}
+    for model in model_list:
+        sources[str(model)] = np.asarray(pred_by_model[str(model)], dtype=np.float64)
+
+    rows: List[Dict[str, object]] = []
+    summary_rows: List[Dict[str, object]] = []
+    for source_name, X in sources.items():
+        pca = PCA(n_components=int(num_pcs), svd_solver=solver, random_state=0)
+        pca.fit(X)
+        exp_var = np.asarray(pca.explained_variance_ratio_, dtype=np.float64)
+        cum_var = np.cumsum(exp_var)
+        cutoff_idx_95 = int(np.argmax(cum_var >= 0.95)) if np.any(cum_var >= 0.95) else int(len(cum_var) - 1)
+        for i in range(int(num_pcs)):
+            rows.append(
+                {
+                    "source": str(source_name),
+                    "component": int(i + 1),
+                    "explained_variance_ratio": float(exp_var[i]),
+                    "cumulative_variance": float(cum_var[i]),
+                    "pc95_cutoff": int(cutoff_idx_95 + 1),
+                    "n_samples": int(n_samples),
+                    "n_genes": int(n_genes),
+                    "num_pcs": int(num_pcs),
+                    "eval_gene_mode": mode_label,
+                    "eval_gene_path": eval_gene_path_resolved,
+                    "demean_mode": str(demean_mode).lower(),
+                    "mixed_space_mode": msm,
+                }
+            )
+        summary_rows.append(
+            {
+                "source": str(source_name),
+                "pc1_explained_variance_ratio": float(exp_var[0]) if len(exp_var) > 0 else np.nan,
+                "pc95_cutoff": int(cutoff_idx_95 + 1),
+                "n_samples": int(n_samples),
+                "n_genes": int(n_genes),
+                "num_pcs": int(num_pcs),
+                "eval_gene_mode": mode_label,
+                "eval_gene_path": eval_gene_path_resolved,
+                "demean_mode": str(demean_mode).lower(),
+                "mixed_space_mode": msm,
+            }
+        )
+
+    spectra_df = pd.DataFrame(rows)
+    source_order = ["truth"] + model_list
+    summary_df = pd.DataFrame(summary_rows).set_index("source").reindex(source_order).reset_index()
+    return spectra_df, summary_df
+
+
 def collect_pooled_sample_prediction_dfs_from_cache_gene_subset(
     cfg: EDAConfig,
     model: str,
@@ -1817,6 +1990,118 @@ def collect_pooled_sample_prediction_dfs_from_cache_gene_subset(
     return truth_all, pred_all
 
 
+def plot_pooled_pca_variance_spectra(
+    spectra_df: pd.DataFrame,
+    figsize: Tuple[float, float] = (12.2, 4.6),
+    dpi: int = 180,
+    panel_label: str | None = None,
+    show_decay_fit: bool = False,
+    x_label_stride: int = 10,
+    source: str | None = None,
+) -> Tuple[plt.Figure, np.ndarray, pd.DataFrame]:
+    need = {"source", "component", "explained_variance_ratio", "cumulative_variance", "pc95_cutoff"}
+    if not need.issubset(set(spectra_df.columns)):
+        raise ValueError(f"spectra_df must include columns: {sorted(need)}")
+
+    d = spectra_df.copy()
+    d["source"] = d["source"].astype(str).str.lower()
+    source_sel = None if source is None else str(source).lower()
+    if source_sel is not None:
+        d = d[d["source"] == source_sel].copy()
+    source_order = ["truth"] + [m for m in MODEL_ORDER if m in set(d["source"].tolist())]
+    d = d[d["source"].isin(source_order)].copy()
+    if len(d) == 0:
+        raise RuntimeError("No pooled PCA variance spectra rows available to plot")
+
+    n_samples = int(d["n_samples"].iloc[0]) if "n_samples" in d.columns else -1
+    n_genes = int(d["n_genes"].iloc[0]) if "n_genes" in d.columns else -1
+    demean_mode = str(d["demean_mode"].iloc[0]) if "demean_mode" in d.columns else "none"
+    p_lbl = _metrics_panel_label(d.rename(columns={"source": "model"}), panel_label=panel_label)
+
+    color_map = {"truth": "#111111", **MODEL_COLORS}
+    label_map = {"truth": "Truth", **MODEL_LABELS}
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, dpi=dpi, constrained_layout=True)
+
+    def _exp_decay(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+        return a * np.exp(-b * x) + c
+
+    for source in source_order:
+        sub = d[d["source"] == source].sort_values("component").copy()
+        if len(sub) == 0:
+            continue
+        xx = sub["component"].to_numpy(dtype=np.float64)
+        yy = sub["explained_variance_ratio"].to_numpy(dtype=np.float64)
+        color = color_map.get(source, "#333333")
+        label = label_map.get(source, str(source))
+
+        if bool(show_decay_fit):
+            axes[0].scatter(xx, yy, s=24.0, alpha=0.50, color=color, edgecolors="none", label=label)
+            try:
+                valid = np.isfinite(xx) & np.isfinite(yy) & (yy > 0)
+                if int(np.sum(valid)) >= 4:
+                    xfit = xx[valid]
+                    yfit = yy[valid]
+                    popt, _ = curve_fit(
+                        _exp_decay,
+                        xfit,
+                        yfit,
+                        p0=[float(max(yfit[0] - yfit[-1], 1e-8)), 0.10, float(max(yfit[-1], 1e-8))],
+                        bounds=([0.0, 0.0, 0.0], [10.0, 5.0, 1.0]),
+                        maxfev=10000,
+                    )
+                    xs = np.linspace(float(np.min(xfit)), float(np.max(xfit)), 300)
+                    ys = _exp_decay(xs, *popt)
+                    axes[0].plot(xs, ys, linewidth=2.0, alpha=0.95, color=color)
+                else:
+                    axes[0].plot(xx, yy, marker="o", markersize=3.5, linewidth=1.5, color=color, alpha=0.9, label=label)
+            except Exception:
+                axes[0].plot(xx, yy, marker="o", markersize=3.5, linewidth=1.5, color=color, alpha=0.9, label=label)
+        else:
+            axes[0].plot(xx, yy, marker="o", markersize=3.5, linewidth=1.5, color=color, alpha=0.9, label=label)
+
+        axes[1].plot(
+            sub["component"].to_numpy(dtype=np.float64),
+            sub["cumulative_variance"].to_numpy(dtype=np.float64),
+            marker="o",
+            markersize=3.2,
+            linewidth=1.5,
+            color=color,
+            alpha=0.9,
+            label=label,
+        )
+        cutoff = int(sub["pc95_cutoff"].iloc[0]) if len(sub) > 0 else -1
+        if cutoff >= 1:
+            axes[1].axvline(cutoff, color=color, linestyle="--", linewidth=1.0, alpha=0.35)
+
+    comp_ticks = sorted(set(d["component"].astype(int).tolist()))
+    stride = max(1, int(x_label_stride))
+    for ax in axes:
+        ax.set_xticks(comp_ticks)
+        ax.set_xticklabels([str(x) if (int(x) % stride == 0 or int(x) == 1) else "" for x in comp_ticks])
+        ax.tick_params(axis="x", which="major", length=4, width=0.9)
+        ax.grid(alpha=0.22)
+
+    axes[0].set_xlabel("Principal Component")
+    axes[0].set_ylabel("Explained Variance Ratio")
+    axes[0].set_title("Per-Component Variance")
+    axes[0].legend(frameon=False, loc="best")
+
+    axes[1].set_xlabel("Principal Component")
+    axes[1].set_ylabel("Cumulative Variance")
+    axes[1].set_title("Cumulative Variance")
+    axes[1].set_ylim(-0.01, 1.01)
+
+    title = f"PCA Variance Spectrum ({p_lbl}; n={n_samples}; genes={n_genes})"
+    if source_sel is not None:
+        title += f" [{label_map.get(source_sel, source_sel)}]"
+    if demean_mode not in {"", "none"}:
+        title += f" [{demean_mode}]"
+    fig.suptitle(title, fontsize=FONT["title"] + 1, y=1.02)
+
+    return fig, axes, d.copy()
+
+
 def plot_pooled_pca_recovery(
     pc_df: pd.DataFrame,
     metric: str = "score_pearson",
@@ -1824,6 +2109,7 @@ def plot_pooled_pca_recovery(
     dpi: int = 180,
     panel_label: str | None = None,
     show_decay_fit: bool = False,
+    show_lines: bool = True,
     x_label_stride: int = 10,
 ) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
     need = {"model", "component", "explained_variance_ratio", "cumulative_variance", "pc95_cutoff", metric}
@@ -1899,18 +2185,31 @@ def plot_pooled_pca_recovery(
             except Exception:
                 pass
         else:
-            ax.plot(
-                xx,
-                yy,
-                marker="o",
-                markersize=4.0,
-                linewidth=1.8,
-                color=MODEL_COLORS[model],
-                label=MODEL_LABELS[model],
-            )
+            if bool(show_lines):
+                ax.plot(
+                    xx,
+                    yy,
+                    marker="o",
+                    markersize=4.0,
+                    linewidth=1.8,
+                    color=MODEL_COLORS[model],
+                    label=MODEL_LABELS[model],
+                )
+            else:
+                ax.scatter(
+                    xx,
+                    yy,
+                    s=28.0,
+                    alpha=0.9,
+                    color=MODEL_COLORS[model],
+                    edgecolors="none",
+                    label=MODEL_LABELS[model],
+                )
 
+    cutoff_label = None
     if cutoff >= 1:
         ax.axvline(cutoff, color="#555555", linestyle="--", linewidth=1.1, alpha=0.8)
+        cutoff_label = "95% true-data variance explained"
 
     comp_ticks = sorted(set(d["component"].astype(int).tolist()))
     stride = max(1, int(x_label_stride))
@@ -1924,7 +2223,11 @@ def plot_pooled_pca_recovery(
         title += f" [{demean_mode}]"
     ax.set_title(title)
     ax.grid(alpha=0.25)
-    ax.legend(frameon=False, loc="best")
+    handles, labels = ax.get_legend_handles_labels()
+    if cutoff_label is not None:
+        handles.append(Line2D([0], [0], color="#555555", linestyle="--", linewidth=1.1, alpha=0.8))
+        labels.append(cutoff_label)
+    ax.legend(handles, labels, frameon=False, loc="best")
 
     if metric in {"score_pearson", "score_spearman", "score_r2"}:
         ymin = float(np.nanmin(d[metric].to_numpy(dtype=np.float64)))
