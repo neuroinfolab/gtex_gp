@@ -1,0 +1,6 @@
+yabplot
+pyvista[trame]
+trame
+trame-vtk
+trame-vuetify
+wslink
