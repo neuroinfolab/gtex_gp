@@ -1,0 +1,59 @@
+{
+  "cfg_hash": "02462eae12351af7",
+  "config": {
+    "atlas_agg": "mean",
+    "c_min": 4,
+    "calibration_mode": "hier_affine_map",
+    "combat_use_covariates": true,
+    "csv_path": "data/raw/gxp_samples.csv",
+    "dynamic_rank": false,
+    "gene_scope": "allgenes",
+    "gp_length_scale": 25.0,
+    "gp_noise": 0.001,
+    "gtex_hemi_mode": "mirror_left",
+    "gtex_rep_mode": "centroid",
+    "heteroscedastic": true,
+    "hvg_path": "data/raw/ahba_100hvg.txt",
+    "lambda_cal_a": 10.0,
+    "lambda_cal_b": 10.0,
+    "lambda_w": 1.0,
+    "lambda_z": 1.0,
+    "latent_dim": 3,
+    "min_observed_parcels": 5,
+    "n_comp_target": 3,
+    "out_root": "/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp/out/loro_subject_cache",
+    "plam_latent_dim_max": 10,
+    "plam_max_iters": 5,
+    "rbf_smoothing": 0.1,
+    "ridge_alpha_bridge": 0.01,
+    "robust_loss": "student_t",
+    "seed": 123,
+    "uncertainty_shrink": false,
+    "use_cache": true
+  },
+  "coverage_tier": "ge_cmin",
+  "dynamic_rank": false,
+  "gene_scope": "allgenes",
+  "model_name": "naive",
+  "n_genes": 13618,
+  "n_gtex_observed_global": 12,
+  "n_gtex_observed_subject": 10,
+  "n_loro_eval": 10,
+  "n_parcels": 150,
+  "plam_latent_dim_max": 10,
+  "sources": {
+    "csv": {
+      "mtime": 1773696942.1419601,
+      "path": "/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp/data/raw/gxp_samples.csv",
+      "size": 887357226
+    },
+    "hvg": {
+      "mtime": 1773697208.7648573,
+      "path": "/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp/data/raw/ahba_100hvg.txt",
+      "size": 656
+    }
+  },
+  "status": "ok",
+  "subject": "GTEX-1JMPZ",
+  "timestamp": "2026-04-15T20:45:58Z"
+}
