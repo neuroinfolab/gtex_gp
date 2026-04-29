@@ -13,6 +13,7 @@ venv/
 
 # Generated outputs
 out/
+!out/README.md
 docs/manuscript/figs/*
 !docs/manuscript/figs/.gitkeep
 docs/manuscript/tables/*

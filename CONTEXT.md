@@ -12,8 +12,8 @@
 
 Near-term work is centered on:
 - expanding reusable analysis functions in `src/eval_utils`, `src/viz`, and `src/workflows`,
-- iterative feature development in `results_eda_cached_predictions.ipynb`,
-- mixed-space raw-truth checks in `results_eda_cached_predictions_raw.ipynb`,
+- the active `eval_*` refactor split across `eval_data.ipynb` and `eval_population.ipynb`,
+- mixed-space raw-truth checks in `results_eda_cached_predictions_raw.ipynb` while migration is ongoing,
 - GTEx/AHBA assignment inspection in `notebooks/coordinate_overlay_3d_mni.ipynb`,
 - older variants retained under `notebooks/ar_notebooks/` when historical comparison is useful.
 
@@ -24,11 +24,16 @@ Near-term work is centered on:
 - `scripts/build_dual_model_loro_metric_panels.py` — manuscript LORO panel builder
 - `src/workflows/loro_cache.py` — per-subject cache builder
 - `scripts/run_loro_cache_batch.py` — batch/array subject driver
-- `src/eval_utils/results_eda.py` — cache-based EDA utilities
+- `src/eval_utils/eda_core.py` — dataset-level EDA, PREPOST reconstruction, path/gene-list resolution
+- `src/eval_utils/eval_style.py` — shared model/region labels, colors, and plotting conventions
+- `src/eval_utils/eval_population.py` — population-level cached prediction evaluation
+- `src/eval_utils/results_eda.py` — legacy/reference compatibility surface during migration
 - `src/eval_utils/dlam_diagnostics.py` — DLAM diagnostics fit/cache/plot utilities
 - `src/viz/coord_viz.py` — GTEx/AHBA coordinate overlay utilities
-- `results_eda_cached_predictions.ipynb` — primary harmonized-space EDA notebook
-- `results_eda_cached_predictions_raw.ipynb` — mixed-space raw-truth EDA notebook
+- `eval_data.ipynb` — active dataset-level EDA refactor notebook
+- `eval_population.ipynb` — active population-evaluation refactor notebook
+- `results_eda_cached_predictions.ipynb` — older harmonized-space reference during migration
+- `results_eda_cached_predictions_raw.ipynb` — mixed-space raw-truth reference during migration
 - `notebooks/coordinate_overlay_3d_mni.ipynb` — parcel-assignment visualization notebook
 
 ## Key Recent Changes (Important)
@@ -66,6 +71,9 @@ Near-term work is centered on:
 11. DLAM diagnostics were added for single-subject full-fit/LORO latent-alignment inspection.
 12. Raw-space evaluation now defaults to mixed-space comparisons against native GTEx truth in the EDA notebooks.
 13. Inverse-mapped raw prediction outputs were retired from the active cache/model pipeline; only native raw held-out truth is retained for mixed-space evaluation.
+14. The current eval refactor moves stable functionality out of monolithic `results_eda.py` into focused `eval_*` modules. Do not build new refactor functionality in `results_eda.py` unless it is a short-lived compatibility bridge.
+15. Population eval now centers on canonical wide all-gene truth/prediction tables under `out/eval_prediction_tables/<gene_scope>/`. Gene-list analyses subset those tables downstream via `eval_gene_list_path` or explicit gene lists.
+16. Population metrics default to sample-wise evaluation: each `subject_region_key` is scored across genes, then summaries aggregate across samples or strata.
 
 ## Core LORO Semantics
 
@@ -108,9 +116,11 @@ Default outputs:
 ## Quick Start (Agent Onboarding)
 
 1. Read `README.md` and this file.
-2. Inspect `src/eval_utils/results_eda.py` and `results_eda_cached_predictions.ipynb` first.
-3. Use `results_eda_cached_predictions_raw.ipynb` for mixed-space raw-truth checks.
-4. Use `notebooks/coordinate_overlay_3d_mni.ipynb` when working on spatial assignment or matching changes.
-5. Treat `notebooks/ar_notebooks/` as historical variants unless you intentionally need one.
+2. For active eval-refactor work, inspect `context_packages/results_eda_refactor_plan.md`, `eval_data.ipynb`, `eval_population.ipynb`, and the focused `src/eval_utils/eval_*` modules first.
+3. Use `src/eval_utils/results_eda.py` as a legacy reference, not the default implementation target.
+4. Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
+5. Use `results_eda_cached_predictions_raw.ipynb` for mixed-space raw-truth checks.
+6. Use `notebooks/coordinate_overlay_3d_mni.ipynb` when working on spatial assignment or matching changes.
+7. Treat `notebooks/ar_notebooks/` as historical variants unless you intentionally need one.
 
-Last updated at: 2026-04-13
+Last updated at: 2026-04-29

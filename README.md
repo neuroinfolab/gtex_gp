@@ -11,8 +11,10 @@ Primary write-up pipeline:
 - `notebooks/ahba_gtex_writeup_end_to_end.ipynb`
 
 Active analysis notebooks:
-- `results_eda_cached_predictions.ipynb` — default harmonized-space cache EDA
-- `results_eda_cached_predictions_raw.ipynb` — mixed-space raw-truth cache EDA
+- `eval_data.ipynb` — active dataset-level EDA refactor: config, PREPOST, demographics, coverage, global matrices, and heatmaps
+- `eval_population.ipynb` — active population-evaluation refactor over cached LORO predictions
+- `results_eda_cached_predictions.ipynb` — older harmonized-space cache EDA reference during migration
+- `results_eda_cached_predictions_raw.ipynb` — mixed-space raw-truth cache EDA reference during migration
 - `notebooks/coordinate_overlay_3d_mni.ipynb` — GTEx/AHBA spatial assignment inspection
 
 Legacy or exploratory notebook variants now live under:
@@ -25,6 +27,8 @@ Legacy or exploratory notebook variants now live under:
 - Active cache/eval workflows now keep harmonized predictions plus native raw held-out truth; inverse-mapped raw prediction outputs were retired.
 - `src/eval_utils/dlam_diagnostics.py` provides DLAM full-fit/LORO diagnostics with reusable plotting utilities.
 - Publication-facing EDA is now centralized in `results_eda_publication_ready.ipynb` using cache-backed utilities.
+- The active evaluation refactor is moving notebook functionality from monolithic `results_eda.py` into focused `eval_*` modules. Current stable surfaces are `src/eval_utils/eda_core.py`, `src/eval_utils/eval_style.py`, and `src/eval_utils/eval_population.py`.
+- Population evaluation now uses canonical wide all-gene truth/prediction tables under `out/eval_prediction_tables/<gene_scope>/`; gene-list analyses subset those tables downstream.
 
 ## Repository Layout
 
@@ -77,6 +81,9 @@ Core implementation modules:
 - `scripts/run_loro_cache_batch.py`
 - `scripts/sbatch/run_loro_cache_single_subject.sbatch`
 - `scripts/sbatch/run_loro_cache_array.sbatch`
+- `src/eval_utils/eda_core.py`
+- `src/eval_utils/eval_population.py`
+- `src/eval_utils/eval_style.py`
 - `src/eval_utils/results_eda.py`
 - `src/eval_utils/dlam_diagnostics.py`
 - `src/viz/coord_viz.py`
@@ -159,6 +166,8 @@ GENE_SCOPE=hvg sbatch scripts/sbatch/run_loro_cache_array.sbatch
 - `EDAConfig` in `src/eval_utils/results_eda.py` supports model-directory overrides:
   - `naive_cache_dirname`, `dlam_cache_dirname`, `plam_cache_dirname`
   - useful for side-by-side rank experiments (`plam_rank3`, `plam_rank4`, `plam_dynamicrank`)
+- New eval-refactor work should target `src/eval_utils/eda_core.py`, `src/eval_utils/eval_population.py`, and future `eval_single_subject.py` / `eval_latent.py`; treat `results_eda.py` as reference/compatibility during migration.
+- Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
 - See `CONTEXT.md` for a fast onboarding summary intended for parallel agents.
 
-Last updated at: 2026-04-13
+Last updated at: 2026-04-29
