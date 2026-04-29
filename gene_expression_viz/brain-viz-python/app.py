@@ -60,7 +60,9 @@ INIT_MODEL   = 'naive'
 INIT_SUBJECT = 'GTEX-13OW8'
 SUBJECT_LIST = list(data_loader.SUBJECT_BUNDLES.keys())
 print(f"Loading subject data ({INIT_MODEL}/{INIT_SUBJECT})...")
-npz_data = data_loader.load_subject(INIT_MODEL, INIT_SUBJECT)
+_MODEL_LIST = ['naive', 'dlam', 'plam']
+_all_npz: dict = {m: data_loader.load_subject(m, INIT_SUBJECT) for m in _MODEL_LIST}
+npz_data = _all_npz[INIT_MODEL]
 gene_names_all = npz_data['gene_names'].tolist()
 
 # ── 3. Gene list ───────────────────────────────────────────────────────────────
@@ -138,6 +140,17 @@ def _clim_from_dicts(*dict_pairs) -> list:
     return [vmin, vmax]
 
 
+def _shared_clim(gene: str) -> list:
+    """Joint V3 clim across all three models — stable when switching models."""
+    pairs = []
+    for npz in _all_npz.values():
+        c3, s3 = data_loader.v4_fullfit(npz, atlas_aligned, gene)
+        c3, s3 = data_loader.mirror_lh_to_rh(c3, s3, rh_to_lh_map)
+        c3, s3 = data_loader.fill_excluded_parcels(c3, s3, excluded_map)
+        pairs.append((c3, s3))
+    return _clim_from_dicts(*pairs)
+
+
 def _val_to_hex(val: float, vmin: float, vmax: float) -> str:
     norm = (val - vmin) / (vmax - vmin) if vmax != vmin else 0.5
     r, g, b, _ = _cmap_fn(max(0.0, min(1.0, norm)))
@@ -184,19 +197,23 @@ def _make_cbar_html(label: str, vmin: float, vmax: float, width: str = '280px') 
     )
 
 
-def _make_cbar_section_html(clim1, clim2, clim3, mode: str) -> str:
+def _make_cbar_section_html(clim1, clim2, clim3, clim4, mode: str) -> str:
     if mode == 'shared':
-        bar = _make_cbar_html('All panels · shared scale', *clim1, width='380px')
+        bar = _make_cbar_html('All panels · joint scale across models', *clim1, width='380px')
         return f'<div style="display:flex;justify-content:center;">{bar}</div>'
-    bar1 = _make_cbar_html('V1 · GTEx raw', *clim1, width='220px')
-    bar2 = _make_cbar_html('V2 · Reconstruction', *clim2, width='220px')
-    bar3 = _make_cbar_html('V3 · Whole-brain Fit', *clim3, width='220px')
-    return f'<div style="display:flex;justify-content:space-evenly;">{bar1}{bar2}{bar3}</div>'
+    if mode == 'wbf':
+        bar = _make_cbar_html('All panels · Whole-Brain Fit scale', *clim3, width='380px')
+        return f'<div style="display:flex;justify-content:center;">{bar}</div>'
+    bar1 = _make_cbar_html('GTEx Ground Truth', *clim1, width='180px')
+    bar2 = _make_cbar_html('Reconstruction', *clim2, width='180px')
+    bar3 = _make_cbar_html('Whole-Brain Fit', *clim3, width='180px')
+    bar4 = _make_cbar_html('AHBA Reference', *clim4, width='180px')
+    return f'<div style="display:flex;justify-content:space-evenly;">{bar1}{bar2}{bar3}{bar4}</div>'
 
 # ── 8. PyVista plotter — three side-by-side viewports ─────────────────────────
 pv.global_theme.trame.default_mode = 'server'
 pv.global_theme.background = 'white'
-plotter = pv.Plotter(shape=(1, 3), notebook=False)
+plotter = pv.Plotter(shape=(1, 4), notebook=False)
 
 SURF_KW_BASE = dict(
     scalars='Data', cmap=CMAP,
@@ -211,11 +228,20 @@ _clip_plane.SetNormal(-1.0, 0.0, 0.0)
 _clip_plane.SetOrigin(0.0, 0.0, 0.0)
 
 
-def _make_viewport(col: int, title: str):
+def _make_viewport(col: int, title: str, subtitle: str = ''):
     """Set up one viewport: background, label, cortex + subcortex meshes."""
     plotter.subplot(0, col)
     plotter.set_background('white')
     plotter.add_text(title, position='upper_edge', font_size=10, color='gray')
+    if subtitle:
+        _ta = vtk.vtkTextActor()
+        _ta.SetInput(subtitle)
+        _ta.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        _ta.SetPosition(0.5, 0.93)
+        _ta.GetTextProperty().SetJustificationToCentered()
+        _ta.GetTextProperty().SetFontSize(11)
+        _ta.GetTextProperty().SetColor(0.45, 0.45, 0.45)
+        plotter.renderer.AddActor2D(_ta)
 
     lh_m = pv.PolyData(lh_v.astype(np.float32), LH_FACES)
     rh_m = pv.PolyData(rh_v.astype(np.float32), RH_FACES)
@@ -237,21 +263,32 @@ def _make_viewport(col: int, title: str):
     return lh_m, rh_m, lh_a, rh_a, sub
 
 
-# ── 10-12. Build all three viewports ──────────────────────────────────────────
-print("Pre-building meshes for all three viewports...")
-lh_v1, rh_v1, lh_a1, rh_a1, sub_v1 = _make_viewport(0, 'GTEx Values')
-lh_v2, rh_v2, lh_a2, rh_a2, sub_v2 = _make_viewport(1, 'Reconstruction')
-lh_v3, rh_v3, lh_a3, rh_a3, sub_v3 = _make_viewport(2, 'Whole-brain Fit')
+# ── 10-13. Build all four viewports ───────────────────────────────────────────
+print("Pre-building meshes for all four viewports...")
+lh_v1, rh_v1, lh_a1, rh_a1, sub_v1 = _make_viewport(
+    0, 'GTEx Ground Truth',
+    'Combat harmonized ground truth data used to fit and evaluate model')
+lh_v2, rh_v2, lh_a2, rh_a2, sub_v2 = _make_viewport(
+    1, 'Reconstruction',
+    'LORO predicted values for sampled regions')
+lh_v3, rh_v3, lh_a3, rh_a3, sub_v3 = _make_viewport(
+    2, 'Whole-Brain Fit',
+    'Ground truth data combined with imputed data over whole brain')
+lh_v4, rh_v4, lh_a4, rh_a4, sub_v4 = _make_viewport(
+    3, 'AHBA Reference',
+    'Naive whole-brain fit with LORO reconstruction at sampled regions')
 
-# ── 13. Shared camera — rotating any viewport moves all three ─────────────────
+# ── 14. Shared camera — rotating any viewport moves all four ──────────────────
 _shared_cam = plotter.renderers[0].GetActiveCamera()
 plotter.renderers[1].SetActiveCamera(_shared_cam)
 plotter.renderers[2].SetActiveCamera(_shared_cam)
+plotter.renderers[3].SetActiveCamera(_shared_cam)
 
 _all_actors = (
     [lh_a1, rh_a1] + [a for _, a in sub_v1.values()] +
     [lh_a2, rh_a2] + [a for _, a in sub_v2.values()] +
-    [lh_a3, rh_a3] + [a for _, a in sub_v3.values()]
+    [lh_a3, rh_a3] + [a for _, a in sub_v3.values()] +
+    [lh_a4, rh_a4] + [a for _, a in sub_v4.values()]
 )
 
 # ── 14. Update function (in-place scalar writes, no actor rebuild) ─────────────
@@ -277,19 +314,25 @@ def _update_viewport(lh_mesh, rh_mesh, lh_actor, rh_actor, sub_actors,
         actor.GetMapper().SetScalarRange(*clim)
 
 
-def update_scene(c1, s1, c2, s2, c3, s3, gene: str, cbar_mode: str = 'local') -> tuple:
+def update_scene(c1, s1, c2, s2, c3, s3, c4, s4, gene: str, cbar_mode: str = 'local',
+                 shared_clim=None) -> tuple:
     if cbar_mode == 'shared':
-        clim = _clim_from_dicts((c1, s1), (c2, s2), (c3, s3))
-        clim1 = clim2 = clim3 = clim
+        clim = shared_clim if shared_clim is not None else _clim_from_dicts((c1, s1), (c2, s2), (c3, s3), (c4, s4))
+        clim1 = clim2 = clim3 = clim4 = clim
+    elif cbar_mode == 'wbf':
+        clim = _clim_from_dicts((c3, s3))
+        clim1 = clim2 = clim3 = clim4 = clim
     else:
         clim1 = _clim_from_dicts((c1, s1))
         clim2 = _clim_from_dicts((c2, s2))
         clim3 = _clim_from_dicts((c3, s3))
+        clim4 = _clim_from_dicts((c4, s4))
     _update_viewport(lh_v1, rh_v1, lh_a1, rh_a1, sub_v1, c1, s1, clim1)
     _update_viewport(lh_v2, rh_v2, lh_a2, rh_a2, sub_v2, c2, s2, clim2)
     _update_viewport(lh_v3, rh_v3, lh_a3, rh_a3, sub_v3, c3, s3, clim3)
+    _update_viewport(lh_v4, rh_v4, lh_a4, rh_a4, sub_v4, c4, s4, clim4)
     plotter.render()
-    return clim1, clim2, clim3
+    return clim1, clim2, clim3, clim4
 
 
 def _set_clip(half: bool):
@@ -300,42 +343,60 @@ def _set_clip(half: bool):
             mapper.AddClippingPlane(_clip_plane)
 
 
-# ── 15. Data helper ────────────────────────────────────────────────────────────
+# ── 15. Data helpers ───────────────────────────────────────────────────────────
 def _get_all(gene: str, cbar_mode: str = 'local'):
-    c2, s2 = data_loader.v2_reconstruction(npz_data, atlas_aligned, gene)
-    c2, s2 = data_loader.remap_rh_to_lh_nearest(c2, s2, rh_to_lh_map)
-    c3, s3 = data_loader.v4_fullfit(npz_data, atlas_aligned, gene)
-    c3, s3 = data_loader.mirror_lh_to_rh(c3, s3, rh_to_lh_map)
-    c3, s3 = data_loader.fill_excluded_parcels(c3, s3, excluded_map)
-    if cbar_mode == 'shared':
-        # Derive V1 from V3's mirrored fullfit values at V1's parcel locations,
-        # so RH-labelled GTEx parcels get the same LH-mirrored value as V3.
-        c1_keys, s1_keys = data_loader.v1_gtex_input(npz_data, atlas_aligned, gene)
-        c1_keys, s1_keys = data_loader.remap_rh_to_lh_nearest(c1_keys, s1_keys, rh_to_lh_map)
-        c1 = {k: c3[k] for k in c1_keys if k in c3}
-        s1 = {k: s3[k] for k in s1_keys if k in s3}
+    if cbar_mode in ('shared', 'wbf'):
+        c1, s1 = data_loader.v1_gtex_harmonized(npz_data, atlas_aligned, gene)
     else:
         c1, s1 = data_loader.v1_gtex_input(npz_data, atlas_aligned, gene)
-        c1, s1 = data_loader.remap_rh_to_lh_nearest(c1, s1, rh_to_lh_map)
+    c1, s1 = data_loader.remap_rh_to_lh_nearest(c1, s1, rh_to_lh_map)
+    c2, s2 = data_loader.v2_reconstruction(npz_data, atlas_aligned, gene)
+    c2, s2 = data_loader.remap_rh_to_lh_nearest(c2, s2, rh_to_lh_map)
+    # V3: fullfit at imputed parcels, but V2 reconstruction at GTEx parcels.
+    # Remap V2 to LH keys before merging so that mirror_lh_to_rh uses the
+    # reconstruction value (not fullfit) when it copies LH → RH.
+    c3_raw, s3_raw = data_loader.v4_fullfit(npz_data, atlas_aligned, gene)
+    c2_raw, s2_raw = data_loader.v2_reconstruction(npz_data, atlas_aligned, gene)
+    c2_lh, s2_lh = data_loader.remap_rh_to_lh_nearest(c2_raw, s2_raw, rh_to_lh_map)
+    c3, s3 = data_loader.mirror_lh_to_rh({**c3_raw, **c2_lh}, {**s3_raw, **s2_lh}, rh_to_lh_map)
+    c3, s3 = data_loader.fill_excluded_parcels(c3, s3, excluded_map)
     return c1, s1, c2, s2, c3, s3
+
+
+def _get_ahba_ref(gene: str):
+    """Naive whole-brain fit with LORO reconstruction at sampled regions — fixed reference."""
+    naive_npz = _all_npz['naive']
+    c3_raw, s3_raw = data_loader.v4_fullfit(naive_npz, atlas_aligned, gene)
+    c2_raw, s2_raw = data_loader.v2_reconstruction(naive_npz, atlas_aligned, gene)
+    c2_lh, s2_lh = data_loader.remap_rh_to_lh_nearest(c2_raw, s2_raw, rh_to_lh_map)
+    c4, s4 = data_loader.mirror_lh_to_rh({**c3_raw, **c2_lh}, {**s3_raw, **s2_lh}, rh_to_lh_map)
+    c4, s4 = data_loader.fill_excluded_parcels(c4, s4, excluded_map)
+    return c4, s4
 
 
 # ── 16. Initial render ─────────────────────────────────────────────────────────
 print(f"Rendering initial scene for gene '{INIT_GENE}'...")
 c1_i, s1_i, c2_i, s2_i, c3_i, s3_i = _get_all(INIT_GENE)
+c4_i, s4_i = _get_ahba_ref(INIT_GENE)
 print(f"  V1: {len(c1_i)}cx+{len(s1_i)}sub  "
       f"V2: {len(c2_i)}cx+{len(s2_i)}sub  "
-      f"V3: {len(c3_i)}cx+{len(s3_i)}sub")
+      f"V3: {len(c3_i)}cx+{len(s3_i)}sub  "
+      f"V4: {len(c4_i)}cx+{len(s4_i)}sub")
 _excl_check = ['RH-EXA', 'RH-STH', 'RH-VeP']
 for _n in _excl_check:
     print(f"  Excluded {_n}: in s3={_n in s3_i}, val={s3_i.get(_n, 'MISSING'):.4f}" if _n in s3_i else f"  Excluded {_n}: MISSING from s3")
-_init_clims = update_scene(c1_i, s1_i, c2_i, s2_i, c3_i, s3_i, INIT_GENE)
+_init_clims = update_scene(c1_i, s1_i, c2_i, s2_i, c3_i, s3_i, c4_i, s4_i, INIT_GENE)
 
 plotter.subplot(0, 0)
 plotter.reset_camera()
 _cam = plotter.camera_position
 _CAM_FULL_BASE = (tuple(_cam[0]), tuple(_cam[1]), (0.0, 1.0, 0.0))
-_CAM_HALF_BASE = ((400.0, 0.0, 50.0), (0.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+_focus = _CAM_FULL_BASE[1]
+_CAM_HALF_BASE = (
+    (_focus[0] + 600.0, _focus[1], _focus[2]),
+    _focus,
+    (0.0, 0.0, 1.0),
+)
 
 
 def _apply_camera(half: bool) -> None:
@@ -371,9 +432,10 @@ state.subject_list = SUBJECT_LIST
 state.n_v1           = f"{len(c1_i)}cx+{len(s1_i)}sub"
 state.n_v2           = f"{len(c2_i)}cx+{len(s2_i)}sub"
 state.n_v3           = f"{len(c3_i)}cx+{len(s3_i)}sub"
-_ic1, _ic2, _ic3 = _init_clims
+state.n_v4           = f"{len(c4_i)}cx+{len(s4_i)}sub"
+_ic1, _ic2, _ic3, _ic4 = _init_clims
 state.v1_legend_html  = _make_legend_html(c1_i, s1_i, _ic1)
-state.cbar_html       = _make_cbar_section_html(_ic1, _ic2, _ic3, 'local')
+state.cbar_html       = _make_cbar_section_html(_ic1, _ic2, _ic3, _ic4, 'local')
 state.cbar_mode       = 'local'
 state.half_brain      = 'full'
 state.cortex_alpha    = CORTEX_ALPHA
@@ -386,22 +448,26 @@ def _push():
         pass
 
 
-def _update_cbars(c1, s1, clim1, clim2, clim3, cbar_mode: str):
+def _update_cbars(c1, s1, clim1, clim2, clim3, clim4, cbar_mode: str):
     state.v1_legend_html = _make_legend_html(c1, s1, clim1)
-    state.cbar_html = _make_cbar_section_html(clim1, clim2, clim3, cbar_mode)
+    state.cbar_html = _make_cbar_section_html(clim1, clim2, clim3, clim4, cbar_mode)
 
 
 def _reload_scene(c1, s1, c2, s2, c3, s3, gene):
-    clim1, clim2, clim3 = update_scene(c1, s1, c2, s2, c3, s3, gene, state.cbar_mode)
-    _update_cbars(c1, s1, clim1, clim2, clim3, state.cbar_mode)
+    c4, s4 = _get_ahba_ref(gene)
+    sc = _shared_clim(gene) if state.cbar_mode == 'shared' else None
+    clim1, clim2, clim3, clim4 = update_scene(c1, s1, c2, s2, c3, s3, c4, s4, gene, state.cbar_mode, sc)
+    _update_cbars(c1, s1, clim1, clim2, clim3, clim4, state.cbar_mode)
 
 
 @state.change('gene')
 def on_gene(gene, **_):
     c1, s1, c2, s2, c3, s3 = _get_all(gene, state.cbar_mode)
+    c4, s4 = _get_ahba_ref(gene)
     state.n_v1 = f"{len(c1)}cx+{len(s1)}sub"
     state.n_v2 = f"{len(c2)}cx+{len(s2)}sub"
     state.n_v3 = f"{len(c3)}cx+{len(s3)}sub"
+    state.n_v4 = f"{len(c4)}cx+{len(s4)}sub"
     _reload_scene(c1, s1, c2, s2, c3, s3, gene)
     _push()
 
@@ -409,7 +475,7 @@ def on_gene(gene, **_):
 @state.change('model')
 def on_model(model, **_):
     global npz_data
-    npz_data = data_loader.load_subject(model, state.subject)
+    npz_data = _all_npz[model]
     c1, s1, c2, s2, c3, s3 = _get_all(state.gene, state.cbar_mode)
     state.n_v1 = f"{len(c1)}cx+{len(s1)}sub"
     state.n_v2 = f"{len(c2)}cx+{len(s2)}sub"
@@ -420,12 +486,15 @@ def on_model(model, **_):
 
 @state.change('subject')
 def on_subject(subject, **_):
-    global npz_data
-    npz_data = data_loader.load_subject(state.model, subject)
+    global npz_data, _all_npz
+    _all_npz = {m: data_loader.load_subject(m, subject) for m in _MODEL_LIST}
+    npz_data = _all_npz[state.model]
     c1, s1, c2, s2, c3, s3 = _get_all(state.gene, state.cbar_mode)
+    c4, s4 = _get_ahba_ref(state.gene)
     state.n_v1 = f"{len(c1)}cx+{len(s1)}sub"
     state.n_v2 = f"{len(c2)}cx+{len(s2)}sub"
     state.n_v3 = f"{len(c3)}cx+{len(s3)}sub"
+    state.n_v4 = f"{len(c4)}cx+{len(s4)}sub"
     _reload_scene(c1, s1, c2, s2, c3, s3, state.gene)
     _push()
 
@@ -437,10 +506,10 @@ def on_cbar_mode(**_):
     _push()
 
 
-_cortex_actors    = [lh_a1, rh_a1, lh_a2, rh_a2, lh_a3, rh_a3]
+_cortex_actors    = [lh_a1, rh_a1, lh_a2, rh_a2, lh_a3, rh_a3, lh_a4, rh_a4]
 _subcortex_actors = []
 _cerebellum_actors = []
-for _sub_vp in [sub_v1, sub_v2, sub_v3]:
+for _sub_vp in [sub_v1, sub_v2, sub_v3, sub_v4]:
     for _name, (_, _actor) in _sub_vp.items():
         if _name.startswith('Cerebellar_'):
             _cerebellum_actors.append(_actor)
@@ -556,6 +625,8 @@ with SinglePageLayout(server) as layout:
                     style='font-size:11px; text-transform:none; min-width:54px;')
             v3.VBtn('Shared', value='shared', size='small',
                     style='font-size:11px; text-transform:none; min-width:60px;')
+            v3.VBtn('WBF', value='wbf', size='small',
+                    style='font-size:11px; text-transform:none; min-width:54px;')
 
         v3.VDivider(vertical=True, style=SEP_STYLE)
 
@@ -599,7 +670,7 @@ with SinglePageLayout(server) as layout:
                 # Row 2: V1 active region swatches
                 with html.Div(style='padding:2px 14px 6px; display:flex; align-items:center; flex-wrap:wrap;'):
                     html.Span(
-                        'GTEx regions — ',
+                        'GTEx Regions — ',
                         style='font-size:11px; color:#888; margin-right:6px; white-space:nowrap;',
                     )
                     html.Span(v_html=('v1_legend_html',))

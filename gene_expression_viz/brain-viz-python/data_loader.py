@@ -31,6 +31,9 @@ _HERE = Path(__file__).parent
 SUBJECT_BUNDLES: dict[str, Path] = {
     'GTEX-1117F':  _HERE.parent / 'subject_bundle',
     'GTEX-13OW8':  _HERE.parent / 'subject_bundle_GTEX-13OW8',
+    'GTEX-11DZ1':  _HERE.parent / 'subject_bundle_GTEX-11DZ1',
+    'GTEX-1B996':  _HERE.parent / 'subject_bundle_GTEX-1B996',
+    'GTEX-1JMPZ':  _HERE.parent / 'subject_bundle_GTEX-1JMPZ',
 }
 
 
@@ -124,14 +127,19 @@ def build_value_dict(npz_data, atlas_aligned: pd.DataFrame,
 # ── Convenience wrappers for each view ────────────────────────────────────────
 
 def v1_gtex_input(npz_data, atlas_aligned, gene_name):
-    """V1: Raw GTEx measurements at LORO held-out parcels (loro_eval_mask).
-
-    loro_truth_subject_raw only contains values for the held-out parcels —
-    the 3 non-held-out input parcels are NaN in that array and not stored
-    in raw form. The correct mask is loro_eval_mask, not gtex_mask.
-    """
+    """V1: Raw GTEx measurements at LORO held-out parcels (loro_eval_mask)."""
     return build_value_dict(npz_data, atlas_aligned,
                             'loro_truth_subject_raw', 'loro_eval_mask', gene_name)
+
+
+def v1_gtex_harmonized(npz_data, atlas_aligned, gene_name):
+    """V1 harmonized: ground truth from fullfit at LORO held-out parcels.
+
+    fullfit_subject_h at GTEx parcel positions equals loro_truth_subject_h —
+    both contain the combat-harmonized ground truth used to fit the model.
+    """
+    return build_value_dict(npz_data, atlas_aligned,
+                            'fullfit_subject_h', 'loro_eval_mask', gene_name)
 
 
 def v2_reconstruction(npz_data, atlas_aligned, gene_name):
@@ -203,9 +211,15 @@ def build_excluded_parcel_map() -> dict[str, str]:
         elif label.startswith('LH_'):
             counterpart = 'RH_' + label[3:]
         else:
-            continue  # bilateral, skip
+            continue  # bilateral — handled separately below
         if counterpart in labels_150:
             mapping[label] = counterpart
+
+    # Cerebellar_Region9 has no LH/RH counterpart; fill from nearest cerebellar
+    # region in the NPZ (Cerebellar_Region4, ~21 mm away by MNI centroid).
+    if 'Cerebellar_Region9' in excluded and 'Cerebellar_Region4' in labels_150:
+        mapping['Cerebellar_Region9'] = 'Cerebellar_Region4'
+
     return mapping
 
 
