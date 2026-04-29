@@ -143,21 +143,25 @@ def v1_gtex_harmonized(npz_data, atlas_aligned, gene_name):
 
 
 def v2_reconstruction(npz_data, atlas_aligned, gene_name):
-    """V2: Model reconstruction at all 12 GTEx parcels (loro_fused_subject_h, gtex_mask).
+    """V2: Model reconstruction at LORO-evaluated GTEx parcels (loro_fused_subject_h, loro_eval_mask).
 
-    Directly comparable to V3 — same 12 parcels, model output vs. AHBA truth.
+    Uses loro_eval_mask (not gtex_mask) so that V2 and V3 cover exactly the
+    same parcel set. For subjects with skipped holds, gtex_mask includes parcels
+    where AHBA had no data and loro_truth_subject_h is NaN; restricting to
+    loro_eval_mask keeps both views comparable.
     """
     return build_value_dict(npz_data, atlas_aligned,
-                            'loro_fused_subject_h', 'gtex_mask', gene_name)
+                            'loro_fused_subject_h', 'loro_eval_mask', gene_name)
 
 
 def v3_ground_truth(npz_data, atlas_aligned, gene_name):
-    """V3: AHBA ground truth at all 12 GTEx parcels (loro_truth_subject_h, gtex_mask).
+    """V3: AHBA ground truth at LORO-evaluated GTEx parcels (loro_truth_subject_h, loro_eval_mask).
 
-    Directly comparable to V2 — same 12 parcels, AHBA truth vs. model output.
+    Directly comparable to V2 — same parcels, AHBA truth vs. model output.
+    loro_eval_mask excludes skipped holds where loro_truth_subject_h is NaN.
     """
     return build_value_dict(npz_data, atlas_aligned,
-                            'loro_truth_subject_h', 'gtex_mask', gene_name)
+                            'loro_truth_subject_h', 'loro_eval_mask', gene_name)
 
 
 def v4_fullfit(npz_data, atlas_aligned, gene_name):
