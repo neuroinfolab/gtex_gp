@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from itertools import combinations
 import json
 from pathlib import Path
+import re
 import textwrap
+import warnings
 from typing import Dict, Mapping, Sequence, Tuple
 
 import matplotlib.pyplot as plt
@@ -43,6 +45,7 @@ from .eval_style import (
     parcel_group_sort_key,
     parcel_label_lookup,
     set_academic_style,
+    strip_display_label_prefixes,
 )
 from .results_eda import (
     collect_pooled_sample_prediction_dfs_from_cache_gene_subset,
@@ -69,6 +72,7 @@ __all__ = [
     "collect_pooled_sample_prediction_dfs_from_cache_gene_subset",
     "build_global_prediction_tables",
     "compute_prediction_metrics",
+    "format_gene_list_name",
     "make_prediction_eval_view",
     "paired_ttests_by_subject",
     "plot_coverage_vs_metric",
@@ -77,6 +81,17 @@ __all__ = [
     "plot_metric_delta_violins",
     "plot_metric_violins",
     "plot_region_model_metric_heatmap",
+    "plot_stratified_scatter",
+    "plot_stratified_distribution",
+    "format_stratified_metric_table",
+    "plot_distance_to_train_vs_metric",
+    "compute_stratum_bias",
+    "plot_stratum_bias_forest",
+    "compute_subject_fold_summary",
+    "plot_subject_mean_metric",
+    "plot_fold_std_vs_mean",
+    "compute_subject_specificity",
+    "plot_subject_specificity",
     "plot_coverage_vs_accuracy",
     "plot_fold_combo_ranked",
     "plot_fold_combo_matched_overlay",
@@ -118,6 +133,30 @@ _META_COLS = {
     "subject_coverage",
     "model",
 }
+
+
+_SCATTER_REGION_GROUP_ORDER = ["cortical", "subcortical", "cerebellar", "other"]
+_SCATTER_REGION_GROUP_COLORS = {
+    "cortical": ["#b35806", "#e08214", "#f1a340", "#fdb863", "#7f3b08"],
+    "subcortical": ["#2166ac", "#4393c3", "#92c5de", "#762a83", "#9970ab", "#c2a5cf"],
+    "subcortical_basal_ganglia": ["#762a83", "#9970ab", "#c2a5cf", "#40004b", "#8e0152"],
+    "subcortical_other": ["#2166ac", "#4393c3", "#92c5de", "#053061", "#67a9cf"],
+    "cerebellar": ["#1b7837", "#5aae61", "#a6dba0", "#00441b", "#7fbf7b"],
+    "other": ["#6b6b6b", "#969696", "#bdbdbd", "#525252"],
+}
+_SCATTER_REGION_GROUP_BASE = {
+    "cortical": "#e08214",
+    "subcortical": "#2166ac",
+    "cerebellar": "#1b7837",
+    "other": "#6b6b6b",
+}
+_SCATTER_SEX_COLORS = {
+    "female": "#f4a261",
+    "f": "#f4a261",
+    "male": "#7fc97f",
+    "m": "#7fc97f",
+}
+_AGE_ORDER_RE = re.compile(r"\d+")
 
 
 def _pearson_safe(x: np.ndarray, y: np.ndarray) -> float:
@@ -191,6 +230,42 @@ def _resolve_eval_view_genes(
         label = f" from {src}" if src is not None else ""
         raise ValueError(f"Requested gene subset{label} has no overlap with cached prediction table genes")
     return keep
+
+
+def format_gene_list_name(gene_list_path: str | Path | None, default: str = "All Genes") -> str:
+    """Format a gene-list path or basename for plot labels."""
+    if gene_list_path is None or not str(gene_list_path).strip():
+        return str(default)
+    stem = Path(str(gene_list_path)).stem.lower()
+    known = {
+        "syngo": "SynGO genes",
+        "richiardi2015": "Richiardi (2015) genes",
+    }
+    if stem in known:
+        return known[stem]
+
+    parts = stem.split("_")
+    source_map = {"ahba": "AHBA", "gtex": "GTEx"}
+    source = source_map.get(parts[0], parts[0].upper() if parts else "")
+    rest = parts[1:] if parts and parts[0] in source_map else parts
+    labels = []
+    for part in rest:
+        low = str(part).lower()
+        if low.endswith("hvg") and low[:-3].isdigit():
+            labels.append(f"{low[:-3]} HVG")
+        elif low.endswith("deg") and low[:-3].isdigit():
+            labels.append(f"{low[:-3]} DEG")
+        elif low in {"hvg", "deg"}:
+            labels.append(low.upper())
+        elif low == "demeaned":
+            labels.append("demeaned")
+        elif low:
+            labels.append(format_legend_label(low))
+    return " ".join([source, *labels]).strip() or str(default)
+
+
+def _normalize_region_filter_label(value: object) -> str:
+    return strip_display_label_prefixes(str(value)).strip().lower()
 
 
 def _normalize_stratify_by(stratify_by: str | None, columns: Sequence[str]) -> str | None:
@@ -843,6 +918,7 @@ def make_prediction_eval_view(
     region_groups: Sequence[str] | None = None,
     sex: Sequence[str] | str | None = None,
     age: Sequence[str] | str | None = None,
+    tissues: Sequence[str] | str | None = None,
 ) -> dict[str, object]:
     """Create an aligned, filtered view over wide truth/prediction tables."""
     model_list = ordered_models(models if models is not None else pred_dfs.keys())
@@ -865,6 +941,18 @@ def make_prediction_eval_view(
     if subjects is not None:
         subject_set = {str(s) for s in subjects}
         mask &= truth_df["subject"].astype(str).isin(subject_set)
+    if tissues is not None:
+        tissue_vals = [tissues] if isinstance(tissues, str) else list(tissues)
+        tissue_set = {_normalize_region_filter_label(t) for t in tissue_vals}
+        gtex_region_norm = truth_df["gtex_region"].map(_normalize_region_filter_label)
+        tissue_mask = gtex_region_norm.isin(tissue_set)
+        if not bool(tissue_mask.any()):
+            available = sorted(pd.unique(gtex_region_norm.dropna()))[:20]
+            raise ValueError(
+                "tissues filter matched no gtex_region rows. "
+                f"Requested={sorted(tissue_set)}; available examples={available}"
+            )
+        mask &= tissue_mask
     if regions is not None:
         region_set = {str(r).lower() for r in regions}
         mask &= (
@@ -906,6 +994,7 @@ def make_prediction_eval_view(
         "eval_gene_list_path": eval_gene_list_path if eval_gene_list_path is not None else eval_gene_path,
         "filters": {
             "subjects": None if subjects is None else list(subjects),
+            "tissues": None if tissues is None else ([tissues] if isinstance(tissues, str) else list(tissues)),
             "regions": None if regions is None else list(regions),
             "region_groups": None if region_groups is None else list(region_groups),
             "sex": sex,
@@ -1203,6 +1292,8 @@ def _scatter_payload_from_view(
         "region_group": np.repeat(truth_df["region_group"].astype(str).to_numpy(), n_genes)[finite],
         "region": np.repeat(truth_df["gtex_region"].astype(str).to_numpy(), n_genes)[finite],
         "subject": np.repeat(truth_df["subject"].astype(str).to_numpy(), n_genes)[finite],
+        "sex": np.repeat(truth_df["sex"].astype(str).to_numpy(), n_genes)[finite],
+        "age": np.repeat(truth_df["age"].astype(str).to_numpy(), n_genes)[finite],
         "gene": np.tile(np.asarray(list(genes), dtype=object), n_samples)[finite],
     }
 
@@ -1213,21 +1304,34 @@ def _sample_scatter_payload_from_view(
     genes: Sequence[str],
     max_points: int | None,
     random_seed: int,
+    balance_by: str | None = None,
 ) -> tuple[Dict[str, np.ndarray], int]:
     gene_list = list(genes)
     x_mat = truth_df[gene_list].to_numpy(dtype=np.float64)
     y_mat = pred_df[gene_list].to_numpy(dtype=np.float64)
     n_samples, n_genes = x_mat.shape
     n_total = int(n_samples * n_genes)
-    if max_points is None or int(max_points) <= 0 or int(max_points) >= n_total:
-        flat_idx = np.arange(n_total, dtype=np.int64)
+    x_flat = x_mat.ravel()
+    y_flat = y_mat.ravel()
+    rng = np.random.default_rng(int(random_seed))
+    if balance_by is None:
+        if max_points is None or int(max_points) <= 0 or int(max_points) >= n_total:
+            flat_idx = np.arange(n_total, dtype=np.int64)
+        else:
+            flat_idx = np.sort(rng.choice(n_total, size=int(max_points), replace=False))
     else:
-        rng = np.random.default_rng(int(random_seed))
-        flat_idx = np.sort(rng.choice(n_total, size=int(max_points), replace=False))
+        finite_idx = np.flatnonzero(np.isfinite(x_flat) & np.isfinite(y_flat)).astype(np.int64)
+        labels = _scatter_flat_labels(truth_df, gene_list, finite_idx, n_genes, balance_by)
+        flat_idx = _balanced_sample_flat_indices(
+            finite_idx,
+            labels,
+            max_points=max_points,
+            random_seed=int(random_seed),
+        )
     row_idx = flat_idx // n_genes
     gene_idx = flat_idx % n_genes
-    x = x_mat.ravel()[flat_idx]
-    y = y_mat.ravel()[flat_idx]
+    x = x_flat[flat_idx]
+    y = y_flat[flat_idx]
     finite = np.isfinite(x) & np.isfinite(y)
     row_idx = row_idx[finite]
     gene_idx = gene_idx[finite]
@@ -1238,52 +1342,244 @@ def _sample_scatter_payload_from_view(
             "region_group": truth_df["region_group"].astype(str).to_numpy()[row_idx],
             "region": truth_df["gtex_region"].astype(str).to_numpy()[row_idx],
             "subject": truth_df["subject"].astype(str).to_numpy()[row_idx],
+            "sex": truth_df["sex"].astype(str).to_numpy()[row_idx],
+            "age": truth_df["age"].astype(str).to_numpy()[row_idx],
             "gene": np.asarray(gene_list, dtype=object)[gene_idx],
         },
         n_total,
     )
 
 
+def _scatter_flat_labels(
+    truth_df: pd.DataFrame,
+    genes: Sequence[str],
+    flat_idx: np.ndarray,
+    n_genes: int,
+    key: str,
+) -> np.ndarray:
+    row_idx = flat_idx // int(n_genes)
+    if key == "gene":
+        gene_idx = flat_idx % int(n_genes)
+        return np.asarray(list(genes), dtype=object)[gene_idx].astype(str)
+    if key == "region_group":
+        col = "region_group"
+    elif key == "region":
+        col = "gtex_region"
+    elif key in {"subject", "sex", "age"}:
+        col = key
+    else:
+        raise ValueError(f"Cannot balance scatter sampling by unsupported key: {key}")
+    return truth_df[col].astype(str).to_numpy()[row_idx]
+
+
+def _balanced_sample_flat_indices(
+    flat_idx: np.ndarray,
+    labels: np.ndarray,
+    max_points: int | None,
+    random_seed: int,
+) -> np.ndarray:
+    """Balance candidate flat indices by label, then optionally cap evenly again."""
+    if len(flat_idx) == 0:
+        return flat_idx
+    rng = np.random.default_rng(int(random_seed))
+    label_s = pd.Series(labels.astype(str))
+    groups = [idx.to_numpy(dtype=np.int64) for _, idx in label_s.groupby(label_s, sort=True).groups.items()]
+    groups = [g for g in groups if len(g) > 0]
+    if not groups:
+        return flat_idx
+    min_n = min(len(g) for g in groups)
+    balanced_parts = []
+    for positions in groups:
+        take = positions if len(positions) == min_n else rng.choice(positions, size=min_n, replace=False)
+        balanced_parts.append(flat_idx[take])
+
+    cap = None if max_points is None or int(max_points) <= 0 else int(max_points)
+    if cap is not None and sum(len(p) for p in balanced_parts) > cap:
+        n_groups = len(balanced_parts)
+        if cap < n_groups:
+            keep_group_idx = set(rng.choice(np.arange(n_groups), size=cap, replace=False).tolist())
+            balanced_parts = [p for i, p in enumerate(balanced_parts) if i in keep_group_idx]
+            per_group = 1
+            extras = 0
+        else:
+            per_group = cap // n_groups
+            extras = cap % n_groups
+        capped_parts = []
+        extra_groups = set(rng.choice(np.arange(len(balanced_parts)), size=extras, replace=False).tolist()) if extras else set()
+        for i, part in enumerate(balanced_parts):
+            n_take = min(len(part), per_group + (1 if i in extra_groups else 0))
+            capped_parts.append(part if len(part) == n_take else rng.choice(part, size=n_take, replace=False))
+        balanced_parts = capped_parts
+
+    out = np.concatenate(balanced_parts).astype(np.int64)
+    rng.shuffle(out)
+    return out
+
+
+def _scatter_color_key(color_by: str) -> str | None:
+    mode = str(color_by).lower()
+    if mode in {"none", ""}:
+        return None
+    if mode == "region_group":
+        return "region_group"
+    if mode in {"region", "gtex_region"}:
+        return "region"
+    if mode in {"subject", "gene", "sex", "age"}:
+        return mode
+    raise ValueError("color_by must be one of: none, region_group, region, subject, gene, sex, age")
+
+
+def _scatter_subcortical_palette_key(region: str) -> str:
+    s = str(region).lower()
+    if any(k in s for k in ["basal ganglia", "caudate", "putamen", "accumbens", "nucleus accumbens"]):
+        return "subcortical_basal_ganglia"
+    return "subcortical_other"
+
+
+def _age_sort_key(value: object) -> tuple[int, float, str]:
+    s = str(value).strip()
+    match = _AGE_ORDER_RE.search(s)
+    if match:
+        return 0, float(match.group(0)), s.lower()
+    return 1, float("inf"), s.lower()
+
+
+def _global_scatter_color_spec(
+    plot_payloads: Mapping[str, Dict[str, np.ndarray]],
+    color_by: str,
+    top_n: int,
+    genes: Sequence[str] | None = None,
+) -> tuple[str | None, list[str], dict[str, object]]:
+    key = _scatter_color_key(color_by)
+    if key is None:
+        return None, [], {}
+    if key == "region_group":
+        order = _SCATTER_REGION_GROUP_ORDER
+        palette = _SCATTER_REGION_GROUP_BASE
+        present = set()
+        for payload in plot_payloads.values():
+            present.update(str(v) for v in payload[key].astype(str))
+        return key, [v for v in order if v in present], palette
+
+    if key == "region":
+        region_ids = np.concatenate([payload["region"].astype(str) for payload in plot_payloads.values()])
+        group_ids = np.concatenate([payload["region_group"].astype(str) for payload in plot_payloads.values()])
+        counts = pd.Series(region_ids).value_counts()
+        top_regions = set(counts.index[: int(top_n)].tolist())
+        region_groups = (
+            pd.DataFrame({"region": region_ids, "region_group": group_ids})
+            .drop_duplicates()
+            .groupby("region")["region_group"]
+            .agg(lambda s: s.value_counts().index[0])
+            .to_dict()
+        )
+        order = []
+        palette = {}
+        for group in _SCATTER_REGION_GROUP_ORDER:
+            group_regions = [
+                region
+                for region in counts.index.tolist()
+                if region in top_regions and region_groups.get(region, "other") == group
+            ]
+            group_regions = sorted(group_regions, key=lambda r: (-int(counts.loc[r]), format_legend_label(r)))
+            counters: dict[str, int] = {}
+            for i, region in enumerate(group_regions):
+                palette_key = _scatter_subcortical_palette_key(region) if group == "subcortical" else group
+                colors = _SCATTER_REGION_GROUP_COLORS.get(palette_key, _SCATTER_REGION_GROUP_COLORS["other"])
+                j = counters.get(palette_key, 0)
+                order.append(region)
+                palette[region] = colors[j % len(colors)]
+                counters[palette_key] = j + 1
+        return key, order, palette
+
+    if key == "gene":
+        if genes is None:
+            ids = np.concatenate([payload[key].astype(str) for payload in plot_payloads.values()])
+            order = pd.unique(ids).tolist()[: int(top_n)]
+        else:
+            order = [str(g) for g in list(genes)[: int(top_n)]]
+        colors = sns.color_palette("tab20", n_colors=max(1, len(order)))
+        palette = {v: colors[i] for i, v in enumerate(order)}
+        return key, order, palette
+
+    ids = np.concatenate([payload[key].astype(str) for payload in plot_payloads.values()])
+    vals, counts = np.unique(ids, return_counts=True)
+    order = vals[np.argsort(-counts, kind="mergesort")[: int(top_n)]].tolist()
+    if key == "sex":
+        fallback_colors = sns.color_palette("Set2", n_colors=max(1, len(order)))
+        palette = {
+            v: _SCATTER_SEX_COLORS.get(str(v).strip().lower(), fallback_colors[i])
+            for i, v in enumerate(order)
+        }
+        return key, order, palette
+    if key == "age":
+        order = sorted(order, key=_age_sort_key)
+        palette_name = "tab10" if len(order) <= 10 else "tab20"
+        colors = sns.color_palette(palette_name, n_colors=max(1, len(order)))
+        palette = {v: colors[i] for i, v in enumerate(order)}
+        return key, order, palette
+    colors = sns.color_palette("tab20", n_colors=max(1, len(order)))
+    palette = {v: colors[i] for i, v in enumerate(order)}
+    return key, order, palette
+
+
+def _scatter_legend_label(value: str, color_key: str | None) -> str:
+    if color_key == "gene":
+        return str(value).upper()
+    return format_legend_label(value)
+
+
+def _scatter_legend_title(color_by: str, color_key: str | None, n_shown: int, gene_list_label: str | None = None) -> str:
+    label = gene_list_label if gene_list_label is not None and str(gene_list_label).strip() else "All Genes"
+    if color_key == "gene":
+        return f"Top {int(n_shown)} Genes From {label}"
+    if str(color_by).lower() == "region_group":
+        base = "Region Group"
+    else:
+        base = format_legend_label(color_by)
+    return base
+
+
+def _scatter_legend_handles(
+    order: Sequence[str],
+    palette: Mapping[str, object],
+    show_other: bool,
+    color_key: str | None,
+) -> list[Line2D]:
+    handles = [
+        Line2D([0], [0], marker="o", linestyle="none", color=palette[val], label=_scatter_legend_label(val, color_key), markersize=6)
+        for val in order
+    ]
+    if bool(show_other):
+        handles.append(Line2D([0], [0], marker="o", linestyle="none", color="#9a9a9a", label="Other", markersize=6))
+    return handles
+
+
 def _plot_categorical_scatter(
     ax: plt.Axes,
     payload: Dict[str, np.ndarray],
-    color_by: str,
-    top_n: int,
+    color_key: str | None,
+    category_order: Sequence[str],
+    category_palette: Mapping[str, object],
     point_size: float,
     alpha: float,
     rasterized: bool,
-    show_handles: bool,
-) -> list[Line2D]:
+) -> bool:
     x = payload["x"]
     y = payload["y"]
-    mode = str(color_by).lower()
-    if mode in {"none", ""}:
+    if color_key is None:
         ax.scatter(x, y, s=point_size, alpha=alpha, color="#5f5f5f", linewidths=0, rasterized=rasterized)
-        return []
-    if mode == "region_group":
-        ids = payload["region_group"].astype(str)
-        palette = {"cortical": "#2166ac", "subcortical": "#b35806", "cerebellar": "#1b7837"}
-        order = [v for v in ["cortical", "subcortical", "cerebellar"] if v in set(ids)]
-    elif mode in {"region", "gtex_region", "subject", "gene"}:
-        key = "region" if mode in {"region", "gtex_region"} else mode
-        ids = payload[key].astype(str)
-        vals, counts = np.unique(ids, return_counts=True)
-        order = vals[np.argsort(-counts, kind="mergesort")[: int(top_n)]].tolist()
-        colors = sns.color_palette("tab20", n_colors=max(1, len(order)))
-        palette = {v: colors[i] for i, v in enumerate(order)}
-    else:
-        raise ValueError("color_by must be one of: none, region_group, region, subject, gene")
+        return False
 
+    ids = payload[color_key].astype(str)
+    order = list(category_order)
     base = ~np.isin(ids, order)
     ax.scatter(x[base], y[base], s=max(0.4, point_size * 0.55), alpha=alpha, color="#9a9a9a", linewidths=0, rasterized=rasterized)
-    handles = []
     for val in order:
         m = ids == val
-        c = palette[val]
+        c = category_palette[val]
         ax.scatter(x[m], y[m], s=point_size, alpha=alpha, color=c, linewidths=0, rasterized=rasterized)
-        if show_handles:
-            handles.append(Line2D([0], [0], marker="o", linestyle="none", color=c, label=format_legend_label(val), markersize=6))
-    return handles
+    return bool(base.any())
 
 
 def plot_global_prediction_scatter(
@@ -1296,6 +1592,7 @@ def plot_global_prediction_scatter(
     color_by: str = "region_group",
     top_n: int = 12,
     max_points_per_model: int | None = 100_000,
+    balanced_sampling: bool = False,
     axis_limit_quantiles: Tuple[float, float] | None = (0.05, 0.995),
     point_size: float = 1.4,
     alpha: float = 0.45,
@@ -1306,15 +1603,23 @@ def plot_global_prediction_scatter(
 ) -> Tuple[plt.Figure, np.ndarray]:
     truth_df = view["truth_df"]
     pred_dfs = view["pred_dfs"]
+    gene_list_path = eval_gene_list_path if eval_gene_list_path is not None else eval_gene_path
+    if gene_list_path is None:
+        gene_list_path = view.get("eval_gene_list_path")
     genes = _resolve_eval_view_genes(
         list(view["genes"]),
         genes=genes,
         gene_mode=gene_mode,
         custom_gene_list=custom_gene_list,
-        eval_gene_list_path=eval_gene_list_path,
-        eval_gene_path=eval_gene_path,
+        eval_gene_list_path=gene_list_path,
+        eval_gene_path=None,
     )
     models = ordered_models(view["models"])
+    missing = [model for model in models if model not in pred_dfs]
+    if missing:
+        raise KeyError(f"Missing prediction tables for models: {missing}")
+    color_key = _scatter_color_key(color_by)
+    balance_by = color_key if bool(balanced_sampling) and color_key is not None else None
     plot_payloads = {}
     n_total_by_model = {}
     for i, model in enumerate(models):
@@ -1324,26 +1629,32 @@ def plot_global_prediction_scatter(
             genes,
             max_points=max_points_per_model,
             random_seed=int(random_seed) + i,
+            balance_by=balance_by,
         )
         plot_payloads[model] = payload
         n_total_by_model[model] = n_total
 
+    color_key, category_order, category_palette = _global_scatter_color_spec(plot_payloads, color_by=color_by, top_n=top_n, genes=genes)
     lim_lo, lim_hi = _axis_identity_limits([p["x"] for p in plot_payloads.values()] + [p["y"] for p in plot_payloads.values()], quantiles=axis_limit_quantiles)
     fig, axes = plt.subplots(1, len(models), figsize=figsize, dpi=int(dpi), constrained_layout=False, squeeze=False)
     axes = axes.ravel()
-    fig.subplots_adjust(left=0.06, right=0.84, bottom=0.18, top=0.84, wspace=0.34)
+    fig.subplots_adjust(left=0.06, right=0.84, bottom=0.18, top=0.88, wspace=0.34)
+    show_other_in_legend = False
+    gene_list_label = format_gene_list_name(gene_list_path, default="All Genes" if custom_gene_list is None else "Custom Gene List")
+    n_subjects = int(truth_df["subject"].nunique()) if "subject" in truth_df.columns else 0
+    n_samples = int(len(truth_df))
+    n_genes = int(len(genes))
     for ax, model in zip(axes, models):
-        handles = _plot_categorical_scatter(
+        show_other_in_legend |= _plot_categorical_scatter(
             ax,
             plot_payloads[model],
-            color_by=color_by,
-            top_n=top_n,
+            color_key=color_key,
+            category_order=category_order,
+            category_palette=category_palette,
             point_size=point_size,
             alpha=alpha,
             rasterized=rasterized,
-            show_handles=(ax is axes[-1]),
         )
-        p = plot_payloads[model]
         ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi], color="#252525", linestyle="--", linewidth=0.9, alpha=0.8)
         ax.set_xlim(lim_lo, lim_hi)
         ax.set_ylim(lim_lo, lim_hi)
@@ -1354,27 +1665,32 @@ def plot_global_prediction_scatter(
         ax.set_yticks(ticks)
         ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
-        ax.tick_params(axis="both", which="both", bottom=True, left=True, top=False, right=False, labelbottom=True, labelleft=True, labeltop=False, labelright=False, labelsize=FONT["tick"] + 1)
+        ax.tick_params(axis="both", which="both", bottom=True, left=True, top=False, right=False, labelbottom=True, labelleft=True, labeltop=False, labelright=False, labelsize=FONT["tick"] + 2)
         ax.xaxis.set_ticks_position("bottom")
         ax.yaxis.set_ticks_position("left")
-        ax.set_title(f"{model_label(model)} vs Truth", fontsize=FONT["title"] + 2)
-        ax.set_xlabel("Held-Out Truth", fontsize=FONT["label"] + 1)
-        ax.set_ylabel("Prediction", fontsize=FONT["label"] + 1)
+        ax.set_title(f"{model_label(model)} vs Truth", fontsize=FONT["title"] + 3)
+        ax.set_xlabel("Held-Out Truth", fontsize=FONT["label"] + 2)
+        ax.set_ylabel("Prediction", fontsize=FONT["label"] + 2)
         ax.grid(True, alpha=0.16)
-        ax.text(
-            0.035,
-            0.965,
-            f"n={n_total_by_model[model]:,}\nshown={len(plot_payloads[model]['x']):,}",
-            transform=ax.transAxes,
-            ha="left",
-            va="top",
-            fontsize=FONT["small"] + 2,
-            bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.28"},
-        )
-        if handles:
-            title = "Region Group" if str(color_by).lower() == "region_group" else format_legend_label(color_by)
-            fig.legend(handles=handles, title=title, loc="center left", bbox_to_anchor=(0.855, 0.50), frameon=True, fancybox=False, edgecolor="#4a4a4a", facecolor="white", framealpha=0.96, fontsize=FONT["small"] + 1, title_fontsize=FONT["small"] + 1)
-    fig.suptitle("Global Held-Out Truth vs Prediction", fontsize=FONT["title"] + 4, y=0.98)
+        if str(model).lower() == "naive":
+            n_shown = int(len(plot_payloads[model]["x"]))
+            n_total = int(n_total_by_model[model])
+            balance_line = f"\nbalanced by {format_legend_label(balance_by)}" if balance_by is not None else ""
+            ax.text(
+                0.035,
+                0.965,
+                f"{n_subjects:,} subjects | {n_samples:,} samples\n{n_genes:,} genes ({gene_list_label})\nnum. points shown {n_shown:,} of {n_total:,}{balance_line}",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=FONT["small"] + 3,
+                bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.28"},
+            )
+    handles = _scatter_legend_handles(category_order, category_palette, show_other=show_other_in_legend, color_key=color_key)
+    if handles:
+        title = _scatter_legend_title(color_by, color_key=color_key, n_shown=len(category_order), gene_list_label=gene_list_label)
+        fig.legend(handles=handles, title=title, loc="center left", bbox_to_anchor=(0.855, 0.50), frameon=True, fancybox=False, edgecolor="#4a4a4a", facecolor="white", framealpha=0.96, fontsize=FONT["small"] + 2, title_fontsize=FONT["small"] + 2)
+    fig.suptitle("Global Held-Out Truth vs Prediction", fontsize=FONT["title"] + 5, y=0.94)
     return fig, axes
 
 
@@ -1410,10 +1726,1234 @@ def plot_metric_violins(
     return fig, ax
 
 
+_STRATIFY_TO_COLOR_BY = {
+    "sex": "sex",
+    "age": "age",
+    "gtex_region": "region",
+    "region_group": "region_group",
+}
+
+
+def _gtex_region_group_order(metric_df: pd.DataFrame, regions: Sequence[str]) -> list[str]:
+    """Order gtex_region values by region_group (cortical → subcortical → cerebellar → other),
+    breaking ties alphabetically. Falls back to plain alpha if region_group missing."""
+    regions = [str(r) for r in regions]
+    if "region_group" not in metric_df.columns:
+        return sorted(regions, key=lambda v: str(v).lower())
+    region_to_group = (
+        metric_df[["gtex_region", "region_group"]]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .groupby("gtex_region")["region_group"]
+        .agg(lambda s: s.value_counts().index[0])
+        .to_dict()
+    )
+    group_rank = {g: i for i, g in enumerate(_SCATTER_REGION_GROUP_ORDER)}
+    fallback_rank = len(_SCATTER_REGION_GROUP_ORDER)
+
+    def key(region: str) -> tuple[int, str]:
+        group = region_to_group.get(region, "other")
+        return (group_rank.get(group, fallback_rank), str(region).lower())
+
+    return sorted(regions, key=key)
+
+
+def _stratum_color_by(strat_col: str) -> str:
+    if strat_col not in _STRATIFY_TO_COLOR_BY:
+        raise ValueError(
+            f"stratify_by={strat_col!r} not supported for stratified scatter; "
+            f"supported: {sorted(_STRATIFY_TO_COLOR_BY)}"
+        )
+    return _STRATIFY_TO_COLOR_BY[strat_col]
+
+
+def _metric_short_label(metric: str) -> str:
+    return {
+        "pearson_r": "r",
+        "spearman_r": "ρ",
+        "r2": "R²",
+        "rmse": "RMSE",
+    }.get(str(metric).lower(), str(metric))
+
+
+def _format_metric_value(mean: float, std: float | None) -> str:
+    if mean is None or not np.isfinite(mean):
+        return "n/a"
+    if std is None or not np.isfinite(std):
+        return f"{mean:.3f}"
+    return f"{mean:.3f}±{std:.3f}"
+
+
+def _stratum_summary_lookup(
+    summary_df: pd.DataFrame | None,
+    model: str,
+    metric: str,
+) -> dict[str, tuple[float, float, int]]:
+    """{stratum -> (mean, std, n_units)} for a single model/metric."""
+    if summary_df is None or summary_df.empty:
+        return {}
+    d = summary_df[
+        (summary_df["model"].astype(str).str.lower() == str(model).lower())
+        & (summary_df["metric"] == metric)
+    ]
+    out: dict[str, tuple[float, float, int]] = {}
+    for _, row in d.iterrows():
+        mean = float(row["mean"]) if pd.notna(row["mean"]) else float("nan")
+        std = float(row["std"]) if pd.notna(row["std"]) else float("nan")
+        n = int(row["n_units"]) if pd.notna(row["n_units"]) else 0
+        out[str(row["stratum"])] = (mean, std, n)
+    return out
+
+
+def plot_stratified_scatter(
+    view: Mapping[str, object],
+    stratify_by: str | None = None,
+    default_metric: str = "pearson_r",
+    max_points_per_model: int | None = 100_000,
+    balanced_sampling: bool = True,
+    axis_limit_quantiles: Tuple[float, float] | None = (0.05, 0.995),
+    point_size: float = 1.4,
+    alpha: float = 0.45,
+    rasterized: bool = True,
+    random_seed: int = 0,
+    figsize: Tuple[float, float] = (17.8, 6.8),
+    dpi: int = 220,
+    top_n: int = 24,
+    metric_summary: pd.DataFrame | None = None,
+    n_jobs: int | None = None,
+) -> Tuple[plt.Figure, np.ndarray, pd.DataFrame]:
+    """Three-panel held-out scatter; per-panel legend annotated with this model's
+    metric per stratum. Sample-wise metric averaging:
+      1) filter view to stratum
+      2) per sample (subject_region_key) compute metric across genes
+      3) aggregate mean/std across samples in stratum
+    Balanced sampling affects only points shown on the scatter, never the metric.
+    """
+    truth_df = view["truth_df"]
+    pred_dfs = view["pred_dfs"]
+    genes = list(view["genes"])
+    models = ordered_models(view["models"])
+    missing = [m for m in models if m not in pred_dfs]
+    if missing:
+        raise KeyError(f"Missing prediction tables for models: {missing}")
+
+    strat_col = (
+        _normalize_stratify_by(stratify_by, truth_df.columns)
+        if stratify_by is not None
+        else None
+    )
+    color_by = _stratum_color_by(strat_col) if strat_col is not None else "none"
+    color_key = _scatter_color_key(color_by)
+    balance_by = color_key if (bool(balanced_sampling) and color_key is not None) else None
+
+    plot_payloads: Dict[str, Dict[str, np.ndarray]] = {}
+    n_total_by_model: Dict[str, int] = {}
+    for i, model in enumerate(models):
+        payload, n_total = _sample_scatter_payload_from_view(
+            truth_df,
+            pred_dfs[model],
+            genes,
+            max_points=max_points_per_model,
+            random_seed=int(random_seed) + i,
+            balance_by=balance_by,
+        )
+        plot_payloads[model] = payload
+        n_total_by_model[model] = n_total
+
+    color_key, category_order, category_palette = _global_scatter_color_spec(
+        plot_payloads, color_by=color_by, top_n=top_n, genes=None,
+    )
+
+    if metric_summary is None:
+        _, metric_summary = compute_prediction_metrics(
+            view,
+            unit="sample",
+            stratify_by=strat_col,
+            metrics=[default_metric],
+            n_jobs=n_jobs,
+        )
+
+    lim_lo, lim_hi = _axis_identity_limits(
+        [p["x"] for p in plot_payloads.values()] + [p["y"] for p in plot_payloads.values()],
+        quantiles=axis_limit_quantiles,
+    )
+    fig, axes = plt.subplots(
+        1, len(models), figsize=figsize, dpi=int(dpi),
+        constrained_layout=False, squeeze=False,
+    )
+    axes = axes.ravel()
+    fig.subplots_adjust(left=0.05, right=0.985, bottom=0.16, top=0.86, wspace=0.30)
+
+    metric_short = _metric_short_label(default_metric)
+    for ax, model in zip(axes, models):
+        show_other = _plot_categorical_scatter(
+            ax,
+            plot_payloads[model],
+            color_key=color_key,
+            category_order=category_order,
+            category_palette=category_palette,
+            point_size=point_size,
+            alpha=alpha,
+            rasterized=rasterized,
+        )
+        ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi], color="#252525", linestyle="--", linewidth=0.9, alpha=0.8)
+        ax.set_xlim(lim_lo, lim_hi)
+        ax.set_ylim(lim_lo, lim_hi)
+        ax.set_aspect("equal", adjustable="box")
+        ticks = _nice_interval_ticks(lim_lo, lim_hi, n_ticks=6)
+        ax.set_xticks(ticks)
+        ax.set_yticks(ticks)
+        ax.set_xticklabels([f"{t:g}" for t in ticks])
+        ax.set_yticklabels([f"{t:g}" for t in ticks])
+        ax.tick_params(axis="both", labelsize=FONT["tick"] + 2)
+        ax.set_title(f"{model_label(model)} vs Truth", fontsize=FONT["title"] + 2)
+        ax.set_xlabel("Held-Out Truth", fontsize=FONT["label"] + 1)
+        ax.set_ylabel("Prediction", fontsize=FONT["label"] + 1)
+        ax.grid(True, alpha=0.16)
+
+        lookup = _stratum_summary_lookup(metric_summary, model, default_metric)
+        if color_key is None:
+            mean, std, n_units = lookup.get("global", (float("nan"), float("nan"), 0))
+            ax.text(
+                0.04, 0.96,
+                f"{metric_short}={_format_metric_value(mean, std)}\nn={n_units:,} samples",
+                transform=ax.transAxes, ha="left", va="top",
+                fontsize=FONT["small"] + 3,
+                bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.28"},
+            )
+        else:
+            handles = []
+            for val in category_order:
+                base_label = _scatter_legend_label(val, color_key)
+                stat = lookup.get(str(val))
+                if stat is not None:
+                    mean, std, n_units = stat
+                    label = f"{base_label} ({metric_short}={_format_metric_value(mean, std)}, n={n_units})"
+                else:
+                    label = base_label
+                handles.append(
+                    Line2D([0], [0], marker="o", linestyle="none",
+                           color=category_palette[val], label=label, markersize=6)
+                )
+            if handles:
+                ax.legend(
+                    handles=handles,
+                    loc="upper left",
+                    frameon=True, fancybox=False,
+                    edgecolor="#4a4a4a", facecolor="white", framealpha=0.92,
+                    fontsize=FONT["small"] + 1,
+                    title=format_legend_label(strat_col),
+                    title_fontsize=FONT["small"] + 1,
+                )
+
+    title_label = format_legend_label(strat_col) if strat_col else "Global"
+    fig.suptitle(
+        f"Held-Out Truth vs Prediction — {'Stratified by ' + title_label if strat_col else 'Global'}",
+        fontsize=FONT["title"] + 4, y=0.96,
+    )
+    return fig, axes, metric_summary
+
+
+def plot_stratified_distribution(
+    metric_df: pd.DataFrame,
+    stratify_by: str | None = None,
+    metric: str = "pearson_r",
+    kind: str = "box",
+    figsize: Tuple[float, float] | None = None,
+    dpi: int = 180,
+    showfliers: bool = True,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Per-sample metric distribution per stratum category, hue=model.
+
+    `kind` is 'box' (default — heavy-tail-friendly) or 'violin'. Uses sample-wise
+    metric_df from compute_prediction_metrics(unit='sample', stratify_by=...).
+    For stratify_by=None, x=model."""
+    kind_l = str(kind).lower()
+    if kind_l not in {"box", "violin"}:
+        raise ValueError("kind must be one of: box, violin")
+
+    d = metric_df.copy()
+    d = d[d[metric].notna()].copy()
+    d["model"] = d["model"].astype(str).str.lower()
+
+    if stratify_by is None:
+        x_col = "model"
+        x_order = ordered_models(d[x_col].dropna().unique())
+        hue = None
+        hue_order = None
+    else:
+        x_col = _normalize_stratify_by(stratify_by, d.columns)
+        raw_order = d[x_col].dropna().astype(str).unique().tolist()
+        if x_col == "age":
+            x_order = sorted(raw_order, key=_age_sort_key)
+        elif x_col == "region_group":
+            x_order = [v for v in _SCATTER_REGION_GROUP_ORDER if v in raw_order] + [
+                v for v in sorted(raw_order) if v not in _SCATTER_REGION_GROUP_ORDER
+            ]
+        elif x_col == "gtex_region":
+            x_order = _gtex_region_group_order(d, raw_order)
+        else:
+            x_order = sorted(raw_order)
+        hue = "model"
+        hue_order = ordered_models(d["model"].dropna().unique())
+
+    if figsize is None:
+        figsize = (max(7.0, 1.0 * len(x_order) + 4.5), 4.8) if stratify_by is not None else (8.2, 4.8)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+    palette = MODEL_COLORS if (x_col == "model" or hue == "model") else None
+    if kind_l == "box":
+        sns.boxplot(
+            data=d, x=x_col, y=metric, hue=hue,
+            order=x_order, hue_order=hue_order,
+            palette=palette, ax=ax,
+            fliersize=2.0, linewidth=1.0, showfliers=bool(showfliers),
+            width=0.85 if hue is None else 0.78,
+        )
+    else:
+        sns.violinplot(
+            data=d, x=x_col, y=metric, hue=hue,
+            order=x_order, hue_order=hue_order,
+            cut=0, inner="quartile", palette=palette, ax=ax,
+        )
+
+    title_axis = format_legend_label(x_col) if stratify_by is not None else "Model"
+    ax.set_title(
+        f"{format_legend_label(metric)} by {title_axis} (sample-wise)",
+        fontsize=FONT["title"] + 3,
+    )
+    ax.set_xlabel(format_legend_label(x_col), fontsize=FONT["label"] + 1)
+    ax.set_ylabel(format_legend_label(metric), fontsize=FONT["label"] + 1)
+    if x_col == "gtex_region":
+        ax.set_xticklabels(
+            [format_legend_label(t.get_text()) for t in ax.get_xticklabels()],
+            ha="right", rotation=30,
+        )
+    if x_col == "model":
+        ax.set_xticklabels([model_label(t.get_text()) for t in ax.get_xticklabels()])
+    ax.grid(True, axis="y", alpha=0.18)
+    if hue is not None:
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles, [model_label(v) for v in labels], title="Model", frameon=True, fancybox=False)
+    return fig, ax
+
+
+def format_stratified_metric_table(
+    metric_df: pd.DataFrame,
+    stratify_by: str | None = None,
+    metrics: Sequence[str] = ("pearson_r", "r2", "rmse"),
+) -> pd.DataFrame:
+    """Wide table: rows=stratum, columns=MultiIndex(model, metric|n), cells='mean ± std' or n.
+    Aggregation is mean/std over per-sample metrics within each stratum."""
+    metric_names = _normalize_metric_names(metrics)
+    df = metric_df.copy()
+    df["_model"] = df["model"].astype(str).str.lower()
+    if stratify_by is None:
+        df["_strat"] = "global"
+        ordering = ["global"]
+        index_name = "stratum"
+    else:
+        strat_col = _normalize_stratify_by(stratify_by, df.columns)
+        df["_strat"] = df[strat_col].astype(str)
+        raw_order = df["_strat"].dropna().unique().tolist()
+        if strat_col == "age":
+            ordering = sorted(raw_order, key=_age_sort_key)
+        elif strat_col == "region_group":
+            ordering = [v for v in _SCATTER_REGION_GROUP_ORDER if v in raw_order] + [
+                v for v in sorted(raw_order) if v not in _SCATTER_REGION_GROUP_ORDER
+            ]
+        elif strat_col == "gtex_region":
+            ordering = _gtex_region_group_order(df, raw_order)
+        else:
+            ordering = sorted(raw_order)
+        index_name = strat_col
+
+    models_present = [m for m in MODEL_ORDER if m in df["_model"].unique().tolist()]
+    columns: list[tuple[str, str]] = []
+    for m in models_present:
+        for mn in metric_names:
+            columns.append((model_label(m), mn))
+        columns.append((model_label(m), "n"))
+    col_index = pd.MultiIndex.from_tuples(columns, names=["model", "metric"])
+
+    rows = []
+    for s in ordering:
+        row = {}
+        for m in models_present:
+            d = df[(df["_strat"] == s) & (df["_model"] == m)]
+            n = int(d["subject_region_key"].nunique()) if "subject_region_key" in d.columns and len(d) else int(len(d))
+            row[(model_label(m), "n")] = n
+            for mn in metric_names:
+                vals = pd.to_numeric(d.get(mn, pd.Series(dtype=float)), errors="coerce").dropna()
+                if len(vals) == 0:
+                    row[(model_label(m), mn)] = "n/a"
+                else:
+                    mean = float(vals.mean())
+                    std = float(vals.std(ddof=1)) if len(vals) > 1 else float("nan")
+                    row[(model_label(m), mn)] = _format_metric_value(mean, std)
+        rows.append([row[c] for c in columns])
+
+    out = pd.DataFrame(rows, index=pd.Index(ordering, name=index_name), columns=col_index)
+    return out
+
+
+def _bias_outcome_transform(metric: str, transform: str = "auto"):
+    name = transform
+    if name == "auto":
+        name = "fisher_z" if str(metric).lower() in {"pearson_r", "spearman_r"} else "identity"
+    if name == "fisher_z":
+        eps = 1e-6
+        fwd = lambda v: np.arctanh(np.clip(np.asarray(v, dtype=np.float64), -1 + eps, 1 - eps))
+        inv = lambda z: np.tanh(np.asarray(z, dtype=np.float64))
+        return fwd, inv, "fisher_z"
+    if name == "identity":
+        return (lambda v: np.asarray(v, dtype=np.float64), lambda z: np.asarray(z, dtype=np.float64), "identity")
+    raise ValueError("transform must be one of: auto, fisher_z, identity")
+
+
+def compute_stratum_bias(
+    metric_df: pd.DataFrame,
+    axis: str = "sex",
+    models: Sequence[str] | None = None,
+    metric: str = "pearson_r",
+    controls: Sequence[str] = ("age", "subject_coverage", "gtex_region"),
+    method: str = "lmm",
+    transform: str = "auto",
+    reference_category: str | None = None,
+    fdr_method: str = "fdr_bh",
+    confidence: float = 0.95,
+) -> pd.DataFrame:
+    """Per-model bias test: does the per-sample metric differ across `axis` categories
+    after controlling for confounders?
+
+    Model (per genome model in `models`):
+        outcome ~ C(axis, Treatment(ref)) + sum(C(cat_controls)) + numeric_controls
+    Subjects contribute multiple rows (≤ 13 regions/subject), so non-independence is
+    handled either by a subject random intercept (`method='lmm'`) or by cluster-robust
+    standard errors on `subject` (`method='ols_cluster'`).
+
+    The outcome is Fisher-z transformed when `metric` is a correlation, identity
+    otherwise. Reported `adj_mean`/`delta_vs_ref` are back-transformed to the original
+    metric scale; `delta_se` is on the transform scale.
+
+    Returns a tidy DataFrame, one row per (model, category), with an extra
+    `category='__omnibus__'` row per model carrying the Wald omnibus test of the axis.
+    `p_fdr` is Benjamini-Hochberg corrected across all non-reference contrast rows.
+    """
+    try:
+        import statsmodels.api as sm  # noqa: F401
+        import statsmodels.formula.api as smf  # noqa: F401
+        import patsy
+        from statsmodels.stats.multitest import multipletests
+        from scipy.stats import norm
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "compute_stratum_bias requires statsmodels and patsy. "
+            "Install via `pip install statsmodels patsy`."
+        ) from exc
+    import statsmodels.api as sm
+
+    if axis not in metric_df.columns:
+        raise KeyError(f"axis={axis!r} not in metric_df columns")
+    method_l = str(method).lower()
+    if method_l not in {"lmm", "ols_cluster"}:
+        raise ValueError("method must be one of: lmm, ols_cluster")
+
+    needed = {"subject", "model", metric, axis, *controls}
+    missing = needed - set(metric_df.columns)
+    if missing:
+        raise KeyError(f"metric_df missing columns: {sorted(missing)}")
+
+    fwd, inv, transform_name = _bias_outcome_transform(metric, transform)
+    df_all = metric_df[list(needed)].copy()
+    df_all = df_all.dropna(subset=[metric, axis, "subject", *list(controls)])
+    df_all["_y"] = fwd(df_all[metric].to_numpy(dtype=np.float64))
+    df_all["model"] = df_all["model"].astype(str).str.lower()
+    df_all[axis] = df_all[axis].astype(str).str.strip()
+
+    cat_levels_global = sorted(
+        df_all[axis].dropna().unique().tolist(),
+        key=_age_sort_key if axis == "age" else (lambda v: str(v).lower()),
+    )
+    if reference_category is None:
+        ref_global = cat_levels_global[0]
+    else:
+        ref_global = str(reference_category).strip()
+        if ref_global not in cat_levels_global:
+            raise ValueError(
+                f"reference_category={ref_global!r} not in axis levels {cat_levels_global}"
+            )
+
+    numeric_controls = [c for c in controls if c in df_all.columns and pd.api.types.is_numeric_dtype(df_all[c])]
+    cat_controls = [c for c in controls if c in df_all.columns and not pd.api.types.is_numeric_dtype(df_all[c])]
+    rhs_terms = [f"C({axis}, Treatment(reference={ref_global!r}))"]
+    rhs_terms += [f"C({c})" for c in cat_controls]
+    rhs_terms += list(numeric_controls)
+    formula = "_y ~ " + " + ".join(rhs_terms)
+
+    z_crit = float(norm.ppf(0.5 + float(confidence) / 2.0))
+    model_list = ordered_models(models if models is not None else df_all["model"].unique())
+
+    rows: list[dict] = []
+    for model in model_list:
+        d = df_all[df_all["model"] == model].copy()
+        cat_levels = [v for v in cat_levels_global if v in set(d[axis].unique())]
+        if len(cat_levels) < 2:
+            continue
+
+        try:
+            y_df, X_df = patsy.dmatrices(formula, data=d, return_type="dataframe")
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(f"patsy failed to build design for model={model}: {exc}") from exc
+        design_info = X_df.design_info
+
+        method_used = method_l
+        if method_l == "lmm":
+            try:
+                fit = sm.MixedLM(endog=y_df.values.ravel(), exog=X_df, groups=d["subject"].values).fit(
+                    reml=True, method="lbfgs",
+                )
+                beta = pd.Series(fit.fe_params, index=X_df.columns)
+                cov = pd.DataFrame(fit.cov_params().values[: len(beta), : len(beta)],
+                                    index=X_df.columns, columns=X_df.columns)
+            except Exception as exc:
+                warnings.warn(
+                    f"compute_stratum_bias: LMM fit failed for model={model!r} "
+                    f"({type(exc).__name__}: {exc}); falling back to OLS + cluster-robust SEs.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                fit = sm.OLS(y_df, X_df).fit(cov_type="cluster", cov_kwds={"groups": d["subject"].values})
+                beta = fit.params
+                cov = fit.cov_params()
+                method_used = "ols_cluster"
+        else:
+            fit = sm.OLS(y_df, X_df).fit(cov_type="cluster", cov_kwds={"groups": d["subject"].values})
+            beta = fit.params
+            cov = fit.cov_params()
+
+        x_means: dict[str, np.ndarray] = {}
+        for k in cat_levels:
+            d_k = d.copy()
+            d_k[axis] = k
+            Xk = patsy.build_design_matrices([design_info], d_k, return_type="dataframe")[0]
+            Xk = Xk.reindex(columns=X_df.columns, fill_value=0.0)
+            x_means[k] = Xk.mean(axis=0).to_numpy(dtype=np.float64)
+
+        ref_xz = float(x_means[ref_global] @ beta.to_numpy(dtype=np.float64))
+        single_contrast_stat: dict[str, float] = {}
+
+        for k in cat_levels:
+            xk = x_means[k]
+            z_hat = float(xk @ beta.to_numpy(dtype=np.float64))
+            var = float(xk @ cov.to_numpy(dtype=np.float64) @ xk)
+            se_z = float(np.sqrt(max(var, 0.0)))
+            n_k = int((d[axis] == k).sum())
+            is_ref = bool(k == ref_global)
+            row = {
+                "axis": axis,
+                "metric": metric,
+                "model": model,
+                "category": k,
+                "is_reference": is_ref,
+                "reference_category": ref_global,
+                "n": n_k,
+                "adj_mean": float(inv(z_hat)),
+                "adj_mean_ci_lo": float(inv(z_hat - z_crit * se_z)),
+                "adj_mean_ci_hi": float(inv(z_hat + z_crit * se_z)),
+                "delta_vs_ref": np.nan,
+                "delta_se": np.nan,
+                "delta_ci_lo": np.nan,
+                "delta_ci_hi": np.nan,
+                "p_raw": np.nan,
+                "transform": transform_name,
+                "method": method_used,
+            }
+            if not is_ref:
+                contrast = xk - x_means[ref_global]
+                delta_z = float(contrast @ beta.to_numpy(dtype=np.float64))
+                var_d = float(contrast @ cov.to_numpy(dtype=np.float64) @ contrast)
+                se_d = float(np.sqrt(max(var_d, 0.0)))
+                if se_d > 0 and np.isfinite(delta_z):
+                    z_stat = delta_z / se_d
+                    p = float(2.0 * (1.0 - norm.cdf(abs(z_stat))))
+                    single_contrast_stat = {"chi2": float(z_stat ** 2), "p": p}
+                else:
+                    p = float("nan")
+                row["delta_vs_ref"] = float(inv(ref_xz + delta_z) - inv(ref_xz))
+                row["delta_se"] = se_d
+                row["delta_ci_lo"] = float(inv(ref_xz + delta_z - z_crit * se_d) - inv(ref_xz))
+                row["delta_ci_hi"] = float(inv(ref_xz + delta_z + z_crit * se_d) - inv(ref_xz))
+                row["p_raw"] = p
+            rows.append(row)
+
+        axis_idx = [i for i, name in enumerate(X_df.columns) if str(name).startswith(f"C({axis}")]
+        omnibus_chi2 = float("nan")
+        omnibus_p = float("nan")
+        if axis_idx:
+            R = np.zeros((len(axis_idx), len(X_df.columns)), dtype=np.float64)
+            for i, idx in enumerate(axis_idx):
+                R[i, idx] = 1.0
+            try:
+                w = fit.wald_test(R, use_f=False)
+                omnibus_chi2 = float(np.atleast_1d(np.asarray(w.statistic)).ravel()[0])
+                omnibus_p = float(np.atleast_1d(np.asarray(w.pvalue)).ravel()[0])
+            except Exception:
+                pass
+        # df=1 fallback: wald_test sometimes returns NaN under cluster-robust covariance
+        # for a single restriction; the per-contrast Wald is the same test. Reuse it.
+        if (
+            len(axis_idx) == 1
+            and (not np.isfinite(omnibus_p) or not np.isfinite(omnibus_chi2))
+            and single_contrast_stat
+        ):
+            omnibus_chi2 = float(single_contrast_stat["chi2"])
+            omnibus_p = float(single_contrast_stat["p"])
+        rows.append({
+            "axis": axis,
+            "metric": metric,
+            "model": model,
+            "category": "__omnibus__",
+            "is_reference": False,
+            "reference_category": ref_global,
+            "n": int(len(d)),
+            "adj_mean": np.nan,
+            "adj_mean_ci_lo": np.nan,
+            "adj_mean_ci_hi": np.nan,
+            "delta_vs_ref": np.nan,
+            "delta_se": np.nan,
+            "delta_ci_lo": np.nan,
+            "delta_ci_hi": np.nan,
+            "p_raw": omnibus_p,
+            "transform": transform_name,
+            "method": method_used,
+            "omnibus_chi2": omnibus_chi2,
+            "omnibus_df": int(len(axis_idx)),
+        })
+
+    out = pd.DataFrame(rows)
+    if len(out) == 0:
+        return out
+    contrast_mask = (~out["is_reference"]) & (out["category"] != "__omnibus__") & out["p_raw"].notna()
+    out["p_fdr"] = np.nan
+    if int(contrast_mask.sum()) > 0:
+        _, p_fdr, _, _ = multipletests(
+            out.loc[contrast_mask, "p_raw"].to_numpy(dtype=np.float64),
+            method=fdr_method,
+        )
+        out.loc[contrast_mask, "p_fdr"] = p_fdr
+    return out
+
+
+def plot_stratum_bias_forest(
+    bias_df: pd.DataFrame,
+    figsize: Tuple[float, float] | None = None,
+    dpi: int = 180,
+    annotate: bool = True,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Forest plot of category contrasts (Δ vs reference) per model. One error bar per
+    (model, non-reference category); zero line marks no bias. Omnibus per-model p
+    is shown in a corner box."""
+    if bias_df is None or len(bias_df) == 0:
+        raise RuntimeError("bias_df is empty")
+    d = bias_df[(bias_df["category"] != "__omnibus__") & (~bias_df["is_reference"])].copy()
+    d = d[d["delta_vs_ref"].notna()].copy()
+    if len(d) == 0:
+        raise RuntimeError("No non-reference contrast rows to plot")
+
+    axis = str(bias_df["axis"].iloc[0]) if "axis" in bias_df.columns else "category"
+    metric = str(bias_df["metric"].iloc[0]) if "metric" in bias_df.columns else ""
+    ref = str(bias_df["reference_category"].iloc[0]) if "reference_category" in bias_df.columns else ""
+    method = str(bias_df["method"].iloc[0]) if "method" in bias_df.columns else ""
+    transform = str(bias_df["transform"].iloc[0]) if "transform" in bias_df.columns else ""
+
+    model_order = ordered_models(d["model"].unique())
+    cat_order = (
+        sorted(d["category"].unique(), key=_age_sort_key)
+        if axis == "age"
+        else sorted(d["category"].unique(), key=lambda v: str(v).lower())
+    )
+    rows: list[dict] = []
+    for m in model_order:
+        for c in cat_order:
+            sub = d[(d["model"] == m) & (d["category"] == c)]
+            if len(sub):
+                rows.append(sub.iloc[0].to_dict())
+    if not rows:
+        raise RuntimeError("No rows after model/category ordering")
+
+    if figsize is None:
+        figsize = (9.0, max(2.6, 0.55 * len(rows) + 1.4))
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+
+    y_positions = np.arange(len(rows), 0, -1, dtype=np.float64)
+    for y, row in zip(y_positions, rows):
+        c = MODEL_COLORS.get(str(row["model"]), "#777777")
+        delta = float(row["delta_vs_ref"])
+        ax.errorbar(
+            delta, y,
+            xerr=[[delta - float(row["delta_ci_lo"])], [float(row["delta_ci_hi"]) - delta]],
+            fmt="o", color=c, ecolor=c, markersize=6.5, linewidth=1.4, capsize=3.0,
+        )
+
+    ax.axvline(0.0, color="#222222", linewidth=0.9, linestyle="--")
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels([
+        f"{model_label(str(r['model']))} — {format_legend_label(str(r['category']))}"
+        for r in rows
+    ])
+    ax.set_xlabel(
+        f"Δ {format_legend_label(metric)} vs {format_legend_label(ref)} "
+        f"(adjusted, controlling confounders)",
+        fontsize=FONT["label"] + 1,
+    )
+    ax.set_title(
+        f"{format_legend_label(axis)} bias forest — {method.upper()} ({transform})",
+        fontsize=FONT["title"] + 2,
+    )
+    ax.grid(True, axis="x", alpha=0.18)
+
+    xs = (
+        [float(r["delta_ci_lo"]) for r in rows]
+        + [float(r["delta_ci_hi"]) for r in rows]
+        + [0.0]
+    )
+    xlim_lo, xlim_hi = float(min(xs)), float(max(xs))
+    span = max(xlim_hi - xlim_lo, 1e-6)
+    right_pad = 0.55 if annotate else 0.10
+    ax.set_xlim(xlim_lo - 0.10 * span, xlim_hi + right_pad * span)
+
+    if annotate:
+        for y, row in zip(y_positions, rows):
+            p_fdr = row.get("p_fdr", np.nan)
+            n = int(row.get("n", 0))
+            delta = float(row["delta_vs_ref"])
+            ci_hi = float(row["delta_ci_hi"])
+            star = ""
+            if pd.notna(p_fdr):
+                if p_fdr < 0.001:
+                    star = " ***"
+                elif p_fdr < 0.01:
+                    star = " **"
+                elif p_fdr < 0.05:
+                    star = " *"
+            label = (
+                f"  Δ={delta:+.3f} (95% CI [{float(row['delta_ci_lo']):+.3f}, {ci_hi:+.3f}]), "
+                f"p_FDR={p_fdr:.3f}, n={n}{star}"
+                if pd.notna(p_fdr)
+                else f"  Δ={delta:+.3f}, n={n}"
+            )
+            ax.text(ci_hi, y, label, va="center", ha="left",
+                    fontsize=FONT["small"], color="#333333")
+
+    omnibus = bias_df[bias_df["category"] == "__omnibus__"]
+    omnibus_lines: list[str] = []
+    if len(omnibus):
+        for m in model_order:
+            r = omnibus[omnibus["model"] == m]
+            if not len(r):
+                continue
+            p = float(r["p_raw"].iloc[0]) if pd.notna(r["p_raw"].iloc[0]) else float("nan")
+            df_o = (
+                int(r["omnibus_df"].iloc[0])
+                if "omnibus_df" in r.columns and pd.notna(r["omnibus_df"].iloc[0])
+                else 0
+            )
+            p_str = "n/a" if not np.isfinite(p) else f"{p:.3g}"
+            omnibus_lines.append(f"{model_label(m)}: omnibus χ²(df={df_o}) p={p_str}")
+
+    fig.tight_layout()
+    if omnibus_lines:
+        # Place the omnibus summary outside the data area, below the x-axis label,
+        # so it can never overlap with the per-row contrast annotations.
+        fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.26))
+        fig.text(
+            0.99, 0.02, "   |   ".join(omnibus_lines),
+            ha="right", va="bottom",
+            fontsize=FONT["small"],
+            bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.3"},
+        )
+    return fig, ax
+
+
+def _row_z_normalize(X: np.ndarray) -> np.ndarray:
+    """Z-normalize each row of X for use in vectorized Pearson via inner product.
+    Rows with zero variance or non-finite entries get filled with zeros, which
+    yields a Pearson r of 0 for those rows — defensible default when comparing
+    a constant profile against anything."""
+    X = np.asarray(X, dtype=np.float64)
+    mu = np.nanmean(X, axis=1, keepdims=True)
+    sd = np.nanstd(X, axis=1, keepdims=True, ddof=0)
+    sd_safe = np.where((sd > 0) & np.isfinite(sd), sd, 1.0)
+    Z = (X - mu) / sd_safe
+    Z = np.where(np.isfinite(Z), Z, 0.0)
+    Z = np.where(np.broadcast_to(sd > 0, Z.shape), Z, 0.0)
+    return Z
+
+
+def _hex_lighten(color, frac: float) -> tuple[float, float, float]:
+    """Blend a color toward white by `frac` (0=no change, 1=white)."""
+    import matplotlib.colors as mcolors
+    rgb = np.array(mcolors.to_rgb(color), dtype=np.float64)
+    return tuple((rgb + (1.0 - rgb) * float(frac)).tolist())
+
+
+def compute_subject_specificity(
+    view: Mapping[str, object],
+    region_col: str = "parcel_idx",
+) -> pd.DataFrame:
+    """Per-(model, subject, region) self vs other-subject prediction similarity.
+
+    For each LORO sample (subject `s`, region `p`, model `m`):
+      - `sim_self`        = Pearson r between `pred[s,p,m]` and `truth[s,p]` over genes
+      - `sim_other_mean`  = mean Pearson r between `pred[s,p,m]` and `truth[s',p]` for
+                            every other subject s' that has region p
+
+    Vectorized per region as a single (n_p × G) @ (G × n_p) matrix multiply per
+    model-region pair. Returns a tidy DataFrame, one row per (model, sample),
+    with `sim_self`, `sim_other_mean`, and `delta = sim_self - sim_other_mean`.
+    """
+    truth_df = view["truth_df"]
+    pred_dfs = view["pred_dfs"]
+    genes = list(view["genes"])
+    models = ordered_models(view["models"])
+    if region_col not in truth_df.columns:
+        raise KeyError(f"region_col={region_col!r} not in truth_df columns")
+    if "subject_region_key" not in truth_df.columns:
+        raise KeyError("truth_df must include subject_region_key")
+
+    G_total = int(len(genes))
+    if G_total == 0:
+        raise RuntimeError("view has no genes")
+
+    region_indices = truth_df.groupby(region_col, sort=False).indices
+    truth_z_per_region: dict[object, tuple[np.ndarray, np.ndarray]] = {}
+    for region, idx in region_indices.items():
+        idx_arr = np.asarray(idx, dtype=np.int64)
+        if len(idx_arr) < 2:
+            continue
+        Y = truth_df.iloc[idx_arr][genes].to_numpy(dtype=np.float64)
+        truth_z_per_region[region] = (idx_arr, _row_z_normalize(Y))
+
+    if not truth_z_per_region:
+        raise RuntimeError(f"No region in {region_col!r} has ≥ 2 subjects")
+
+    meta_cols = [
+        c for c in ("subject", "subject_region_key", region_col, "gtex_region", "region_group")
+        if c in truth_df.columns
+    ]
+
+    rows: list[pd.DataFrame] = []
+    for model in models:
+        pred_df = pred_dfs[model]
+        if not pred_df.index.equals(truth_df.index):
+            # Eval views guarantee aligned index but be defensive.
+            if len(pred_df) != len(truth_df):
+                raise ValueError(f"pred_df[{model}] not aligned to truth_df")
+        for region, (idx_arr, Y_z) in truth_z_per_region.items():
+            P = pred_df.iloc[idx_arr][genes].to_numpy(dtype=np.float64)
+            P_z = _row_z_normalize(P)
+            n = int(idx_arr.shape[0])
+            M = (P_z @ Y_z.T) / float(G_total)
+            self_sim = np.diag(M).astype(np.float64).copy()
+            row_sum = M.sum(axis=1)
+            other_mean = (row_sum - self_sim) / float(n - 1)
+
+            meta = truth_df.iloc[idx_arr][meta_cols].copy().reset_index(drop=True)
+            meta["model"] = str(model).lower()
+            meta["sim_self"] = self_sim
+            meta["sim_other_mean"] = other_mean
+            meta["delta"] = self_sim - other_mean
+            rows.append(meta)
+
+    out = pd.concat(rows, ignore_index=True)
+    return out
+
+
+def plot_subject_specificity(
+    spec_df: pd.DataFrame,
+    figsize: Tuple[float, float] = (9.0, 5.0),
+    dpi: int = 180,
+    annotate_paired_test: bool = True,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Split-violin per model: left half = sim_self, right half = sim_other_mean.
+
+    Each model column is hued by `MODEL_COLORS`; the self half uses the saturated
+    model color, the other half is blended ~55% toward white. Optional Wilcoxon
+    paired test annotation per model.
+    """
+    if spec_df is None or len(spec_df) == 0:
+        raise RuntimeError("spec_df is empty")
+
+    long = spec_df.melt(
+        id_vars=["model"],
+        value_vars=["sim_self", "sim_other_mean"],
+        var_name="condition",
+        value_name="pearson_r",
+    )
+    long["model"] = long["model"].astype(str).str.lower()
+    long["condition"] = long["condition"].map(
+        {"sim_self": "self", "sim_other_mean": "other"}
+    )
+    long = long.dropna(subset=["pearson_r"]).copy()
+
+    model_order = ordered_models(long["model"].unique())
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+    sns.violinplot(
+        data=long, x="model", y="pearson_r",
+        hue="condition", hue_order=["self", "other"],
+        split=True, order=model_order,
+        palette={"self": "#888888", "other": "#cccccc"},
+        inner="quartile", cut=0, ax=ax, linewidth=0.9,
+    )
+
+    from matplotlib.collections import PolyCollection
+    from matplotlib.patches import Patch
+
+    poly_idx = 0
+    for coll in ax.collections:
+        if not isinstance(coll, PolyCollection):
+            continue
+        if poly_idx >= 2 * len(model_order):
+            break
+        m = model_order[poly_idx // 2]
+        cond = ["self", "other"][poly_idx % 2]
+        base = MODEL_COLORS.get(m, "#777777")
+        face = base if cond == "self" else _hex_lighten(base, 0.55)
+        coll.set_facecolor(face)
+        coll.set_edgecolor(base)
+        coll.set_linewidth(0.9)
+        poly_idx += 1
+
+    handles: list = []
+    for m in model_order:
+        base = MODEL_COLORS.get(m, "#777777")
+        light = _hex_lighten(base, 0.55)
+        handles.append(Patch(facecolor=base, edgecolor=base, label=f"{model_label(m)} — Self"))
+        handles.append(Patch(facecolor=light, edgecolor=base, label=f"{model_label(m)} — Other (mean)"))
+    ax.legend(
+        handles=handles, title="Prediction → Truth",
+        frameon=True, fancybox=False, loc="lower right",
+        fontsize=FONT["small"], title_fontsize=FONT["small"] + 1,
+    )
+
+    ax.set_xticks(np.arange(len(model_order)))
+    ax.set_xticklabels([model_label(m) for m in model_order], fontsize=FONT["tick"] + 1)
+    ax.set_xlabel("Model", fontsize=FONT["label"] + 1)
+    ax.set_ylabel("Pearson r (prediction → truth, gene-wise)", fontsize=FONT["label"] + 1)
+    ax.set_title(
+        "Subject Specificity: Prediction vs Self Truth and Mean Other-Subject Truth (per region)",
+        fontsize=FONT["title"] + 2,
+    )
+    ax.grid(True, axis="y", alpha=0.18)
+
+    if bool(annotate_paired_test):
+        try:
+            from scipy.stats import wilcoxon
+        except Exception:
+            wilcoxon = None
+        if wilcoxon is not None:
+            lines = []
+            for m in model_order:
+                d = spec_df[spec_df["model"].astype(str).str.lower() == m]
+                d = d.dropna(subset=["sim_self", "sim_other_mean"])
+                if len(d) < 5:
+                    continue
+                self_v = d["sim_self"].to_numpy(dtype=np.float64)
+                other_v = d["sim_other_mean"].to_numpy(dtype=np.float64)
+                med_delta = float(np.median(self_v - other_v))
+                try:
+                    w_stat, p = wilcoxon(self_v, other_v, alternative="greater")
+                    p_val = float(p)
+                except Exception:
+                    p_val = float("nan")
+                p_str = "n/a" if not np.isfinite(p_val) else f"{p_val:.2g}"
+                lines.append(f"{model_label(m)}: median Δ={med_delta:+.3f}, Wilcoxon (self>other) p={p_str}")
+            if lines:
+                fig.tight_layout()
+                fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.22))
+                fig.text(
+                    0.99, 0.02, "   |   ".join(lines),
+                    ha="right", va="bottom",
+                    fontsize=FONT["small"],
+                    bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.3"},
+                )
+                return fig, ax
+
+    fig.tight_layout()
+    return fig, ax
+
+
+def compute_subject_fold_summary(
+    fold_perf_df: pd.DataFrame,
+    metric: str = "pearson_r",
+    models: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Per-(model, subject) summary of fold-level metric: mean, std, and fold count."""
+    needed = {"subject", "model", metric}
+    missing = needed - set(fold_perf_df.columns)
+    if missing:
+        raise KeyError(f"fold_perf_df missing columns: {sorted(missing)}")
+    cols = list(needed)
+    if "fold_key" in fold_perf_df.columns:
+        cols.append("fold_key")
+    d = fold_perf_df[cols].copy()
+    d["model"] = d["model"].astype(str).str.lower()
+    if models is not None:
+        keep = {str(m).lower() for m in models}
+        d = d[d["model"].isin(keep)]
+    summary = (
+        d.groupby(["model", "subject"], as_index=False)
+        .agg(mean=(metric, "mean"), std=(metric, "std"), n_folds=(metric, "size"))
+    )
+    return summary
+
+
+def plot_subject_mean_metric(
+    fold_perf_df: pd.DataFrame,
+    metric: str = "pearson_r",
+    models: Sequence[str] | None = None,
+    n_bottom_highlight: int | None = 5,
+    figsize: Tuple[float, float] | None = None,
+    dpi: int = 180,
+) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
+    """Ranked per-subject mean metric across all LORO folds, per model.
+
+    Subjects are ordered ascending by their across-model mean, so persistently
+    bad subjects float to the left. Optional shaded band highlights the leftmost
+    `n_bottom_highlight` subjects.
+    """
+    summary = compute_subject_fold_summary(fold_perf_df, metric=metric, models=models)
+    if summary.empty:
+        raise RuntimeError("subject summary is empty")
+
+    overall = summary.groupby("subject")["mean"].mean().sort_values(ascending=True)
+    subject_order = overall.index.tolist()
+    pos = {s: i for i, s in enumerate(subject_order)}
+    summary = summary.copy()
+    summary["_x"] = summary["subject"].map(pos)
+    model_order = ordered_models(summary["model"].unique())
+
+    if figsize is None:
+        figsize = (max(8.0, 0.16 * len(subject_order) + 4.0), 4.6)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+
+    if n_bottom_highlight and n_bottom_highlight > 0:
+        ax.axvspan(
+            -0.5, min(int(n_bottom_highlight), len(subject_order)) - 0.5,
+            color="#cc0000", alpha=0.07, zorder=0,
+        )
+
+    for m in model_order:
+        dm = summary[summary["model"] == m]
+        c = MODEL_COLORS.get(m, "#777777")
+        ax.errorbar(
+            dm["_x"], dm["mean"], yerr=dm["std"].fillna(0.0),
+            fmt="o", color=c, ecolor=c,
+            markersize=4.6, elinewidth=0.85, capsize=2.0,
+            label=model_label(m), alpha=0.85,
+        )
+
+    ax.set_xticks(np.arange(len(subject_order)))
+    ax.set_xticklabels(subject_order, rotation=80, ha="right", fontsize=FONT["tick"] - 1)
+    ax.set_xlabel("Subject (ascending mean across models)", fontsize=FONT["label"])
+    ax.set_ylabel(format_legend_label(metric), fontsize=FONT["label"] + 1)
+    ax.set_title(
+        f"Per-Subject Mean {format_legend_label(metric)} Across LORO Folds",
+        fontsize=FONT["title"] + 2,
+    )
+    ax.grid(True, axis="y", alpha=0.18)
+    ax.legend(title="Model", frameon=True, fancybox=False)
+    fig.tight_layout()
+    return fig, ax, summary
+
+
+def plot_fold_std_vs_mean(
+    combo_df: pd.DataFrame,
+    metric: str = "mean_pearson",
+    figsize: Tuple[float, float] = (8.6, 5.2),
+    dpi: int = 180,
+    bottom_quantile: float = 0.20,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Per-fold cross-subject std vs fold mean. Reads as:
+      - bottom-left (low mean, low std): structurally hard fold (everyone bad);
+      - bottom-right (high mean, low std): easy fold (everyone fine);
+      - top-left  (low mean, high std): subject-mixing failure (some subjects drag down);
+      - top-right (high mean, high std): mixed-difficulty fold.
+    Vertical dotted lines mark each model's `bottom_quantile` threshold.
+    """
+    metric_to_std = {
+        "mean_pearson": "std_pearson",
+        "mean_spearman": "std_spearman",
+        "mean_r2": "std_r2",
+        "mean_rmse": "std_rmse",
+    }
+    std_col = metric_to_std.get(str(metric))
+    if std_col is None or std_col not in combo_df.columns:
+        raise ValueError(f"combo_df missing std column for metric={metric}")
+    d = combo_df[["model", metric, std_col]].dropna().copy()
+    d["model"] = d["model"].astype(str).str.lower()
+    model_order = ordered_models(d["model"].unique())
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+    for m in model_order:
+        dm = d[d["model"] == m]
+        c = MODEL_COLORS.get(m, "#777777")
+        ax.scatter(
+            dm[metric], dm[std_col],
+            color=c, alpha=0.55, s=24, linewidths=0,
+            label=model_label(m),
+        )
+    quantiles = d.groupby("model")[metric].quantile(float(bottom_quantile))
+    for m in model_order:
+        if m in quantiles.index:
+            ax.axvline(
+                float(quantiles.loc[m]),
+                color=MODEL_COLORS.get(m, "#777777"),
+                linestyle=":", linewidth=1.0, alpha=0.55,
+            )
+
+    ax.set_xlabel(_metric_axis_label(metric), fontsize=FONT["label"] + 1)
+    ax.set_ylabel("Per-Fold Std Across Subjects", fontsize=FONT["label"] + 1)
+    ax.set_title(
+        f"Fold Difficulty Decomposition (mean vs cross-subject std; "
+        f"dashed = {int(bottom_quantile * 100)}th-pct cutoff per model)",
+        fontsize=FONT["title"] + 2,
+    )
+    ax.grid(True, alpha=0.18)
+    ax.legend(title="Model", frameon=True, fancybox=False, loc="best")
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_distance_to_train_vs_metric(
+    combo_df: pd.DataFrame,
+    metric: str = "mean_pearson",
+    distance_col: str = "dist_to_centroid_train",
+    n_bins: int = 20,
+    figsize: Tuple[float, float] = (9.4, 5.0),
+    dpi: int = 180,
+    point_alpha: float = 0.16,
+    point_size: float = 9.0,
+    show_points: bool = False,
+    error_capsize: float = 4.0,
+    error_linewidth: float = 1.6,
+    y_pad_frac: float = 0.18,
+) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
+    """Distance-to-training vs fold metric, summarized in quantile bins.
+
+    Each bin shows a per-model marker at the bin mean with a thick capped errorbar
+    (±SEM); markers are connected by a line per model. y-limits auto-zoom to the
+    data range with a small padding so model differences are legible. Raw scatter
+    is OFF by default; pass `show_points=True` for a faint overlay.
+
+    `combo_df` is the output of `compute_fold_combo_metrics_from_cache(...)` —
+    one row per (coverage, fold_key, model) carrying `dist_to_nearest_train` and
+    `dist_to_centroid_train`.
+    """
+    if metric not in {"mean_pearson", "mean_spearman", "mean_r2", "mean_rmse"}:
+        raise ValueError("metric must be one of: mean_pearson, mean_spearman, mean_r2, mean_rmse")
+    if distance_col not in {"dist_to_nearest_train", "dist_to_centroid_train"}:
+        raise ValueError("distance_col must be one of: dist_to_nearest_train, dist_to_centroid_train")
+    needed = {"model", metric, distance_col}
+    if not needed.issubset(combo_df.columns):
+        raise KeyError(f"combo_df missing columns: {sorted(needed - set(combo_df.columns))}")
+
+    d = combo_df[list(needed)].copy()
+    d["model"] = d["model"].astype(str).str.lower()
+    d = d[pd.to_numeric(d[distance_col], errors="coerce").notna() & pd.to_numeric(d[metric], errors="coerce").notna()].copy()
+    if len(d) == 0:
+        raise RuntimeError("No rows remain after dropping NaNs in distance/metric")
+
+    model_order = ordered_models(d["model"].dropna().unique())
+
+    # Quantile bins computed across all models so each bin spans the same x range.
+    x_all = d[distance_col].to_numpy(dtype=np.float64)
+    n_bins_eff = int(min(max(2, n_bins), max(2, len(np.unique(x_all)))))
+    edges = np.unique(np.quantile(x_all, np.linspace(0.0, 1.0, n_bins_eff + 1)))
+    if len(edges) < 3:
+        edges = np.linspace(x_all.min(), x_all.max(), 3)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    bin_idx = np.clip(np.digitize(x_all, edges[1:-1], right=False), 0, len(centers) - 1)
+    d["_bin"] = bin_idx
+    d["_x_center"] = centers[bin_idx]
+
+    bin_summary = (
+        d.groupby(["model", "_bin"], as_index=False)
+        .agg(
+            x_center=("_x_center", "first"),
+            mean=(metric, "mean"),
+            sem=(metric, lambda s: float(s.sem(ddof=1)) if len(s.dropna()) > 1 else float("nan")),
+            n=(metric, "size"),
+        )
+        .sort_values(["model", "_bin"])
+        .reset_index(drop=True)
+    )
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+
+    if bool(show_points):
+        for model in model_order:
+            dm = d[d["model"] == model]
+            ax.scatter(
+                dm[distance_col], dm[metric],
+                color=MODEL_COLORS.get(model, "#777777"),
+                alpha=float(point_alpha), s=float(point_size), linewidths=0,
+                zorder=2,
+            )
+
+    all_means: list[np.ndarray] = []
+    all_sems: list[np.ndarray] = []
+    for model in model_order:
+        dm = bin_summary[bin_summary["model"] == model].dropna(subset=["mean"]).copy()
+        if len(dm) == 0:
+            continue
+        c = MODEL_COLORS.get(model, "#777777")
+        x = dm["x_center"].to_numpy(dtype=np.float64)
+        means = dm["mean"].to_numpy(dtype=np.float64)
+        sem = np.where(np.isfinite(dm["sem"].to_numpy(dtype=np.float64)),
+                        dm["sem"].to_numpy(dtype=np.float64), 0.0)
+        all_means.append(means)
+        all_sems.append(sem)
+        ax.errorbar(
+            x, means, yerr=sem,
+            fmt="o-",
+            color=c, ecolor=c,
+            markersize=5.5,
+            linewidth=2.0,
+            elinewidth=float(error_linewidth),
+            capsize=float(error_capsize),
+            capthick=float(error_linewidth),
+            label=model_label(model),
+            zorder=4,
+        )
+
+    if all_means:
+        means_concat = np.concatenate(all_means)
+        sem_concat = np.concatenate(all_sems) if all_sems else np.array([0.0])
+        y_lo = float(np.nanmin(means_concat - sem_concat))
+        y_hi = float(np.nanmax(means_concat + sem_concat))
+        span = max(y_hi - y_lo, 1e-6)
+        pad = float(y_pad_frac) * span
+        ax.set_ylim(y_lo - pad, y_hi + pad)
+
+    ax.set_title(
+        f"{_metric_axis_label(metric)} vs {format_legend_label(distance_col)}",
+        fontsize=FONT["title"] + 3,
+    )
+    ax.set_xlabel(f"{format_legend_label(distance_col)} (mm, fold-level)", fontsize=FONT["label"] + 1)
+    ax.set_ylabel(_metric_axis_label(metric), fontsize=FONT["label"] + 1)
+    ax.grid(True, alpha=0.22, zorder=0)
+    ax.legend(title="Model", frameon=True, fancybox=False, loc="best")
+    fig.tight_layout()
+    return fig, ax, bin_summary
+
+
 def plot_metric_delta_violins(
     metric_df: pd.DataFrame,
-    metric: str = "pearson_r",
-    comparisons: Sequence[tuple[str, str]] = (("plam", "dlam"), ("plam", "naive"), ("dlam", "naive")),
+    metric: str = "rmse",
+    comparisons: Sequence[tuple[str, str]] = (("dlam", "naive"), ("plam", "naive"), ("plam", "dlam")),
     stratify_by: str | None = None,
     figsize: Tuple[float, float] = (9.4, 4.8),
     dpi: int = 180,
@@ -1426,13 +2966,18 @@ def plot_metric_delta_violins(
         idx_cols.append(str(stratify_by))
     wide = metric_df.pivot_table(index=idx_cols, columns="model", values=metric, aggfunc="first").reset_index()
     rows = []
+    comparison_order = []
+    comparison_palette = {}
     for a, b in comparisons:
         if a not in wide.columns or b not in wide.columns:
             continue
+        comparison = f"{model_label(a)} - {model_label(b)}"
+        comparison_order.append(comparison)
+        comparison_palette[comparison] = MODEL_COLORS.get(a, "#777777") if str(b).lower() == "naive" else "#5f5f5f"
         vals = wide[a] - wide[b]
         for i, v in vals.items():
             row = {
-                "comparison": f"{model_label(a)} - {model_label(b)}",
+                "comparison": comparison,
                 "delta": float(v) if pd.notna(v) else np.nan,
                 "metric": metric,
             }
@@ -1443,11 +2988,33 @@ def plot_metric_delta_violins(
     x = str(stratify_by) if stratify_by is not None else "comparison"
     hue = "comparison" if stratify_by is not None else None
     fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
-    sns.violinplot(data=delta_df, x=x, y="delta", hue=hue, cut=0, inner="quartile", ax=ax)
+    if stratify_by is None:
+        sns.violinplot(
+            data=delta_df,
+            x=x,
+            y="delta",
+            order=comparison_order,
+            palette=comparison_palette,
+            cut=0,
+            inner="quartile",
+            ax=ax,
+        )
+    else:
+        sns.violinplot(
+            data=delta_df,
+            x=x,
+            y="delta",
+            hue=hue,
+            hue_order=comparison_order,
+            palette=comparison_palette,
+            cut=0,
+            inner="quartile",
+            ax=ax,
+        )
     ax.axhline(0.0, color="#222222", linewidth=0.9, linestyle="--")
     ax.set_title(f"Paired Model Delta: {format_legend_label(metric)}", fontsize=FONT["title"] + 3)
     ax.set_xlabel(format_legend_label(x), fontsize=FONT["label"] + 1)
-    ax.set_ylabel(f"Delta {format_legend_label(metric)}", fontsize=FONT["label"] + 1)
+    ax.set_ylabel(f"Delta {format_legend_label(metric)} (first - second)", fontsize=FONT["label"] + 1)
     ax.grid(True, axis="y", alpha=0.18)
     if hue:
         ax.legend(title="Comparison", frameon=True, fancybox=False)

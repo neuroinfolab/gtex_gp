@@ -12,6 +12,7 @@ MODEL_ORDER = ["naive", "dlam", "plam"]
 MODEL_COLORS = {"naive": "#7f7f7f", "dlam": "#1f77b4", "plam": "#d62728"}
 MODEL_LABELS = {"naive": "Naive", "dlam": "DLAM", "plam": "PLAM"}
 FONT = {"title": 11, "label": 10, "tick": 9, "legend": 9, "small": 8}
+DISPLAY_LABEL_PREFIXES_TO_STRIP = ("Brain - ",)
 PARCEL_GROUP_ORDER = ["cortical", "basal_ganglia", "limbic_midbrain", "cerebellar", "other"]
 PARCEL_GROUP_COLORS = {
     "cortical": ["#2166ac", "#4393c3", "#92c5de"],
@@ -20,6 +21,14 @@ PARCEL_GROUP_COLORS = {
     "cerebellar": ["#1b7837", "#5aae61", "#a6dba0"],
     "other": ["#6b6b6b", "#969696", "#bdbdbd"],
 }
+
+
+def strip_display_label_prefixes(name: str) -> str:
+    s = str(name)
+    for prefix in DISPLAY_LABEL_PREFIXES_TO_STRIP:
+        if s.lower().startswith(prefix.lower()):
+            return s[len(prefix) :]
+    return s
 
 
 def set_academic_style() -> None:
@@ -38,16 +47,12 @@ def set_academic_style() -> None:
 
 
 def pretty_gtex_label(name: str) -> str:
-    s = str(name)
-    pref = "brain - "
-    if s.lower().startswith(pref):
-        return s[len(pref) :]
-    return s
+    return strip_display_label_prefixes(str(name))
 
 
 def format_legend_label(name: str) -> str:
     pieces = []
-    for piece in str(name).replace("_", " ").split(";"):
+    for piece in strip_display_label_prefixes(str(name)).replace("_", " ").split(";"):
         words = []
         for word in piece.strip().split():
             low = word.lower()
@@ -182,6 +187,7 @@ def parcel_color_map(
 
 
 __all__ = [
+    "DISPLAY_LABEL_PREFIXES_TO_STRIP",
     "FONT",
     "MODEL_COLORS",
     "MODEL_LABELS",
@@ -198,4 +204,5 @@ __all__ = [
     "parcel_label_lookup",
     "pretty_gtex_label",
     "set_academic_style",
+    "strip_display_label_prefixes",
 ]

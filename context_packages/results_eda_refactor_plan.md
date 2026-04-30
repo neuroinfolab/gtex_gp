@@ -1,6 +1,6 @@
 # eval refactor plan
 
-Date: 2026-04-29
+Date: 2026-04-30
 
 ## Current status
 
@@ -127,6 +127,7 @@ Supported subsetting axes:
 - region groups
 - sex
 - age
+- tissues / GTEx regions
 
 Supported stratification axes should be explicit columns in the eval view. Common aliases should resolve cleanly:
 
@@ -155,7 +156,11 @@ For very large scatter payloads:
 - sample points by default rather than rendering all 38M points
 - keep equal aspect
 - use quantile-based shared x/y limits
-- support coloring by region group, region, subject, or gene
+- support coloring by region group, region, subject, gene, sex, or age
+- use one global color spec and one global legend shared across all model panels
+- order model panels as `Naive`, `DLAM`, `PLAM`
+- show a compact Naive-panel overview box with subject/sample counts, gene count plus formatted gene-list label, and shown/total point counts
+- strip configured display-label prefixes such as `Brain - ` through shared style formatting
 - keep rasterization available
 
 Model plot order and labels must be `Naive`, `DLAM`, `PLAM` across all plot types.
@@ -204,6 +209,7 @@ Near-term responsibilities:
 - make gene-list subset workflows ergonomic across every population plot/metric helper
 - reduce dependence on legacy `results_eda.py` internals where practical
 - add clearer metric provenance to summaries
+- add scatter-panel metrics by reusing metric helper functionality from inside `plot_global_prediction_scatter(...)` and returning the computed metric table with the figure/axes
 - keep all heavy table construction cache-first
 
 ### `eval_single_subject.py`
@@ -252,17 +258,26 @@ Rules:
 - Added dataset demographics and global matrix/heatmap flow to `eval_data.ipynb`.
 - Added canonical wide prediction tables, cache loading, global scatters, sample-wise metrics, violins, and region-group summaries to `eval_population.ipynb`.
 - Added gene-list path subsetting for population views, scatters, and metrics.
+- Added ranked LORO fold-combo curve cells to `eval_population.ipynb`, using the refactored `plot_fold_combo_ranked_overlay(...)` and `plot_fold_combo_matched_overlay(...)` helpers.
+- Added scatter view subsetting for genes, subjects, tissues, sex, and age through `make_prediction_eval_view(...)`.
+- Added shared scatter coloring/legend behavior for region groups, regions, genes, subjects, sex, and age, including sex-specific green/orange coloring and categorical age colors sorted young-to-old.
+- Added formatted gene-list labels to scatter overview text and centralized `Brain - ` GTEx prefix cleanup in `eval_style.py`.
+- Added optional balanced scatter sampling so plotted points can be equalized by the active scatter color axis before the final max-point downsample.
 
 ### Next population pass
 
 - Ensure every population plot consumes the canonical eval view or canonical metric tables.
 - Normalize model order/labels/colors across remaining fold-combo and legacy plots.
 - Add clearer controls for scatter rendering:
-  - points vs hexbin
   - max sampled points
   - axis quantiles
   - rasterization
   - coloring axis
+- Add scatter metric overlays:
+  - compute per-model metrics against the same filtered view used by the scatter
+  - prefer internal helper reuse over passing precomputed metrics into the plotting call
+  - return the computed scatter metric table with the figure and axes
+  - keep metric computation optional/configurable so large or expensive metrics remain explicit
 - Add metric-table provenance columns for gene subset, unit, stratification, and aggregation.
 - Decide which legacy population helpers should be rewritten versus wrapped.
 
@@ -296,4 +311,5 @@ For each patch:
 - Whether to add `eval_metrics.py` if metric logic grows beyond population use.
 - Whether parquet remains the default table-cache format on the HPC filesystem or whether a fallback format should be added.
 - Whether global-flat metrics should remain exposed as a diagnostic or be hidden behind an explicit advanced option.
+- Whether scatter metrics should default to Pearson/R2/RMSE only, leaving Spearman off by default because it is ranking-heavy.
 - How much of `results_eda.py` should remain as a permanent public facade after notebooks fully migrate.
