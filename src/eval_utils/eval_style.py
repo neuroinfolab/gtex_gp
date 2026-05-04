@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import re
+from typing import Mapping
+
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_hex
 import numpy as np
@@ -11,7 +14,92 @@ import seaborn as sns
 MODEL_ORDER = ["naive", "dlam", "plam"]
 MODEL_COLORS = {"naive": "#7f7f7f", "dlam": "#1f77b4", "plam": "#d62728"}
 MODEL_LABELS = {"naive": "Naive", "dlam": "DLAM", "plam": "PLAM"}
+
+# Legacy element-keyed font map; preserved for plotters that still use the
+# `FONT["title"] + N` pattern. New code should use the token system below
+# (FONT_TOKENS, font_size, _resolve_fonts) instead.
 FONT = {"title": 11, "label": 10, "tick": 9, "legend": 9, "small": 8}
+
+# ---------------------------------------------------------------------------
+# Font-size token system
+#
+# Plotters declare a `_DEFAULT_FONT_SIZES` dict mapping element names to
+# tokens (e.g. "title": "xl"). Each plotter accepts an optional
+# `font_sizes={…}` override that merges over its defaults. Tokens are
+# resolved through `font_size()`, which accepts:
+#   - a token string ("xs", "s", "m", "l", "xl", "xxl")
+#   - a token + offset string ("m+1", "xl-2")
+#   - an absolute integer (passes through)
+# A global `set_font_scale(scale)` multiplies every resolved size, so a
+# single knob rescales every plot at once.
+#
+# Standard element keys (use these names so muscle memory transfers across
+# plotters): title, xlabel, ylabel, tick, legend, legend_title, annotation,
+# footer, cbar_label, cbar_tick.
+# ---------------------------------------------------------------------------
+
+FONT_TOKENS: dict[str, float] = {
+    "xs":  7.0,
+    "s":   9.0,
+    "m":  10.0,
+    "l":  12.0,
+    "xl": 14.0,
+    "xxl": 16.0,
+}
+
+_FONT_SCALE: float = 1.0
+_TOKEN_RE = re.compile(r"^\s*([a-zA-Z]+)\s*([+\-]\s*\d+(?:\.\d+)?)?\s*$")
+
+
+def font_size(spec: int | float | str) -> int:
+    """Resolve a font-size spec to an integer point size.
+
+    Accepts:
+      - int/float: returned as int (multiplied by the global font scale).
+      - "<token>" or "<token>±<offset>" string: resolved via FONT_TOKENS,
+        offset added before scaling.
+
+    Examples: ``font_size("m") == 10`` (at scale 1.0), ``font_size("l+2") == 14``,
+    ``font_size("xl-1") == 13``, ``font_size(13) == 13``.
+    """
+    if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+        return max(1, int(round(float(spec) * _FONT_SCALE)))
+    if not isinstance(spec, str):
+        raise TypeError(f"font_size: unsupported spec type {type(spec).__name__}")
+    m = _TOKEN_RE.match(spec)
+    if not m:
+        raise ValueError(f"font_size: cannot parse spec {spec!r} (use 'token', 'token+N', or int)")
+    token = m.group(1).lower()
+    if token not in FONT_TOKENS:
+        raise ValueError(f"font_size: unknown token {token!r} (known: {sorted(FONT_TOKENS)})")
+    base = FONT_TOKENS[token]
+    offset_txt = (m.group(2) or "").replace(" ", "")
+    offset = float(offset_txt) if offset_txt else 0.0
+    return max(1, int(round((base + offset) * _FONT_SCALE)))
+
+
+def set_font_scale(scale: float) -> None:
+    """Globally scale every token-resolved font size by `scale`.
+
+    Call from a notebook to scale every plot at once (e.g. for figure
+    presentations). Re-runs `set_academic_style()` so matplotlib's rcParam
+    defaults pick up the new sizes too.
+    """
+    global _FONT_SCALE
+    _FONT_SCALE = max(0.1, float(scale))
+    set_academic_style()
+
+
+def _resolve_fonts(
+    defaults: Mapping[str, int | float | str],
+    override: Mapping[str, int | float | str] | None = None,
+) -> dict[str, int]:
+    """Merge override over defaults and resolve every entry to an int pt size."""
+    merged: dict[str, int | float | str] = dict(defaults)
+    if override:
+        for key, value in override.items():
+            merged[key] = value
+    return {key: font_size(value) for key, value in merged.items()}
 DISPLAY_LABEL_PREFIXES_TO_STRIP = ("Brain - ",)
 PARCEL_GROUP_ORDER = ["cortical", "basal_ganglia", "limbic_midbrain", "cerebellar", "other"]
 PARCEL_GROUP_COLORS = {
@@ -31,26 +119,126 @@ def strip_display_label_prefixes(name: str) -> str:
     return s
 
 
+_TICK_RC = {
+    # whitegrid otherwise hides tick marks. Force them on globally so
+    # every plot in the workspace has axis ticks by default.
+    "xtick.bottom": True,
+    "ytick.left": True,
+    "xtick.top": False,
+    "ytick.right": False,
+    "xtick.direction": "out",
+    "ytick.direction": "out",
+    "xtick.major.size": 4.5,
+    "ytick.major.size": 4.5,
+    "xtick.minor.size": 2.5,
+    "ytick.minor.size": 2.5,
+    "xtick.major.width": 1.0,
+    "ytick.major.width": 1.0,
+    "xtick.minor.width": 0.7,
+    "ytick.minor.width": 0.7,
+    "xtick.major.pad": 3.0,
+    "ytick.major.pad": 3.0,
+    "xtick.color": "#222222",
+    "ytick.color": "#222222",
+    "axes.edgecolor": "#222222",
+    "axes.linewidth": 1.0,
+}
+
+
+# Apply at import so ticks are on even before set_academic_style() is called.
+plt.rcParams.update(_TICK_RC)
+
+
 def set_academic_style() -> None:
-    sns.set_theme(style="whitegrid", context="paper")
+    # Pass tick overrides through `sns.set_theme(rc=...)` so they are part of
+    # the resolved style and won't be clobbered by seaborn's whitegrid defaults.
+    sns.set_theme(style="whitegrid", context="paper", rc=dict(_TICK_RC))
     plt.rcParams.update(
         {
             "figure.dpi": 220,
             "savefig.dpi": 300,
             "axes.titleweight": "bold",
-            "axes.labelsize": FONT["label"],
-            "xtick.labelsize": FONT["tick"],
-            "ytick.labelsize": FONT["tick"],
-            "legend.fontsize": FONT["legend"],
+            # Token-resolved defaults; respect the global font scale.
+            "axes.titlesize": font_size("xl"),
+            "axes.labelsize": font_size("m"),
+            "xtick.labelsize": font_size("s"),
+            "ytick.labelsize": font_size("s"),
+            "legend.fontsize": font_size("s"),
+            "legend.title_fontsize": font_size("s+1"),
+            **_TICK_RC,
         }
     )
+
+
+def apply_tick_style(ax, *, label_fontsize: int | None = None) -> None:
+    """Force tick marks on a given axes regardless of upstream rcParams state.
+
+    Use this in plotters as a safety net — `set_academic_style()` should have
+    already turned ticks on globally, but this guarantees any axes built on a
+    stale style still ends up with visible ticks.
+    """
+    if ax is None:
+        return
+    ax.tick_params(
+        axis="both", which="major",
+        bottom=True, left=True, top=False, right=False,
+        labelbottom=True, labelleft=True,
+        labeltop=False, labelright=False,
+        length=_TICK_RC["xtick.major.size"],
+        width=_TICK_RC["xtick.major.width"],
+        direction=_TICK_RC["xtick.direction"],
+        color=_TICK_RC["xtick.color"],
+        labelsize=(label_fontsize if label_fontsize is not None else FONT["tick"]),
+    )
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_visible(True)
+        ax.spines[spine].set_color(_TICK_RC["axes.edgecolor"])
+        ax.spines[spine].set_linewidth(_TICK_RC["axes.linewidth"])
 
 
 def pretty_gtex_label(name: str) -> str:
     return strip_display_label_prefixes(str(name))
 
 
+# Canonical typeset forms for the four supported metrics. Use mathtext so they
+# render correctly in matplotlib titles, axis labels, and legends.
+METRIC_LABELS = {
+    "pearson_r":  r"Pearson $r$",
+    "pearson":    r"Pearson $r$",
+    "spearman_r": r"Spearman $\rho$",
+    "spearman":   r"Spearman $\rho$",
+    "r2":         r"$R^2$",
+    "rmse":       "RMSE",
+}
+
+# Same set with a `mean_` prefix, used by fold-combo summaries.
+METRIC_LABELS_MEAN = {
+    f"mean_{k}": f"Mean fold {v}"
+    for k, v in METRIC_LABELS.items()
+}
+
+
+def format_metric_label(metric: str) -> str:
+    """Return the canonical typeset label for a known metric name.
+
+    Falls back to :func:`format_legend_label` for unrecognized inputs.
+    Centralizes Pearson r, Spearman ρ, R², RMSE formatting so every plot
+    in the workspace agrees.
+    """
+    key = str(metric).lower().strip()
+    if key in METRIC_LABELS:
+        return METRIC_LABELS[key]
+    if key in METRIC_LABELS_MEAN:
+        return METRIC_LABELS_MEAN[key]
+    return format_legend_label(metric)
+
+
 def format_legend_label(name: str) -> str:
+    key = str(name).lower().strip()
+    if key in METRIC_LABELS:
+        return METRIC_LABELS[key]
+    if key in METRIC_LABELS_MEAN:
+        return METRIC_LABELS_MEAN[key]
     pieces = []
     for piece in strip_display_label_prefixes(str(name)).replace("_", " ").split(";"):
         words = []
@@ -189,9 +377,15 @@ def parcel_color_map(
 __all__ = [
     "DISPLAY_LABEL_PREFIXES_TO_STRIP",
     "FONT",
+    "FONT_TOKENS",
+    "METRIC_LABELS",
+    "METRIC_LABELS_MEAN",
     "MODEL_COLORS",
     "MODEL_LABELS",
     "MODEL_ORDER",
+    "apply_tick_style",
+    "font_size",
+    "format_metric_label",
     "model_label",
     "ordered_models",
     "PARCEL_GROUP_COLORS",
@@ -204,5 +398,6 @@ __all__ = [
     "parcel_label_lookup",
     "pretty_gtex_label",
     "set_academic_style",
+    "set_font_scale",
     "strip_display_label_prefixes",
 ]

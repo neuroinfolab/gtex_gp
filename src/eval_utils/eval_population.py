@@ -21,6 +21,7 @@ import warnings
 from typing import Dict, Mapping, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, to_rgb
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
@@ -37,7 +38,9 @@ from .eval_style import (
     MODEL_COLORS,
     MODEL_LABELS,
     MODEL_ORDER,
+    apply_tick_style,
     build_parcel_label_table,
+    font_size,
     format_legend_label,
     model_label,
     ordered_models,
@@ -47,6 +50,7 @@ from .eval_style import (
     set_academic_style,
     strip_display_label_prefixes,
 )
+from .eval_style import _resolve_fonts
 from .results_eda import (
     collect_pooled_sample_prediction_dfs_from_cache_gene_subset,
     compute_fold_combo_metrics_from_cache,
@@ -85,13 +89,9 @@ __all__ = [
     "plot_stratified_distribution",
     "format_stratified_metric_table",
     "plot_distance_to_train_vs_metric",
+    "plot_fold_std_vs_mean",
     "compute_stratum_bias",
     "plot_stratum_bias_forest",
-    "compute_subject_fold_summary",
-    "plot_subject_mean_metric",
-    "plot_fold_std_vs_mean",
-    "compute_subject_specificity",
-    "plot_subject_specificity",
     "plot_coverage_vs_accuracy",
     "plot_fold_combo_ranked",
     "plot_fold_combo_matched_overlay",
@@ -100,7 +100,6 @@ __all__ = [
     "plot_loro_subject_summary_bars",
     "prepare_pre_post_harmonization",
     "run_subject_metric_panel",
-    "select_subjects_by_metric_percentile",
     "set_academic_style",
     "summarize_heldout_region_performance",
 ]
@@ -1582,6 +1581,18 @@ def _plot_categorical_scatter(
     return bool(base.any())
 
 
+_GLOBAL_SCATTER_FONTS = {
+    "suptitle":     "xxl",
+    "title":        "xl",
+    "xlabel":       "l",
+    "ylabel":       "l",
+    "tick":         "m+1",
+    "legend":       "m",
+    "legend_title": "m",
+    "annotation":   "s+3",
+}
+
+
 def plot_global_prediction_scatter(
     view: Mapping[str, object],
     genes: Sequence[str] | None = None,
@@ -1600,7 +1611,9 @@ def plot_global_prediction_scatter(
     random_seed: int = 0,
     figsize: Tuple[float, float] = (17.8, 6.4),
     dpi: int = 220,
+    font_sizes: Mapping[str, str | int] | None = None,
 ) -> Tuple[plt.Figure, np.ndarray]:
+    fonts = _resolve_fonts(_GLOBAL_SCATTER_FONTS, font_sizes)
     truth_df = view["truth_df"]
     pred_dfs = view["pred_dfs"]
     gene_list_path = eval_gene_list_path if eval_gene_list_path is not None else eval_gene_path
@@ -1665,12 +1678,12 @@ def plot_global_prediction_scatter(
         ax.set_yticks(ticks)
         ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
-        ax.tick_params(axis="both", which="both", bottom=True, left=True, top=False, right=False, labelbottom=True, labelleft=True, labeltop=False, labelright=False, labelsize=FONT["tick"] + 2)
+        ax.tick_params(axis="both", which="both", bottom=True, left=True, top=False, right=False, labelbottom=True, labelleft=True, labeltop=False, labelright=False, labelsize=fonts["tick"])
         ax.xaxis.set_ticks_position("bottom")
         ax.yaxis.set_ticks_position("left")
-        ax.set_title(f"{model_label(model)} vs Truth", fontsize=FONT["title"] + 3)
-        ax.set_xlabel("Held-Out Truth", fontsize=FONT["label"] + 2)
-        ax.set_ylabel("Prediction", fontsize=FONT["label"] + 2)
+        ax.set_title(f"{model_label(model)} vs Truth", fontsize=fonts["title"])
+        ax.set_xlabel("Held-Out Truth", fontsize=fonts["xlabel"])
+        ax.set_ylabel("Prediction", fontsize=fonts["ylabel"])
         ax.grid(True, alpha=0.16)
         if str(model).lower() == "naive":
             n_shown = int(len(plot_payloads[model]["x"]))
@@ -1683,14 +1696,14 @@ def plot_global_prediction_scatter(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=FONT["small"] + 3,
+                fontsize=fonts["annotation"],
                 bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.28"},
             )
     handles = _scatter_legend_handles(category_order, category_palette, show_other=show_other_in_legend, color_key=color_key)
     if handles:
         title = _scatter_legend_title(color_by, color_key=color_key, n_shown=len(category_order), gene_list_label=gene_list_label)
-        fig.legend(handles=handles, title=title, loc="center left", bbox_to_anchor=(0.855, 0.50), frameon=True, fancybox=False, edgecolor="#4a4a4a", facecolor="white", framealpha=0.96, fontsize=FONT["small"] + 2, title_fontsize=FONT["small"] + 2)
-    fig.suptitle("Global Held-Out Truth vs Prediction", fontsize=FONT["title"] + 5, y=0.94)
+        fig.legend(handles=handles, title=title, loc="center left", bbox_to_anchor=(0.855, 0.50), frameon=True, fancybox=False, edgecolor="#4a4a4a", facecolor="white", framealpha=0.96, fontsize=fonts["legend"], title_fontsize=fonts["legend_title"])
+    fig.suptitle("Global Held-Out Truth vs Prediction", fontsize=fonts["suptitle"], y=0.94)
     return fig, axes
 
 
@@ -2477,354 +2490,7 @@ def plot_stratum_bias_forest(
     return fig, ax
 
 
-def _row_z_normalize(X: np.ndarray) -> np.ndarray:
-    """Z-normalize each row of X for use in vectorized Pearson via inner product.
-    Rows with zero variance or non-finite entries get filled with zeros, which
-    yields a Pearson r of 0 for those rows — defensible default when comparing
-    a constant profile against anything."""
-    X = np.asarray(X, dtype=np.float64)
-    mu = np.nanmean(X, axis=1, keepdims=True)
-    sd = np.nanstd(X, axis=1, keepdims=True, ddof=0)
-    sd_safe = np.where((sd > 0) & np.isfinite(sd), sd, 1.0)
-    Z = (X - mu) / sd_safe
-    Z = np.where(np.isfinite(Z), Z, 0.0)
-    Z = np.where(np.broadcast_to(sd > 0, Z.shape), Z, 0.0)
-    return Z
 
-
-def _hex_lighten(color, frac: float) -> tuple[float, float, float]:
-    """Blend a color toward white by `frac` (0=no change, 1=white)."""
-    import matplotlib.colors as mcolors
-    rgb = np.array(mcolors.to_rgb(color), dtype=np.float64)
-    return tuple((rgb + (1.0 - rgb) * float(frac)).tolist())
-
-
-def compute_subject_specificity(
-    view: Mapping[str, object],
-    region_col: str = "parcel_idx",
-) -> pd.DataFrame:
-    """Per-(model, subject, region) self vs other-subject prediction similarity.
-
-    For each LORO sample (subject `s`, region `p`, model `m`):
-      - `sim_self`        = Pearson r between `pred[s,p,m]` and `truth[s,p]` over genes
-      - `sim_other_mean`  = mean Pearson r between `pred[s,p,m]` and `truth[s',p]` for
-                            every other subject s' that has region p
-
-    Vectorized per region as a single (n_p × G) @ (G × n_p) matrix multiply per
-    model-region pair. Returns a tidy DataFrame, one row per (model, sample),
-    with `sim_self`, `sim_other_mean`, and `delta = sim_self - sim_other_mean`.
-    """
-    truth_df = view["truth_df"]
-    pred_dfs = view["pred_dfs"]
-    genes = list(view["genes"])
-    models = ordered_models(view["models"])
-    if region_col not in truth_df.columns:
-        raise KeyError(f"region_col={region_col!r} not in truth_df columns")
-    if "subject_region_key" not in truth_df.columns:
-        raise KeyError("truth_df must include subject_region_key")
-
-    G_total = int(len(genes))
-    if G_total == 0:
-        raise RuntimeError("view has no genes")
-
-    region_indices = truth_df.groupby(region_col, sort=False).indices
-    truth_z_per_region: dict[object, tuple[np.ndarray, np.ndarray]] = {}
-    for region, idx in region_indices.items():
-        idx_arr = np.asarray(idx, dtype=np.int64)
-        if len(idx_arr) < 2:
-            continue
-        Y = truth_df.iloc[idx_arr][genes].to_numpy(dtype=np.float64)
-        truth_z_per_region[region] = (idx_arr, _row_z_normalize(Y))
-
-    if not truth_z_per_region:
-        raise RuntimeError(f"No region in {region_col!r} has ≥ 2 subjects")
-
-    meta_cols = [
-        c for c in ("subject", "subject_region_key", region_col, "gtex_region", "region_group")
-        if c in truth_df.columns
-    ]
-
-    rows: list[pd.DataFrame] = []
-    for model in models:
-        pred_df = pred_dfs[model]
-        if not pred_df.index.equals(truth_df.index):
-            # Eval views guarantee aligned index but be defensive.
-            if len(pred_df) != len(truth_df):
-                raise ValueError(f"pred_df[{model}] not aligned to truth_df")
-        for region, (idx_arr, Y_z) in truth_z_per_region.items():
-            P = pred_df.iloc[idx_arr][genes].to_numpy(dtype=np.float64)
-            P_z = _row_z_normalize(P)
-            n = int(idx_arr.shape[0])
-            M = (P_z @ Y_z.T) / float(G_total)
-            self_sim = np.diag(M).astype(np.float64).copy()
-            row_sum = M.sum(axis=1)
-            other_mean = (row_sum - self_sim) / float(n - 1)
-
-            meta = truth_df.iloc[idx_arr][meta_cols].copy().reset_index(drop=True)
-            meta["model"] = str(model).lower()
-            meta["sim_self"] = self_sim
-            meta["sim_other_mean"] = other_mean
-            meta["delta"] = self_sim - other_mean
-            rows.append(meta)
-
-    out = pd.concat(rows, ignore_index=True)
-    return out
-
-
-def plot_subject_specificity(
-    spec_df: pd.DataFrame,
-    figsize: Tuple[float, float] = (9.0, 5.0),
-    dpi: int = 180,
-    annotate_paired_test: bool = True,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """Split-violin per model: left half = sim_self, right half = sim_other_mean.
-
-    Each model column is hued by `MODEL_COLORS`; the self half uses the saturated
-    model color, the other half is blended ~55% toward white. Optional Wilcoxon
-    paired test annotation per model.
-    """
-    if spec_df is None or len(spec_df) == 0:
-        raise RuntimeError("spec_df is empty")
-
-    long = spec_df.melt(
-        id_vars=["model"],
-        value_vars=["sim_self", "sim_other_mean"],
-        var_name="condition",
-        value_name="pearson_r",
-    )
-    long["model"] = long["model"].astype(str).str.lower()
-    long["condition"] = long["condition"].map(
-        {"sim_self": "self", "sim_other_mean": "other"}
-    )
-    long = long.dropna(subset=["pearson_r"]).copy()
-
-    model_order = ordered_models(long["model"].unique())
-    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
-    sns.violinplot(
-        data=long, x="model", y="pearson_r",
-        hue="condition", hue_order=["self", "other"],
-        split=True, order=model_order,
-        palette={"self": "#888888", "other": "#cccccc"},
-        inner="quartile", cut=0, ax=ax, linewidth=0.9,
-    )
-
-    from matplotlib.collections import PolyCollection
-    from matplotlib.patches import Patch
-
-    poly_idx = 0
-    for coll in ax.collections:
-        if not isinstance(coll, PolyCollection):
-            continue
-        if poly_idx >= 2 * len(model_order):
-            break
-        m = model_order[poly_idx // 2]
-        cond = ["self", "other"][poly_idx % 2]
-        base = MODEL_COLORS.get(m, "#777777")
-        face = base if cond == "self" else _hex_lighten(base, 0.55)
-        coll.set_facecolor(face)
-        coll.set_edgecolor(base)
-        coll.set_linewidth(0.9)
-        poly_idx += 1
-
-    handles: list = []
-    for m in model_order:
-        base = MODEL_COLORS.get(m, "#777777")
-        light = _hex_lighten(base, 0.55)
-        handles.append(Patch(facecolor=base, edgecolor=base, label=f"{model_label(m)} — Self"))
-        handles.append(Patch(facecolor=light, edgecolor=base, label=f"{model_label(m)} — Other (mean)"))
-    ax.legend(
-        handles=handles, title="Prediction → Truth",
-        frameon=True, fancybox=False, loc="lower right",
-        fontsize=FONT["small"], title_fontsize=FONT["small"] + 1,
-    )
-
-    ax.set_xticks(np.arange(len(model_order)))
-    ax.set_xticklabels([model_label(m) for m in model_order], fontsize=FONT["tick"] + 1)
-    ax.set_xlabel("Model", fontsize=FONT["label"] + 1)
-    ax.set_ylabel("Pearson r (prediction → truth, gene-wise)", fontsize=FONT["label"] + 1)
-    ax.set_title(
-        "Subject Specificity: Prediction vs Self Truth and Mean Other-Subject Truth (per region)",
-        fontsize=FONT["title"] + 2,
-    )
-    ax.grid(True, axis="y", alpha=0.18)
-
-    if bool(annotate_paired_test):
-        try:
-            from scipy.stats import wilcoxon
-        except Exception:
-            wilcoxon = None
-        if wilcoxon is not None:
-            lines = []
-            for m in model_order:
-                d = spec_df[spec_df["model"].astype(str).str.lower() == m]
-                d = d.dropna(subset=["sim_self", "sim_other_mean"])
-                if len(d) < 5:
-                    continue
-                self_v = d["sim_self"].to_numpy(dtype=np.float64)
-                other_v = d["sim_other_mean"].to_numpy(dtype=np.float64)
-                med_delta = float(np.median(self_v - other_v))
-                try:
-                    w_stat, p = wilcoxon(self_v, other_v, alternative="greater")
-                    p_val = float(p)
-                except Exception:
-                    p_val = float("nan")
-                p_str = "n/a" if not np.isfinite(p_val) else f"{p_val:.2g}"
-                lines.append(f"{model_label(m)}: median Δ={med_delta:+.3f}, Wilcoxon (self>other) p={p_str}")
-            if lines:
-                fig.tight_layout()
-                fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.22))
-                fig.text(
-                    0.99, 0.02, "   |   ".join(lines),
-                    ha="right", va="bottom",
-                    fontsize=FONT["small"],
-                    bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.3"},
-                )
-                return fig, ax
-
-    fig.tight_layout()
-    return fig, ax
-
-
-def compute_subject_fold_summary(
-    fold_perf_df: pd.DataFrame,
-    metric: str = "pearson_r",
-    models: Sequence[str] | None = None,
-) -> pd.DataFrame:
-    """Per-(model, subject) summary of fold-level metric: mean, std, and fold count."""
-    needed = {"subject", "model", metric}
-    missing = needed - set(fold_perf_df.columns)
-    if missing:
-        raise KeyError(f"fold_perf_df missing columns: {sorted(missing)}")
-    cols = list(needed)
-    if "fold_key" in fold_perf_df.columns:
-        cols.append("fold_key")
-    d = fold_perf_df[cols].copy()
-    d["model"] = d["model"].astype(str).str.lower()
-    if models is not None:
-        keep = {str(m).lower() for m in models}
-        d = d[d["model"].isin(keep)]
-    summary = (
-        d.groupby(["model", "subject"], as_index=False)
-        .agg(mean=(metric, "mean"), std=(metric, "std"), n_folds=(metric, "size"))
-    )
-    return summary
-
-
-def plot_subject_mean_metric(
-    fold_perf_df: pd.DataFrame,
-    metric: str = "pearson_r",
-    models: Sequence[str] | None = None,
-    n_bottom_highlight: int | None = 5,
-    figsize: Tuple[float, float] | None = None,
-    dpi: int = 180,
-) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
-    """Ranked per-subject mean metric across all LORO folds, per model.
-
-    Subjects are ordered ascending by their across-model mean, so persistently
-    bad subjects float to the left. Optional shaded band highlights the leftmost
-    `n_bottom_highlight` subjects.
-    """
-    summary = compute_subject_fold_summary(fold_perf_df, metric=metric, models=models)
-    if summary.empty:
-        raise RuntimeError("subject summary is empty")
-
-    overall = summary.groupby("subject")["mean"].mean().sort_values(ascending=True)
-    subject_order = overall.index.tolist()
-    pos = {s: i for i, s in enumerate(subject_order)}
-    summary = summary.copy()
-    summary["_x"] = summary["subject"].map(pos)
-    model_order = ordered_models(summary["model"].unique())
-
-    if figsize is None:
-        figsize = (max(8.0, 0.16 * len(subject_order) + 4.0), 4.6)
-    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
-
-    if n_bottom_highlight and n_bottom_highlight > 0:
-        ax.axvspan(
-            -0.5, min(int(n_bottom_highlight), len(subject_order)) - 0.5,
-            color="#cc0000", alpha=0.07, zorder=0,
-        )
-
-    for m in model_order:
-        dm = summary[summary["model"] == m]
-        c = MODEL_COLORS.get(m, "#777777")
-        ax.errorbar(
-            dm["_x"], dm["mean"], yerr=dm["std"].fillna(0.0),
-            fmt="o", color=c, ecolor=c,
-            markersize=4.6, elinewidth=0.85, capsize=2.0,
-            label=model_label(m), alpha=0.85,
-        )
-
-    ax.set_xticks(np.arange(len(subject_order)))
-    ax.set_xticklabels(subject_order, rotation=80, ha="right", fontsize=FONT["tick"] - 1)
-    ax.set_xlabel("Subject (ascending mean across models)", fontsize=FONT["label"])
-    ax.set_ylabel(format_legend_label(metric), fontsize=FONT["label"] + 1)
-    ax.set_title(
-        f"Per-Subject Mean {format_legend_label(metric)} Across LORO Folds",
-        fontsize=FONT["title"] + 2,
-    )
-    ax.grid(True, axis="y", alpha=0.18)
-    ax.legend(title="Model", frameon=True, fancybox=False)
-    fig.tight_layout()
-    return fig, ax, summary
-
-
-def plot_fold_std_vs_mean(
-    combo_df: pd.DataFrame,
-    metric: str = "mean_pearson",
-    figsize: Tuple[float, float] = (8.6, 5.2),
-    dpi: int = 180,
-    bottom_quantile: float = 0.20,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """Per-fold cross-subject std vs fold mean. Reads as:
-      - bottom-left (low mean, low std): structurally hard fold (everyone bad);
-      - bottom-right (high mean, low std): easy fold (everyone fine);
-      - top-left  (low mean, high std): subject-mixing failure (some subjects drag down);
-      - top-right (high mean, high std): mixed-difficulty fold.
-    Vertical dotted lines mark each model's `bottom_quantile` threshold.
-    """
-    metric_to_std = {
-        "mean_pearson": "std_pearson",
-        "mean_spearman": "std_spearman",
-        "mean_r2": "std_r2",
-        "mean_rmse": "std_rmse",
-    }
-    std_col = metric_to_std.get(str(metric))
-    if std_col is None or std_col not in combo_df.columns:
-        raise ValueError(f"combo_df missing std column for metric={metric}")
-    d = combo_df[["model", metric, std_col]].dropna().copy()
-    d["model"] = d["model"].astype(str).str.lower()
-    model_order = ordered_models(d["model"].unique())
-
-    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
-    for m in model_order:
-        dm = d[d["model"] == m]
-        c = MODEL_COLORS.get(m, "#777777")
-        ax.scatter(
-            dm[metric], dm[std_col],
-            color=c, alpha=0.55, s=24, linewidths=0,
-            label=model_label(m),
-        )
-    quantiles = d.groupby("model")[metric].quantile(float(bottom_quantile))
-    for m in model_order:
-        if m in quantiles.index:
-            ax.axvline(
-                float(quantiles.loc[m]),
-                color=MODEL_COLORS.get(m, "#777777"),
-                linestyle=":", linewidth=1.0, alpha=0.55,
-            )
-
-    ax.set_xlabel(_metric_axis_label(metric), fontsize=FONT["label"] + 1)
-    ax.set_ylabel("Per-Fold Std Across Subjects", fontsize=FONT["label"] + 1)
-    ax.set_title(
-        f"Fold Difficulty Decomposition (mean vs cross-subject std; "
-        f"dashed = {int(bottom_quantile * 100)}th-pct cutoff per model)",
-        fontsize=FONT["title"] + 2,
-    )
-    ax.grid(True, alpha=0.18)
-    ax.legend(title="Model", frameon=True, fancybox=False, loc="best")
-    fig.tight_layout()
-    return fig, ax
 
 
 def plot_distance_to_train_vs_metric(
@@ -3085,44 +2751,6 @@ def paired_ttests_by_subject(
     return pivot, t_results
 
 
-def select_subjects_by_metric_percentile(
-    metrics_df: pd.DataFrame,
-    model: str = "plam",
-    metric: str = "r2",
-    percentiles: Sequence[float] = (0.10, 0.50, 0.90),
-    min_coverage: int | None = None,
-    max_coverage: int | None = None,
-    require_coverage: int | None = None,
-) -> pd.DataFrame:
-    if metric not in set(metrics_df.columns):
-        raise ValueError(f"metrics_df does not include metric column: {metric}")
-    d = metrics_df[(metrics_df["model"].astype(str).str.lower() == str(model).lower()) & metrics_df[metric].notna()].copy()
-    if require_coverage is not None:
-        d = d[d["coverage"].astype(int) == int(require_coverage)].copy()
-    else:
-        if min_coverage is not None:
-            d = d[d["coverage"].astype(int) >= int(min_coverage)].copy()
-        if max_coverage is not None:
-            d = d[d["coverage"].astype(int) <= int(max_coverage)].copy()
-    if len(d) == 0:
-        raise RuntimeError("No subjects remain after percentile-selection filters")
-
-    d = d.sort_values([metric, "subject"]).reset_index(drop=True)
-    rows = []
-    for q in percentiles:
-        target = float(d[metric].quantile(float(q)))
-        i = (d[metric] - target).abs().idxmin()
-        row = d.loc[i].copy()
-        row["percentile"] = float(q)
-        row["target_value"] = target
-        rows.append(row)
-    out = pd.DataFrame(rows)
-    preferred = ["percentile", "subject", "model", "coverage", metric, "target_value", "pearson_r", "spearman_r", "r2", "rmse"]
-    cols = []
-    for c in preferred:
-        if c in out.columns and c not in cols:
-            cols.append(c)
-    return out[cols]
 
 
 def _parse_fold_key(fold_key: str) -> Tuple[int, list[int]]:
@@ -3134,15 +2762,9 @@ def _parse_fold_key(fold_key: str) -> Tuple[int, list[int]]:
 
 
 def _metric_axis_label(metric: str) -> str:
-    labels = {
-        "mean_pearson": "Mean fold Pearson r",
-        "mean_spearman": "Mean fold Spearman r",
-        "mean_r2": r"Mean fold $R^2$",
-        "mean_rmse": "Mean fold RMSE",
-    }
-    if str(metric) not in labels:
+    if str(metric) not in {"mean_pearson", "mean_spearman", "mean_r2", "mean_rmse"}:
         raise ValueError("metric must be one of: mean_pearson, mean_spearman, mean_r2, mean_rmse")
-    return labels[str(metric)]
+    return format_legend_label(metric)
 
 
 def _rank_fold_combos(d: pd.DataFrame, metric: str) -> pd.DataFrame:
@@ -3198,7 +2820,11 @@ def _draw_split_panels(
     gs,
     split_df: pd.DataFrame,
     model_list: Sequence[str],
+    title_fontsize: int | None = None,
+    body_fontsize: int | None = None,
 ) -> Dict[str, plt.Axes]:
+    title_fs = title_fontsize if title_fontsize is not None else font_size("l")
+    body_fs = body_fontsize if body_fontsize is not None else font_size("s")
     axes: Dict[str, plt.Axes] = {}
     for i, model in enumerate(model_list[:3]):
         ax = fig.add_subplot(gs[1, i])
@@ -3207,11 +2833,11 @@ def _draw_split_panels(
         model_splits = split_df[split_df["model"] == model].copy()
         color = MODEL_COLORS.get(model, "#333333")
         title = model_label(model)
-        ax.set_title(title, fontsize=FONT["title"] + 2, color=color, pad=4)
+        ax.set_title(title, fontsize=title_fs, color=color, pad=4)
         y = 0.98
         for _, row in model_splits.iterrows():
             train_text = "; ".join(str(x) for x in row["train_labels"])
-            train_wrapped = textwrap.fill(train_text, width=56)
+            train_wrapped = textwrap.fill(train_text, width=46)
             block = (
                 f"{str(row['rank_tag']).upper()}  {row['score']:.3f} | cov={int(row['coverage'])} | n={int(row['n_subjects'])}\n"
                 f"hold: {row['hold_label']}\n"
@@ -3223,7 +2849,7 @@ def _draw_split_panels(
                 block,
                 ha="left",
                 va="top",
-                fontsize=FONT["small"],
+                fontsize=body_fs,
                 color="#222222",
                 transform=ax.transAxes,
                 linespacing=1.12,
@@ -3232,37 +2858,125 @@ def _draw_split_panels(
     return axes
 
 
+_FOLD_COMBO_MARKER_BY_MODEL = {"naive": "o", "dlam": "s", "plam": "^"}
+
+_FOLD_COMBO_MATCHED_FONTS = {
+    "title":        "xl+2",
+    "xlabel":       "l+1",
+    "ylabel":       "l+1",
+    "tick":         "m+1",
+    "legend":       "m+1",
+    "split_panel_title": "l",
+    "split_panel_body":  "s",
+}
+
+
+def _per_model_dist_cmap(model: str) -> LinearSegmentedColormap:
+    """Wide light → base → dark gradient cmap per model.
+
+    Light end is heavily blended toward white (so low-distance points read
+    distinctly); dark end is pushed toward black (so high-distance points
+    read distinctly). The gradient is intentionally wider than a typical
+    "tinted" palette to make the distance axis visually obvious.
+    """
+    base = MODEL_COLORS.get(str(model).lower(), "#333333")
+    base_rgb = np.asarray(to_rgb(base), dtype=np.float64)
+    light_rgb = 1.0 - 0.30 * (1.0 - base_rgb)
+    dark_rgb = np.clip(base_rgb * 0.32, 0.0, 1.0)
+    return LinearSegmentedColormap.from_list(
+        f"{model}_dist",
+        [tuple(light_rgb.tolist()), tuple(base_rgb.tolist()), tuple(dark_rgb.tolist())],
+    )
+
+
+_FOLD_COMBO_OVERLAY_FONTS = {
+    "title":        "xxl+1",
+    "xlabel":       "l+2",
+    "ylabel":       "l+2",
+    "tick":         "m+2",
+    "legend":       "m+2",
+    "legend_title": "m+2",
+    "cbar_label":   "l",
+    "cbar_tick":    "m+1",
+    "split_panel_title": "l",
+    "split_panel_body":  "s",
+}
+
+
 def plot_fold_combo_ranked_overlay(
     combo_df: pd.DataFrame,
     prepost: Dict[str, object],
     models: Sequence[str] | None = None,
     metric: str = "mean_pearson",
     parcel_label_mode: str = "gtex",
-    figsize: Tuple[float, float] = (15.8, 8.8),
+    figsize: Tuple[float, float] = (13.4, 7.6),
     dpi: int = 180,
-    show_points: bool = False,
-    line_width: float = 2.2,
-    point_size: float = 9.0,
+    points_style: str = "line",
+    reference_model: str = "plam",
+    line_width: float = 2.4,
+    point_size: float = 18.0,
+    show_running_average: bool = False,
+    running_average_window: int = 20,
+    running_average_line_width: float = 2.6,
+    font_sizes: Mapping[str, str | int] | None = None,
 ) -> Tuple[plt.Figure, Dict[str, plt.Axes], pd.DataFrame]:
-    """Overlay per-model fold-combo rankings and summarize worst/median/best splits.
+    """Overlay per-model fold-combo rankings, with optional distance coloring.
 
-    Rankings are computed independently within each model. The x-axis is rank
-    percentile, not a shared fold-key coordinate.
+    Each model's combos are ranked independently; the x-axis is rank
+    percentile (worst → best). Worst/median/best splits per model are
+    summarized in the bottom row.
+
+    `points_style`:
+      - `"line"` (default): connected line per model, colored by `MODEL_COLORS`.
+      - `"dist_to_nearest_train"` / `"dist_to_centroid_train"`: scatter per
+        model. Each model gets its own light → base → dark gradient cmap
+        keyed to the chosen distance, with marker shape encoding the model.
+        A single colorbar is shown for `reference_model` only (other models'
+        distance ranges share the same vmin/vmax for visual comparability).
+
+    `show_running_average=True` overlays a rolling mean (window
+    `running_average_window`) per model in the model's solid base color, on
+    top of the per-point gradient. Useful in scatter mode to show the
+    underlying trend without losing the per-point distance encoding.
     """
     need = {"model", "fold_key", metric, "coverage", "n_subjects"}
     if not need.issubset(set(combo_df.columns)):
         raise ValueError(f"combo_df must include columns: {sorted(need)}")
+    style_l = str(points_style).lower()
+    if style_l not in {"line", "dist_to_nearest_train", "dist_to_centroid_train"}:
+        raise ValueError(
+            "points_style must be 'line', 'dist_to_nearest_train', or 'dist_to_centroid_train'"
+        )
+    if style_l != "line" and style_l not in combo_df.columns:
+        raise KeyError(f"combo_df is missing distance column required for points_style={style_l!r}")
+
+    fonts = _resolve_fonts(_FOLD_COMBO_OVERLAY_FONTS, font_sizes)
 
     model_list = ordered_models(models if models is not None else MODEL_ORDER)
     label_df = build_parcel_label_table(prepost, eligible_only=True)
     p2label = parcel_label_lookup(label_df, label_mode=parcel_label_mode)
 
     fig = plt.figure(figsize=figsize, dpi=int(dpi), constrained_layout=False)
-    gs = fig.add_gridspec(2, 3, height_ratios=[2.85, 1.55], hspace=0.42, wspace=0.26)
+    gs = fig.add_gridspec(2, 3, height_ratios=[2.85, 1.55], hspace=0.50, wspace=0.30)
     ax_main = fig.add_subplot(gs[0, :])
     axes: Dict[str, plt.Axes] = {"main": ax_main}
 
+    # Shared distance range so marker colors align across models.
+    dist_min = dist_max = None
+    if style_l != "line":
+        dvals_all = pd.to_numeric(combo_df[style_l], errors="coerce").to_numpy(dtype=np.float64)
+        finite = dvals_all[np.isfinite(dvals_all)]
+        if finite.size:
+            dist_min = float(np.nanmin(finite))
+            dist_max = float(np.nanmax(finite))
+        if dist_min is None or dist_max is None or dist_max <= dist_min:
+            raise RuntimeError(f"Cannot resolve a valid range for {style_l}")
+
+    reference_l = str(reference_model).lower()
+    reference_sc = None
+    legend_handles: list = []
     split_rows = []
+    ra_window = max(1, int(running_average_window))
     for model in model_list:
         d = combo_df[combo_df["model"].astype(str).str.lower() == model].copy()
         if len(d) == 0:
@@ -3270,23 +2984,55 @@ def plot_fold_combo_ranked_overlay(
         ranked = _rank_fold_combos(d, metric=metric)
         color = MODEL_COLORS.get(model, "#333333")
         label = model_label(model)
-        ax_main.plot(
-            ranked["rank_percentile"].to_numpy(dtype=np.float64),
-            ranked[metric].to_numpy(dtype=np.float64),
-            color=color,
-            linewidth=float(line_width),
-            alpha=0.96,
-            label=label,
-        )
-        if bool(show_points):
-            ax_main.scatter(
-                ranked["rank_percentile"].to_numpy(dtype=np.float64),
-                ranked[metric].to_numpy(dtype=np.float64),
+        x = ranked["rank_percentile"].to_numpy(dtype=np.float64)
+        y = ranked[metric].to_numpy(dtype=np.float64)
+
+        if style_l == "line":
+            ax_main.plot(
+                x, y,
+                color=color, linewidth=float(line_width),
+                alpha=0.96, label=label,
+            )
+        else:
+            cvals = pd.to_numeric(ranked[style_l], errors="coerce").to_numpy(dtype=np.float64)
+            marker = _FOLD_COMBO_MARKER_BY_MODEL.get(model, "o")
+            cmap = _per_model_dist_cmap(model)
+            sc = ax_main.scatter(
+                x, y,
+                c=cvals, cmap=cmap,
+                vmin=dist_min, vmax=dist_max,
                 s=float(point_size),
+                marker=marker,
+                edgecolors="none",
+                linewidths=0.0,
+                alpha=0.95,
+                label=label,
+                zorder=3,
+            )
+            if model == reference_l:
+                reference_sc = sc
+            mid_rgb = to_rgb(MODEL_COLORS.get(model, "#333333"))
+            legend_handles.append(
+                Line2D(
+                    [0], [0], marker=marker, linestyle="none",
+                    markerfacecolor=mid_rgb, markeredgecolor="none",
+                    markersize=7.5, label=label,
+                )
+            )
+
+        if bool(show_running_average):
+            y_smooth = (
+                pd.Series(y).rolling(window=ra_window, min_periods=1).mean()
+                .to_numpy(dtype=np.float64)
+            )
+            ra_label = label if style_l == "line" else f"{label} (rolling {ra_window})"
+            ax_main.plot(
+                x, y_smooth,
                 color=color,
-                alpha=0.36,
-                linewidths=0,
-                rasterized=True,
+                linewidth=float(running_average_line_width),
+                alpha=0.92 if style_l == "line" else 0.86,
+                zorder=4,
+                label=None if style_l == "line" else ra_label,
             )
 
         split_rows.extend(_fold_combo_split_rows(ranked, model=model, metric=metric, p2label=p2label, rank_kind="independent"))
@@ -3295,21 +3041,42 @@ def plot_fold_combo_ranked_overlay(
     if len(split_df) == 0:
         raise RuntimeError("No fold-combo rows found for the requested models")
 
-    ax_main.set_title(
-        f"LORO fold-combo ranking by model ({metric}; each model ranked independently)",
-        fontsize=FONT["title"] + 5,
-    )
-    ax_main.set_xlabel("Fold-combo rank percentile (worst -> best within model)", fontsize=FONT["label"] + 3)
-    ax_main.set_ylabel(_metric_axis_label(metric), fontsize=FONT["label"] + 3)
+    if style_l == "line":
+        title = f"LORO fold-combo ranking by model ({metric})"
+    else:
+        which = "nearest" if style_l == "dist_to_nearest_train" else "centroid"
+        title = f"LORO fold-combo ranking by model ({metric}; points colored by dist→{which} train)"
+    ax_main.set_title(title, fontsize=fonts["title"])
+    ax_main.set_xlabel("Fold-combo rank percentile (worst → best within model)",
+                      fontsize=fonts["xlabel"])
+    ax_main.set_ylabel(_metric_axis_label(metric), fontsize=fonts["ylabel"])
     ax_main.set_xlim(0.0, 100.0)
     ax_main.set_xticks([0, 25, 50, 75, 100])
     ax_main.grid(True, axis="both", alpha=0.18)
-    ax_main.tick_params(labelsize=FONT["tick"] + 2)
-    ax_main.legend(frameon=False, loc="best", fontsize=FONT["legend"] + 2)
+    apply_tick_style(ax_main, label_fontsize=fonts["tick"])
 
-    axes.update(_draw_split_panels(fig, gs, split_df, model_list))
+    if style_l == "line":
+        ax_main.legend(frameon=False, loc="best", fontsize=fonts["legend"])
+    else:
+        ax_main.legend(
+            handles=legend_handles, frameon=False, loc="best",
+            fontsize=fonts["legend"], title="Model",
+            title_fontsize=fonts["legend_title"],
+        )
+        if reference_sc is not None:
+            which = "nearest" if style_l == "dist_to_nearest_train" else "centroid"
+            cbar_label = f"Dist → {which} train (mm) — {model_label(reference_l)}"
+            cbar = fig.colorbar(reference_sc, ax=ax_main, shrink=0.92, pad=0.018)
+            cbar.set_label(cbar_label, fontsize=fonts["cbar_label"])
+            cbar.ax.tick_params(labelsize=fonts["cbar_tick"])
 
-    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.065, top=0.93)
+    axes.update(_draw_split_panels(
+        fig, gs, split_df, model_list,
+        title_fontsize=fonts["split_panel_title"],
+        body_fontsize=fonts["split_panel_body"],
+    ))
+
+    fig.subplots_adjust(left=0.085, right=0.97, bottom=0.07, top=0.92)
     return fig, axes, split_df
 
 
@@ -3325,11 +3092,13 @@ def plot_fold_combo_matched_overlay(
     show_points: bool = False,
     line_width: float = 2.2,
     point_size: float = 9.0,
+    font_sizes: Mapping[str, str | int] | None = None,
 ) -> Tuple[plt.Figure, Dict[str, plt.Axes], pd.DataFrame, pd.DataFrame]:
     """Overlay models on the same fold-key order, sorted by one reference model."""
     need = {"model", "fold_key", metric, "coverage", "n_subjects"}
     if not need.issubset(set(combo_df.columns)):
         raise ValueError(f"combo_df must include columns: {sorted(need)}")
+    fonts = _resolve_fonts(_FOLD_COMBO_MATCHED_FONTS, font_sizes)
 
     model_list = ordered_models(models if models is not None else MODEL_ORDER)
     ref_model = str(reference_model).lower()
@@ -3391,22 +3160,161 @@ def plot_fold_combo_matched_overlay(
 
     ax_main.set_title(
         f"LORO fold-combo ranking matched to {model_label(ref_model)} order ({metric})",
-        fontsize=FONT["title"] + 5,
+        fontsize=fonts["title"],
     )
     ax_main.set_xlabel(
         f"Fold-combo rank percentile in {model_label(ref_model)} order (worst -> best)",
-        fontsize=FONT["label"] + 3,
+        fontsize=fonts["xlabel"],
     )
-    ax_main.set_ylabel(_metric_axis_label(metric), fontsize=FONT["label"] + 3)
+    ax_main.set_ylabel(_metric_axis_label(metric), fontsize=fonts["ylabel"])
     ax_main.set_xlim(0.0, 100.0)
     ax_main.set_xticks([0, 25, 50, 75, 100])
     ax_main.grid(True, axis="both", alpha=0.18)
-    ax_main.tick_params(labelsize=FONT["tick"] + 2)
-    ax_main.legend(frameon=False, loc="best", fontsize=FONT["legend"] + 2)
-    axes.update(_draw_split_panels(fig, gs, split_df, model_list))
+    apply_tick_style(ax_main, label_fontsize=fonts["tick"])
+    ax_main.legend(frameon=False, loc="best", fontsize=fonts["legend"])
+    axes.update(_draw_split_panels(
+        fig, gs, split_df, model_list,
+        title_fontsize=fonts["split_panel_title"],
+        body_fontsize=fonts["split_panel_body"],
+    ))
     fig.subplots_adjust(left=0.07, right=0.985, bottom=0.065, top=0.93)
     matched_df = pd.concat(matched_rows, ignore_index=True) if matched_rows else pd.DataFrame()
     return fig, axes, split_df, matched_df
+
+
+_FOLD_STD_FONTS = {
+    "title":      "xl",
+    "xlabel":     "m+1",
+    "ylabel":     "m+1",
+    "tick":       "s",
+    "legend":     "s+2",
+    "legend_title": "s+3",
+    "annotation": "s+1",
+    "footer":     "s+1",
+}
+
+
+def plot_fold_std_vs_mean(
+    combo_df: pd.DataFrame,
+    metric: str = "mean_pearson",
+    figsize: Tuple[float, float] = (9.0, 5.4),
+    dpi: int = 180,
+    min_subjects: int = 5,
+    font_sizes: Mapping[str, str | int] | None = None,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Per-fold cross-subject std vs fold mean.
+
+    Reads as:
+      - bottom-left  (low mean, low std):  hard fold (everyone bad);
+      - bottom-right (high mean, low std): easy fold (everyone fine);
+      - top-left     (low mean, high std): subject-mixing failure;
+      - top-right    (high mean, high std): mixed-difficulty fold.
+
+    Fold-combos with fewer than `min_subjects` (default 5) are dropped —
+    a per-fold std from n<5 is dominated by sampling noise of the std itself.
+    Marker area scales linearly with `n_subjects` so within the kept set the
+    visual weight reflects how much evidence each std rests on.
+
+    `font_sizes` overrides any of the keys in ``_FOLD_STD_FONTS``
+    (`title`, `xlabel`, `ylabel`, `tick`, `legend`, `legend_title`,
+    `annotation`, `footer`); each value is a token string (`"l"`, `"m+1"`)
+    or absolute int.
+    """
+    fonts = _resolve_fonts(_FOLD_STD_FONTS, font_sizes)
+    metric_to_std = {
+        "mean_pearson": "std_pearson",
+        "mean_spearman": "std_spearman",
+        "mean_r2": "std_r2",
+        "mean_rmse": "std_rmse",
+    }
+    std_col = metric_to_std.get(str(metric))
+    if std_col is None or std_col not in combo_df.columns:
+        raise ValueError(f"combo_df missing std column for metric={metric}")
+    if "n_subjects" not in combo_df.columns:
+        raise KeyError("combo_df must include 'n_subjects'")
+    cols = ["model", metric, std_col, "n_subjects"]
+    raw = combo_df[cols].copy()
+    raw["model"] = raw["model"].astype(str).str.lower()
+    n_total = len(raw)
+    d = raw.dropna(subset=[metric, std_col]).copy()
+    n_after_dropna = len(d)
+    d = d[d["n_subjects"].astype(int) >= int(min_subjects)].copy()
+    n_kept = len(d)
+    if n_kept == 0:
+        raise RuntimeError(f"No fold-combos remain with n_subjects ≥ {min_subjects}")
+
+    plot_models = ordered_models(d["model"].unique())
+
+    n_arr = d["n_subjects"].astype(int).to_numpy()
+    n_min = int(n_arr.min())
+    n_max = int(n_arr.max())
+    s_floor, s_ceiling = 18.0, 110.0
+    if n_max > n_min:
+        size_arr = s_floor + (n_arr - n_min) / (n_max - n_min) * (s_ceiling - s_floor)
+    else:
+        size_arr = np.full_like(n_arr, fill_value=(s_floor + s_ceiling) / 2.0, dtype=np.float64)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+    for m in plot_models:
+        mask = (d["model"] == m).to_numpy()
+        if not mask.any():
+            continue
+        c = MODEL_COLORS.get(m, "#777777")
+        ax.scatter(
+            d.loc[mask, metric], d.loc[mask, std_col],
+            color=c, alpha=0.55, s=size_arr[mask], linewidths=0,
+            label=model_label(m),
+        )
+    ax.set_xlabel(_metric_axis_label(metric), fontsize=fonts["xlabel"])
+    ax.set_ylabel("Per-Fold Std Across Subjects", fontsize=fonts["ylabel"])
+    ax.set_title(
+        "Fold-Difficulty Decomposition (Cross-Subject Mean vs Std. Dev.)",
+        fontsize=fonts["title"],
+    )
+    ax.grid(True, alpha=0.18)
+    apply_tick_style(ax, label_fontsize=fonts["tick"])
+
+    n_median = int(np.median(n_arr))
+    if n_max > n_min:
+        s_median = s_floor + (n_median - n_min) / (n_max - n_min) * (s_ceiling - s_floor)
+    else:
+        s_median = (s_floor + s_ceiling) / 2.0
+    legend_marker_size = float(np.sqrt(s_median))
+    handles = [
+        Line2D([0], [0], marker="o", linestyle="none",
+               markerfacecolor=MODEL_COLORS.get(m, "#777777"),
+               markeredgecolor="none",
+               markersize=legend_marker_size,
+               label=model_label(m))
+        for m in plot_models
+    ]
+    ax.legend(
+        handles=handles, title="Model",
+        frameon=True, fancybox=False, loc="upper left",
+        fontsize=fonts["legend"], title_fontsize=fonts["legend_title"],
+        labelspacing=0.45, borderpad=0.55, handletextpad=0.7,
+    )
+    ax.text(
+        0.985, 0.975,
+        f"marker size ∝ subjects per fold (median n={n_median})",
+        transform=ax.transAxes, ha="right", va="top",
+        fontsize=fonts["annotation"],
+        color="#444444",
+    )
+
+    n_dropped_singletons = n_after_dropna - n_kept
+    n_dropped_nan = n_total - n_after_dropna
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.16))
+    fig.text(
+        0.99, 0.015,
+        f"showing {n_kept} of {n_total} fold-combos  |  excluded: "
+        f"{n_dropped_nan} single-subject (no std), {n_dropped_singletons} with n<{min_subjects}",
+        ha="right", va="bottom",
+        fontsize=fonts["footer"],
+        color="#444444",
+    )
+    return fig, ax
 
 
 def plot_loro_subject_summary_bars(

@@ -1,0 +1,83 @@
+BA,id,hemisphere,structure
+BA1: Primary somatosensory cortex,1,L,cortex
+BA4: Primary motor cortex,4,L,cortex
+BA5: Somatosensory association cortex,5,L,cortex
+BA6: Premotor cortex and supplementary motor cortex,6,L,cortex
+BA7: Somatosensory association cortex,7,L,cortex
+BA8: Includes frontal eye fields,8,L,cortex
+BA9: Dorsolateral prefrontal cortex,9,L,cortex
+BA10: Anterior prefrontal cortex,10,L,cortex
+BA11: Orbitofrontal area,11,L,cortex
+BA13: Insular cortex,13,L,cortex
+BA17: Primary visual cortex,17,L,cortex
+BA18: Secondary visual cortex,18,L,cortex
+BA19: Associative visual cortex,19,L,cortex
+BA20: Inferior temporal gyrus,20,L,cortex
+BA21: Middle temporal gyrus,21,L,cortex
+BA22: Superior temporal gyrus,22,L,cortex
+BA23: Ventral posterior cingulate cortex,23,L,cortex
+BA24: Ventral anterior cingulate cortex,24,L,cortex
+BA25: Subgenual area,25,L,cortex
+BA30: Part of the cingulate cortex,30,L,cortex
+BA31: Dorsal posterior cingulate cortex,31,L,cortex
+BA32: Dorsal anterior cingulate cortex,32,L,cortex
+BA34: Dorsal entorhinal cortex,34,L,cortex
+BA36: Ectorhinal area,36,L,cortex
+BA37: Fusiform gyrus,37,L,cortex
+BA38: Temporopolar area,38,L,cortex
+BA39: Angular gyrus,39,L,cortex
+BA40: Supramarginal gyrus,40,L,cortex
+BA41: Primary auditory cortex,41,L,cortex
+BA44: Pars opercularis (part of Broca's area),44,L,cortex
+BA45: Pars triangularis (part of Broca's area),45,L,cortex
+BA46: Dorsolateral prefrontal cortex,46,L,cortex
+BA47: Pars orbitalis (part of the inferior frontal gyrus),47,L,cortex
+BA48: Retrosubicular area,48,L,cortex
+,49,L,cortex
+,50,L,cortex
+,51,L,cortex
+BA52: Parainsular area,52,L,cortex
+,53,L,cortex
+,54,L,cortex
+,55,L,cortex
+BA101: Primary somatosensory cortex,101,R,cortex
+BA104: Primary motor cortex,104,R,cortex
+BA105: Somatosensory association cortex,105,R,cortex
+BA106: Premotor cortex and supplementary motor cortex,106,R,cortex
+BA107: Somatosensory association cortex,107,R,cortex
+BA108: Includes frontal eye fields,108,R,cortex
+BA109: Dorsolateral prefrontal cortex,109,R,cortex
+BA110: Anterior prefrontal cortex,110,R,cortex
+BA111: Orbitofrontal area,111,R,cortex
+BA113: Insular cortex,113,R,cortex
+BA117: Primary visual cortex,117,R,cortex
+BA118: Secondary visual cortex,118,R,cortex
+BA119: Associative visual cortex,119,R,cortex
+BA120: Inferior temporal gyrus,120,R,cortex
+BA121: Middle temporal gyrus,121,R,cortex
+BA122: Superior temporal gyrus,122,R,cortex
+BA123: Ventral posterior cingulate cortex,123,R,cortex
+BA124: Ventral anterior cingulate cortex,124,R,cortex
+BA125: Subgenual area,125,R,cortex
+BA130: Part of the cingulate cortex,130,R,cortex
+BA131: Dorsal posterior cingulate cortex,131,R,cortex
+BA132: Dorsal anterior cingulate cortex,132,R,cortex
+BA134: Dorsal entorhinal cortex,134,R,cortex
+BA136: Ectorhinal area,136,R,cortex
+BA137: Fusiform gyrus,137,R,cortex
+BA138: Temporopolar area,138,R,cortex
+BA139: Angular gyrus,139,R,cortex
+BA140: Supramarginal gyrus,140,R,cortex
+BA141: Primary auditory cortex,141,R,cortex
+BA144: Pars opercularis (part of Broca's area),144,R,cortex
+BA145: Pars triangularis (part of Broca's area),145,R,cortex
+BA146: Dorsolateral prefrontal cortex,146,R,cortex
+BA147: Pars orbitalis (part of the inferior frontal gyrus),147,R,cortex
+BA148: Retrosubicular area,148,R,cortex
+,149,R,cortex
+,150,R,cortex
+,151,R,cortex
+BA152: Parainsular area,152,R,cortex
+,153,R,cortex
+,154,R,cortex
+,155,R,cortex
