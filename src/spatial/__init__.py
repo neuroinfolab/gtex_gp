@@ -1,1 +1,1 @@
-"""Spatial interpolation models."""
+"""Spatial interpolation and parcel matching helpers."""

@@ -48,7 +48,7 @@ FONT = {"title": 11, "label": 10, "tick": 9, "legend": 9, "small": 8}
 @dataclass
 class EDAConfig:
     csv_path: str = "data/raw/gxp_samples.csv"
-    hvg_path: str = "out/raw/gene_lists/ahba_100hvg.txt"
+    hvg_path: str = "data/metadata/gene_lists/ahba_100hvg.txt"
     cache_root: str = "out/loro_subject_cache"
     naive_cache_dirname: str = "naive"
     dlam_cache_dirname: str = "dlam"
@@ -58,6 +58,11 @@ class EDAConfig:
     combat_use_covariates: bool = True
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
+    # GTEx<->AHBA parcel matching policy used when the LORO cache was built.
+    # None → auto-detect from the cache subject JSONs (falls back to
+    # 'centroids' for legacy caches that do not record the field). Set
+    # explicitly to override.
+    matching_policy: str | None = None
 
 
 def set_academic_style() -> None:
@@ -93,13 +98,17 @@ def _resolve_eval_gene_path(path_str: str) -> Path:
         candidates.append((REPO_ROOT / p).resolve())
         candidates.append((REPO_ROOT.parent / "out" / "raw" / "gene_lists" / p).resolve())
         candidates.append((REPO_ROOT / "out" / "raw" / "gene_lists" / p).resolve())
+        candidates.append((REPO_ROOT / "data" / "metadata" / "gene_lists" / p).resolve())
         candidates.append((REPO_ROOT / "data" / "raw" / "gene_lists" / p).resolve())
+        candidates.append((REPO_ROOT / "data" / "metadata" / p).resolve())
         candidates.append((REPO_ROOT / "data" / "raw" / p).resolve())
         if p.suffix == "":
             candidates.append((REPO_ROOT / f"{raw}.txt").resolve())
             candidates.append((REPO_ROOT.parent / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve())
             candidates.append((REPO_ROOT / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve())
+            candidates.append((REPO_ROOT / "data" / "metadata" / "gene_lists" / f"{raw}.txt").resolve())
             candidates.append((REPO_ROOT / "data" / "raw" / "gene_lists" / f"{raw}.txt").resolve())
+            candidates.append((REPO_ROOT / "data" / "metadata" / f"{raw}.txt").resolve())
             candidates.append((REPO_ROOT / "data" / "raw" / f"{raw}.txt").resolve())
     for c in candidates:
         if c.exists():
@@ -120,7 +129,9 @@ def _resolve_hvg_path(path_str: str) -> Path:
         [
             (REPO_ROOT.parent / "out" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
             (REPO_ROOT / "out" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
+            (REPO_ROOT / "data" / "metadata" / "gene_lists" / "ahba_100hvg.txt").resolve(),
             (REPO_ROOT / "data" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
+            (REPO_ROOT / "data" / "metadata" / "ahba_100hvg.txt").resolve(),
             (REPO_ROOT / "data" / "raw" / "ahba_100hvg.txt").resolve(),
             (REPO_ROOT / "ahba_100hvg.txt").resolve(),
         ]
@@ -207,6 +218,39 @@ def _cache_model_dirname(cfg: EDAConfig, model: str) -> str:
 
 def _model_cache_root(cfg: EDAConfig, model: str) -> Path:
     return (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower() / _cache_model_dirname(cfg, model)).resolve()
+
+
+def resolve_matching_policy(cfg: EDAConfig) -> str:
+    """Return the GTEx<->AHBA matching policy that built the LORO cache.
+
+    Priority:
+      1. explicit `cfg.matching_policy` if set;
+      2. `matching_policy` field read from any subject JSON under
+         `cfg.cache_root/<gene_scope>/<model>/`. The policy is per-cache,
+         so any one subject's record is authoritative;
+      3. fallback to `'centroids'` (legacy caches predate the field).
+    """
+    explicit = getattr(cfg, "matching_policy", None)
+    if explicit:
+        return str(explicit).lower()
+    scope_root = (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower()).resolve()
+    if scope_root.exists():
+        for model_attr in ("naive_cache_dirname", "dlam_cache_dirname", "plam_cache_dirname"):
+            sub = scope_root / str(getattr(cfg, model_attr, "")) if getattr(cfg, model_attr, None) else None
+            if sub is None or not sub.exists():
+                continue
+            for json_path in sorted(sub.glob("*.json")):
+                try:
+                    with json_path.open("r") as fh:
+                        meta = json.load(fh)
+                except Exception:
+                    continue
+                pol = meta.get("matching_policy") or meta.get("config", {}).get("matching_policy")
+                if pol:
+                    return str(pol).lower()
+                break  # first json had no field; assume legacy
+            break
+    return "centroids"
 
 
 def _cache_pred_truth_arrays(z: np.lib.npyio.NpzFile) -> Tuple[np.ndarray, np.ndarray]:
@@ -735,11 +779,27 @@ def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
     lk = dict(zip(target["tissue_or_parcel"], target["parcel_idx"]))
     ahba_raw["parcel_idx"] = ahba_raw["tissue_or_parcel"].map(lk).astype(np.int32)
     gtex_raw = map_gtex_to_target(gtex_raw, target)
+    # Eligibility is computed on the centroid-mapped parcel_idx, *before* any
+    # policy override. This keeps eligibility a property of the underlying
+    # data (how many distinct anatomical regions a subject contributed),
+    # not an artefact of how we bucket cortical/cerebellar samples
+    # downstream — see eval_population_copy debugging notes 2026-05-07.
     target_meta = add_target_meta(target)
-    ahba_raw = add_sample_groups(ahba_raw, target_meta)
-    gtex_raw = add_sample_groups(gtex_raw, target_meta)
     elig = build_subject_eligibility(gtex_raw, min_observed_parcels=int(cfg.min_observed_parcels))
     subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
+    # Now apply the matching policy used by the LORO cache so prediction
+    # parcel_idx values agree at merge time. Auto-detected from the cache;
+    # defaults to 'centroids' for legacy caches.
+    policy = resolve_matching_policy(cfg)
+    if policy != "centroids":
+        from src.spatial.parcel_matching import apply_gtex_ahba_matching_policy
+        gtex_raw = apply_gtex_ahba_matching_policy(
+            gtex_raw,
+            target,
+            matching_policy=policy,
+        )
+    ahba_raw = add_sample_groups(ahba_raw, target_meta)
+    gtex_raw = add_sample_groups(gtex_raw, target_meta)
     return {
         "genes_all": header["genes_all"],
         "genes_hvg": header["genes_hvg"],

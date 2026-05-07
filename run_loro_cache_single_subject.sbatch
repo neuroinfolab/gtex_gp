@@ -15,24 +15,31 @@ REPO_ROOT="${REPO_ROOT:-/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp}"
 SUBJECT_ID="${SUBJECT_ID:-GTEX-14ASI}"
 MODEL_NAME="${MODEL_NAME:-all}"
 GENE_SCOPE="${GENE_SCOPE:-hvg}"
+HVG_PATH="${HVG_PATH:-data/raw/gene_lists/ahba_100hvg.txt}"
 USE_CACHE="${USE_CACHE:-true}"
-OUT_ROOT="${OUT_ROOT:-out/loro_subject_cache}"
+OUT_ROOT="${OUT_ROOT:-out/loro_subject_cache_smoke}"
 LATENT_DIM="${LATENT_DIM:-3}"
 DYNAMIC_RANK="${DYNAMIC_RANK:-false}"
 PLAM_MAX_RANK="${PLAM_MAX_RANK:-10}"
 ATLAS_AGG="${ATLAS_AGG:-mean}"
 GTEX_REP_MODE="${GTEX_REP_MODE:-centroid}"
 GTEX_HEMI_MODE="${GTEX_HEMI_MODE:-mirror_left}"
+# Parcel assignment policy:
+# - centroids: keep nearest-centroid coordinate matching for all GTEx regions.
+# - centroids_and_volumes: start from centroids, then derive cortical BA9/BA24/BA110
+#   matches from BA-to-Schaefer voxel overlap and map cerebellar samples to Cerebellar_Region7.
+MATCHING_POLICY="${MATCHING_POLICY:-centroids}"
 
 cd "${REPO_ROOT}"
 mkdir -p out/slurm
 
-echo "[single-subject] repo=${REPO_ROOT} subject=${SUBJECT_ID} model=${MODEL_NAME} scope=${GENE_SCOPE}"
+echo "[single-subject] repo=${REPO_ROOT} subject=${SUBJECT_ID} model=${MODEL_NAME} scope=${GENE_SCOPE} matching_policy=${MATCHING_POLICY} out_root=${OUT_ROOT}"
 
 SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py \
   --subject \"${SUBJECT_ID}\" \
   --model \"${MODEL_NAME}\" \
   --gene-scope \"${GENE_SCOPE}\" \
+  --hvg-path \"${HVG_PATH}\" \
   --out-root \"${OUT_ROOT}\" \
   --use-cache \"${USE_CACHE}\" \
   --latent-dim \"${LATENT_DIM}\" \
@@ -40,7 +47,8 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py 
   --plam-latent-dim-max \"${PLAM_MAX_RANK}\" \
   --atlas-agg \"${ATLAS_AGG}\" \
   --gtex-rep-mode \"${GTEX_REP_MODE}\" \
-  --gtex-hemi-mode \"${GTEX_HEMI_MODE}\""
+  --gtex-hemi-mode \"${GTEX_HEMI_MODE}\" \
+  --matching-policy \"${MATCHING_POLICY}\""
 
 singularity exec --fakeroot \
   --overlay "/scratch/$USER/envs/vformer_env/overlay-25GB-500K.ext3:ro" \

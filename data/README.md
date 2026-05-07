@@ -62,6 +62,8 @@ Row semantics differ by dataset:
 
 In `gtex_gp`, the GTEx `coordinates` list is later reduced to a single centroid and then mapped to one AHBA parcel by nearest-neighbor distance. So the spatial assignment used by the modeling pipeline is a downstream simplification of the atlas-derived coordinate lists stored in this CSV.
 
+For the formal manuscript-facing GTEx-to-AHBA matching policy, including cortical Brodmann/Schaefer overrides, cerebellar duplicate handling, and subcortical manual validation against 4S156 atlas metadata, see [`docs/manuscript/parcel_matching.md`](../docs/manuscript/parcel_matching.md). The companion exploratory notebook is [`parcel_assignment.ipynb`](../parcel_assignment.ipynb).
+
 ## Parcel Ordering Contract (Aligned With `out/README.md`)
 
 For model/cache outputs (especially `.npz` matrices under `out/loro_subject_cache/`), parcel row order is defined by pipeline `parcel_idx`, not by row order in atlas CSV files.

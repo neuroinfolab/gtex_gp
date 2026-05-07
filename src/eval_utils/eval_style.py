@@ -209,6 +209,8 @@ METRIC_LABELS = {
     "spearman":   r"Spearman $\rho$",
     "r2":         r"$R^2$",
     "rmse":       "RMSE",
+    "kendall_tau": r"Kendall $\tau$",
+    "kendall":    r"Kendall $\tau$",
 }
 
 # Same set with a `mean_` prefix, used by fold-combo summaries.

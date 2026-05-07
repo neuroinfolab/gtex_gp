@@ -31,6 +31,7 @@ from src.preprocess import (
     build_target_parcels,
     map_gtex_to_target,
 )
+from src.spatial.parcel_matching import apply_gtex_ahba_matching_policy
 from src.workflows.writeup_pipeline import _resolve_optional_path, _source_signature
 
 MODEL_NAMES = ("naive", "dlam", "plam")
@@ -39,7 +40,7 @@ MODEL_NAMES = ("naive", "dlam", "plam")
 @dataclass
 class SubjectCacheConfig:
     csv_path: str = "data/raw/gxp_samples.csv"
-    hvg_path: str = "out/raw/gene_lists/ahba_100hvg.txt"
+    hvg_path: str = "data/metadata/gene_lists/ahba_100hvg.txt"
     out_root: str = "out/loro_subject_cache"
     gene_scope: str = "hvg"
     use_cache: bool = True
@@ -67,6 +68,7 @@ class SubjectCacheConfig:
     atlas_agg: str = "mean"
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
+    matching_policy: str = "centroids"
 
 
 def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
@@ -76,10 +78,21 @@ def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
         raise ValueError(f"gtex_rep_mode must be 'centroid' or 'medoid', got {cfg.gtex_rep_mode!r}")
     if str(cfg.gtex_hemi_mode).lower() not in {"native", "mirror_left"}:
         raise ValueError(f"gtex_hemi_mode must be 'native' or 'mirror_left', got {cfg.gtex_hemi_mode!r}")
+    if str(cfg.matching_policy).lower() not in {"centroids", "centroids_and_volumes"}:
+        raise ValueError(
+            "matching_policy must be 'centroids' or 'centroids_and_volumes', "
+            f"got {cfg.matching_policy!r}"
+        )
     csv_path = _resolve_optional_path(cfg.csv_path, ["gxp_samples.csv"])
     hvg_path = _resolve_optional_path(
         cfg.hvg_path,
-        ["out/raw/gene_lists/ahba_100hvg.txt", "data/raw/ahba_100hvg.txt", "ahba_100hvg.txt"],
+        [
+            "data/metadata/gene_lists/ahba_100hvg.txt",
+            "out/raw/gene_lists/ahba_100hvg.txt",
+            "data/raw/gene_lists/ahba_100hvg.txt",
+            "data/raw/ahba_100hvg.txt",
+            "ahba_100hvg.txt",
+        ],
     )
     header = io_utils.load_gene_header_and_hvg(csv_path, hvg_path)
     genes = header["genes_all"] if str(cfg.gene_scope).lower() == "allgenes" else header["genes_hvg"]
@@ -98,11 +111,24 @@ def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
     ahba_raw["parcel_idx"] = ahba_raw["tissue_or_parcel"].map(lk).astype(np.int32)
     gtex_raw = map_gtex_to_target(gtex_raw, target)
     target_meta = add_target_meta(target)
+    # Compute subject eligibility on the centroid-mapped parcel_idx, *before*
+    # apply_gtex_ahba_matching_policy. The policy can collapse anatomical
+    # regions (e.g. cerebellum + cerebellar hemisphere → Cerebellar_Region7),
+    # which would artificially drop subjects below `min_observed_parcels` even
+    # though they sampled enough distinct regions. Eligibility should reflect
+    # the underlying data, not the bucketing convention.
+    elig = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
+    eligible_subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
+    gtex_raw = apply_gtex_ahba_matching_policy(
+        gtex_raw,
+        target,
+        matching_policy=str(cfg.matching_policy).lower(),
+        validate_expected=True,
+        repo_root=REPO_ROOT,
+    )
     ahba_raw = add_sample_groups(ahba_raw, target_meta)
     gtex_raw = add_sample_groups(gtex_raw, target_meta)
     coords_full = target_meta[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)
-    elig = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
-    eligible_subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
     return {
         "csv_path": csv_path,
         "hvg_path": hvg_path,
@@ -517,6 +543,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atlas-agg", choices=["mean", "median"], default=SubjectCacheConfig.atlas_agg)
     p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=SubjectCacheConfig.gtex_rep_mode)
     p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=SubjectCacheConfig.gtex_hemi_mode)
+    p.add_argument(
+        "--matching-policy",
+        choices=["centroids", "centroids_and_volumes"],
+        default=SubjectCacheConfig.matching_policy,
+    )
     return p.parse_args()
 
 
@@ -557,6 +588,7 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         atlas_agg=str(a.atlas_agg).lower(),
         gtex_rep_mode=str(a.gtex_rep_mode).lower(),
         gtex_hemi_mode=str(a.gtex_hemi_mode).lower(),
+        matching_policy=str(a.matching_policy).lower(),
     )
 
 

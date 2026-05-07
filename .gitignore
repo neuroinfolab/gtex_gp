@@ -7,10 +7,6 @@ __pycache__/
 .mypy_cache/
 .ipynb_checkpoints/
 
-# Local environments
-.venv/
-venv/
-
 # Generated outputs
 out/
 !out/README.md
@@ -22,17 +18,18 @@ docs/manuscript/tables/*
 # Local data
 data/*
 !data/README.md
-!data/raw/
 !data/raw/.gitkeep
 !data/derived/
 !data/derived/.gitkeep
-data/bha2/
-data/gtex/
-data/fixtures/
-datasets/
-ar_utils/context_packages/
+!data/metadata/
+!data/metadata/.gitkeep
 
-# Legacy root-level local inputs
-gxp_samples.csv
-ahba_100hvg.txt
-.git_broken/
+# Context packages
+context_packages/*
+!context_packages/
+!context_packages/markdowns/
+!context_packages/markdowns/**
+
+# Notebook caches
+notebooks/cache/
+notebooks/results_*

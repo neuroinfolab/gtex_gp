@@ -32,7 +32,12 @@ try:
 except Exception:  # pragma: no cover
     _display = None
 
-from .eda_core import EDAConfig, load_eval_gene_list, prepare_pre_post_harmonization
+from .eda_core import (
+    EDAConfig,
+    load_eval_gene_list,
+    prepare_pre_post_harmonization,
+    prepare_pre_post_harmonization_cached,
+)
 from .eval_style import (
     FONT,
     MODEL_COLORS,
@@ -75,11 +80,19 @@ __all__ = [
     "compute_subject_metrics_from_cache_gene_subset",
     "collect_pooled_sample_prediction_dfs_from_cache_gene_subset",
     "build_global_prediction_tables",
+    "compute_genewise_metrics",
     "compute_prediction_metrics",
+    "compute_gene_rank_lookup",
+    "compute_within_subject_kendall",
+    "filter_kendall_to_genes",
     "format_gene_list_name",
     "make_prediction_eval_view",
     "paired_ttests_by_subject",
     "plot_coverage_vs_metric",
+    "plot_genewise_histogram",
+    "plot_genewise_ranked_overlay",
+    "plot_unitwise_kendall_ranked",
+    "summarize_kendall_per_unit",
     "plot_global_prediction_scatter",
     "plot_global_true_pred_scatter_triplet",
     "plot_metric_delta_violins",
@@ -99,6 +112,7 @@ __all__ = [
     "plot_heldout_region_grouped_bars",
     "plot_loro_subject_summary_bars",
     "prepare_pre_post_harmonization",
+    "prepare_pre_post_harmonization_cached",
     "run_subject_metric_panel",
     "set_academic_style",
     "summarize_heldout_region_performance",
@@ -298,7 +312,10 @@ def _default_eval_table_cache_dir(cfg: EDAConfig, cache_dir: str | Path | None =
     if cache_dir is not None:
         p = Path(cache_dir)
         return p if p.is_absolute() else (Path.cwd() / p).resolve()
-    return (Path.cwd() / "out" / "eval_prediction_tables" / str(cfg.gene_scope).lower()).resolve()
+    cache_root_name = Path(str(cfg.cache_root)).name or "loro_subject_cache"
+    return (
+        Path.cwd() / "out" / "eval_prediction_tables" / cache_root_name / str(cfg.gene_scope).lower()
+    ).resolve()
 
 
 def _parquet_paths(cache_dir: Path, models: Sequence[str]) -> tuple[Path, Dict[str, Path], Path]:
@@ -1443,11 +1460,71 @@ def _age_sort_key(value: object) -> tuple[int, float, str]:
     return 1, float("inf"), s.lower()
 
 
+def _resolve_gene_color_order(
+    gene_panel: Sequence[str],
+    *,
+    top_n: int,
+    selection: str,
+    rank_lookup: Mapping[str, float] | None,
+    higher_is_better: bool,
+    highlight_genes: Sequence[str] | None,
+    random_seed: int,
+) -> list[str]:
+    """Pick which genes get colored in a scatter when ``color_by='gene'``.
+
+    `selection`: one of
+      - ``'list_order'``: first ``top_n`` of `gene_panel` (legacy behavior).
+      - ``'top'``: best ``top_n`` by `rank_lookup` (descending if higher-better,
+        ascending for RMSE-style metrics).
+      - ``'bottom'``: worst ``top_n`` by `rank_lookup` (opposite direction).
+      - ``'random'``: ``top_n`` random genes from the panel, seeded by
+        `random_seed`.
+
+    `highlight_genes` is a hard override: when non-empty, those exact genes
+    (intersected with `gene_panel`) become the colored set; `top_n` and
+    `selection` are ignored.
+    """
+    panel = [str(g) for g in gene_panel]
+    panel_set = set(panel)
+    if highlight_genes:
+        order = [str(g) for g in highlight_genes if str(g) in panel_set]
+        return order
+    n = max(0, int(top_n))
+    if n == 0 or not panel:
+        return []
+    sel = str(selection).lower()
+    if sel == "list_order":
+        return panel[:n]
+    if sel == "random":
+        rng = np.random.default_rng(int(random_seed))
+        return list(rng.choice(panel, size=min(n, len(panel)), replace=False))
+    if sel in {"top", "bottom"}:
+        if not rank_lookup:
+            return panel[:n]
+        # Direction: higher_is_better=True + selection='top' → descending.
+        descending = (higher_is_better and sel == "top") or (not higher_is_better and sel == "bottom")
+        ranked = sorted(
+            (g for g in panel if g in rank_lookup),
+            key=lambda g: rank_lookup[g],
+            reverse=descending,
+        )
+        if len(ranked) < n:
+            seen = set(ranked)
+            ranked = ranked + [g for g in panel if g not in seen]
+        return ranked[:n]
+    raise ValueError(f"selection must be one of: list_order, top, bottom, random (got {selection!r})")
+
+
 def _global_scatter_color_spec(
     plot_payloads: Mapping[str, Dict[str, np.ndarray]],
     color_by: str,
     top_n: int,
     genes: Sequence[str] | None = None,
+    gene_selection: str = "list_order",
+    gene_rank_lookup: Mapping[str, float] | None = None,
+    gene_rank_higher_is_better: bool = True,
+    highlight_genes: Sequence[str] | None = None,
+    random_seed: int = 0,
 ) -> tuple[str | None, list[str], dict[str, object]]:
     key = _scatter_color_key(color_by)
     if key is None:
@@ -1492,11 +1569,20 @@ def _global_scatter_color_spec(
         return key, order, palette
 
     if key == "gene":
-        if genes is None:
-            ids = np.concatenate([payload[key].astype(str) for payload in plot_payloads.values()])
-            order = pd.unique(ids).tolist()[: int(top_n)]
+        if genes is not None:
+            gene_panel = [str(g) for g in genes]
         else:
-            order = [str(g) for g in list(genes)[: int(top_n)]]
+            ids = np.concatenate([payload[key].astype(str) for payload in plot_payloads.values()])
+            gene_panel = pd.unique(ids).tolist()
+        order = _resolve_gene_color_order(
+            gene_panel,
+            top_n=int(top_n),
+            selection=gene_selection,
+            rank_lookup=gene_rank_lookup,
+            higher_is_better=bool(gene_rank_higher_is_better),
+            highlight_genes=highlight_genes,
+            random_seed=int(random_seed),
+        )
         colors = sns.color_palette("tab20", n_colors=max(1, len(order)))
         palette = {v: colors[i] for i, v in enumerate(order)}
         return key, order, palette
@@ -1528,6 +1614,167 @@ def _scatter_legend_label(value: str, color_key: str | None) -> str:
     return format_legend_label(value)
 
 
+def _hex_darken(color, frac: float) -> tuple[float, float, float]:
+    """Multiply each RGB channel by `(1 - frac)`; frac=0 → no change, frac=1 → black."""
+    import matplotlib.colors as mcolors
+    rgb = np.asarray(mcolors.to_rgb(color), dtype=np.float64)
+    return tuple(np.clip(rgb * (1.0 - float(frac)), 0.0, 1.0).tolist())
+
+
+def _hex_lighten(color, frac: float) -> tuple[float, float, float]:
+    """Blend `color` toward white by `frac` (0 = no change, 1 = white)."""
+    import matplotlib.colors as mcolors
+    rgb = np.asarray(mcolors.to_rgb(color), dtype=np.float64)
+    return tuple((rgb + (1.0 - rgb) * float(frac)).tolist())
+
+
+_HIGHER_IS_BETTER_GENE_RANK = {
+    "pearson_r":  True,
+    "spearman_r": True,
+    "r2":         True,
+    "rmse":       False,
+}
+
+
+_SCATTER_METRIC_SYMBOL = {
+    "pearson_r":  "r",
+    "spearman_r": "ρ",
+    "r2":         "R²",
+    "rmse":       "RMSE",
+}
+
+
+def _per_category_metric_value(
+    truth: np.ndarray, pred: np.ndarray, metric: str
+) -> tuple[float, int]:
+    """Compute the chosen metric on aligned (truth, pred) flat arrays.
+
+    Always operates on the **full underlying data** (no sub-sampling). Returns
+    `(value, n_finite)`; value is NaN when fewer than 2 finite pairs.
+    """
+    metric = str(metric).lower()
+    truth = np.asarray(truth, dtype=np.float64).ravel()
+    pred = np.asarray(pred, dtype=np.float64).ravel()
+    mask = np.isfinite(truth) & np.isfinite(pred)
+    n = int(mask.sum())
+    if n < 2:
+        return float("nan"), n
+    t = truth[mask]
+    p = pred[mask]
+    if metric == "pearson_r":
+        return _pearson_safe(t, p), n
+    if metric == "spearman_r":
+        return _spearman_safe(t, p), n
+    if metric == "r2":
+        return _r2_safe(t, p), n
+    if metric == "rmse":
+        return _rmse_safe(t, p), n
+    raise ValueError(
+        f"Unsupported annotation_metric={metric!r} (use pearson_r | spearman_r | r2 | rmse)"
+    )
+
+
+_SCATTER_COLOR_KEY_TO_TRUTH_COL = {
+    "region_group": "region_group",
+    "region":       "gtex_region",
+    "subject":      "subject",
+    "sex":          "sex",
+    "age":          "age",
+}
+
+
+def compute_gene_rank_lookup(
+    view: Mapping[str, object],
+    model: str,
+    metric: str = "pearson_r",
+) -> dict[str, float]:
+    """Per-gene metric lookup for ranking (e.g. for `gene_selection='top'`).
+
+    Computes the chosen `metric` per gene using `pred_dfs[model]` against
+    `truth_df` over the full underlying samples. Returns ``{gene: value}``
+    for genes with finite metric — drop-in for
+    ``plot_global_prediction_scatter(gene_rank_lookup=...)``.
+    """
+    truth_df = view["truth_df"]
+    pred_dfs = view["pred_dfs"]
+    m = str(model).lower()
+    if m not in pred_dfs:
+        raise KeyError(f"model={model!r} not in view['pred_dfs']")
+    genes = list(view["genes"])
+    pairs = _compute_per_category_metric(
+        truth_df, pred_dfs[m], genes,
+        color_key="gene", category_order=genes,
+        metric=metric,
+    )
+    return {g: float(v[0]) for g, v in pairs.items() if np.isfinite(v[0])}
+
+
+def filter_kendall_to_genes(
+    kendall_long: pd.DataFrame,
+    genes: Sequence[str],
+) -> pd.DataFrame:
+    """Filter a within-subject Kendall long table to a gene sublist.
+
+    Convenience wrapper for the inline pattern
+    ``kendall_long[kendall_long['gene'].isin(genes)]`` used to repurpose
+    an all-genes Kendall pickle for sublist analyses without recomputing.
+    """
+    if "gene" not in kendall_long.columns:
+        raise KeyError("kendall_long must include a 'gene' column")
+    keep = set(str(g) for g in genes)
+    return kendall_long[kendall_long["gene"].astype(str).isin(keep)].reset_index(drop=True)
+
+
+def _compute_per_category_metric(
+    truth_df: pd.DataFrame,
+    pred_df: pd.DataFrame,
+    genes: Sequence[str],
+    color_key: str | None,
+    category_order: Sequence[str],
+    metric: str,
+) -> dict[str, tuple[float, int]]:
+    """Per-color-category metric on the full underlying data (pre-sampling).
+
+    Categories not in `category_order` are skipped (e.g. the bucketed "Other"
+    bin gets no annotation). For `color_key='gene'` the metric is computed
+    per-gene over all samples; for row-level color keys (region, subject,
+    sex, age, region_group) it filters truth_df rows by the category column,
+    then ravels the (rows × genes) submatrix into flat arrays before scoring.
+    """
+    if color_key is None:
+        return {}
+    out: dict[str, tuple[float, int]] = {}
+    gene_list = list(genes)
+    if color_key == "gene":
+        for gene in category_order:
+            g = str(gene)
+            if g not in truth_df.columns or g not in pred_df.columns:
+                out[g] = (float("nan"), 0)
+                continue
+            out[g] = _per_category_metric_value(
+                truth_df[g].to_numpy(dtype=np.float64),
+                pred_df[g].to_numpy(dtype=np.float64),
+                metric,
+            )
+        return out
+    col = _SCATTER_COLOR_KEY_TO_TRUTH_COL.get(color_key)
+    if col is None or col not in truth_df.columns:
+        return {}
+    cat_vals = truth_df[col].astype(str).to_numpy()
+    truth_mat = truth_df[gene_list].to_numpy(dtype=np.float64)
+    pred_mat = pred_df[gene_list].to_numpy(dtype=np.float64)
+    for cat in category_order:
+        cat_str = str(cat)
+        mask = cat_vals == cat_str
+        if not mask.any():
+            out[cat_str] = (float("nan"), 0)
+            continue
+        out[cat_str] = _per_category_metric_value(
+            truth_mat[mask], pred_mat[mask], metric,
+        )
+    return out
+
+
 def _scatter_legend_title(color_by: str, color_key: str | None, n_shown: int, gene_list_label: str | None = None) -> str:
     label = gene_list_label if gene_list_label is not None and str(gene_list_label).strip() else "All Genes"
     if color_key == "gene":
@@ -1544,11 +1791,16 @@ def _scatter_legend_handles(
     palette: Mapping[str, object],
     show_other: bool,
     color_key: str | None,
+    label_map: Mapping[str, str] | None = None,
 ) -> list[Line2D]:
-    handles = [
-        Line2D([0], [0], marker="o", linestyle="none", color=palette[val], label=_scatter_legend_label(val, color_key), markersize=6)
-        for val in order
-    ]
+    handles = []
+    for val in order:
+        default = _scatter_legend_label(val, color_key)
+        label = (label_map.get(str(val), default) if label_map else default)
+        handles.append(
+            Line2D([0], [0], marker="o", linestyle="none",
+                   color=palette[val], label=label, markersize=6)
+        )
     if bool(show_other):
         handles.append(Line2D([0], [0], marker="o", linestyle="none", color="#9a9a9a", label="Other", markersize=6))
     return handles
@@ -1563,7 +1815,15 @@ def _plot_categorical_scatter(
     point_size: float,
     alpha: float,
     rasterized: bool,
+    base_alpha_factor: float = 0.35,
 ) -> bool:
+    """Categorical scatter with a faded "Other" base layer.
+
+    `base_alpha_factor` (default 0.35) multiplies the categorical `alpha` for
+    the "Other" (non-top-N) gray points, so highlighted categories visually
+    pop relative to the rest. Set to 1.0 to match the highlighted alpha;
+    set to 0 to hide the "Other" layer entirely.
+    """
     x = payload["x"]
     y = payload["y"]
     if color_key is None:
@@ -1573,12 +1833,289 @@ def _plot_categorical_scatter(
     ids = payload[color_key].astype(str)
     order = list(category_order)
     base = ~np.isin(ids, order)
-    ax.scatter(x[base], y[base], s=max(0.4, point_size * 0.55), alpha=alpha, color="#9a9a9a", linewidths=0, rasterized=rasterized)
+    base_alpha = max(0.0, min(1.0, float(alpha) * float(base_alpha_factor)))
+    if base.any() and base_alpha > 0.0:
+        ax.scatter(
+            x[base], y[base], s=max(0.4, point_size * 0.55),
+            alpha=base_alpha, color="#9a9a9a", linewidths=0, rasterized=rasterized,
+        )
     for val in order:
         m = ids == val
         c = category_palette[val]
-        ax.scatter(x[m], y[m], s=point_size, alpha=alpha, color=c, linewidths=0, rasterized=rasterized)
+        ax.scatter(
+            x[m], y[m], s=point_size, alpha=alpha,
+            color=c, linewidths=0, rasterized=rasterized,
+        )
     return bool(base.any())
+
+
+def _resolve_stratum_to_raw(
+    stratum: str,
+    category_order: Sequence[str],
+    color_key: str,
+    truth_df: pd.DataFrame | None = None,
+) -> str:
+    """Map a user-supplied stratum to the raw category as it appears in
+    `truth_df` / `category_palette`.
+
+    Accepts either the display form (``"Amygdala"``) or the raw form
+    (``"Brain - Amygdala"``) and returns the raw form. Falls back to the
+    input when no match is found (caller still tries the literal mask and
+    will report empty data).
+    """
+    if color_key == "gene":
+        return str(stratum)
+    target = str(stratum)
+    if target in set(category_order):
+        return target
+    target_norm = strip_display_label_prefixes(target).strip().lower()
+    for cat in category_order:
+        if strip_display_label_prefixes(str(cat)).strip().lower() == target_norm:
+            return str(cat)
+    if truth_df is not None:
+        col = _SCATTER_COLOR_KEY_TO_TRUTH_COL.get(color_key)
+        if col is not None and col in truth_df.columns:
+            for raw in pd.unique(truth_df[col].astype(str)):
+                if strip_display_label_prefixes(str(raw)).strip().lower() == target_norm:
+                    return str(raw)
+    return target
+
+
+def _stratum_subby_gradient(base, n: int) -> list[tuple[float, float, float, float]]:
+    """N evenly-spaced shades from light → base → dark of `base`."""
+    if n <= 0:
+        return []
+    light = _hex_lighten(base, 0.65)
+    dark = _hex_darken(base, 0.45)
+    cmap = LinearSegmentedColormap.from_list("stratum_subby", [light, base, dark])
+    if n == 1:
+        return [cmap(0.5)]
+    return [cmap(i / (n - 1)) for i in range(n)]
+
+
+def _stratum_full_xy_with_labels(
+    truth_df: pd.DataFrame,
+    pred_df: pd.DataFrame,
+    genes: Sequence[str],
+    color_key: str,
+    stratum: str,
+    subby: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Full-data flat (truth, pred, sub_labels) for one stratum.
+
+    `subby` is one of `region_group | region | subject | sex | age | gene`.
+    For `color_key='gene'` (stratum is a single gene column), each row is one
+    sample → label = that row's `subby` column. Otherwise, the stratum mask
+    yields (k rows × G genes); sub-labels are tiled (`gene`) or repeated
+    per-row (`region_group | subject | sex | age | region`).
+    """
+    empty = (np.asarray([], dtype=np.float64),
+             np.asarray([], dtype=np.float64),
+             np.asarray([], dtype=object))
+    if color_key == "gene":
+        g = str(stratum)
+        if g not in truth_df.columns or g not in pred_df.columns:
+            return empty
+        t = truth_df[g].to_numpy(dtype=np.float64)
+        p = pred_df[g].to_numpy(dtype=np.float64)
+        if subby == "gene":
+            sub_labels = np.full(len(t), g, dtype=object)
+        else:
+            sub_col = _SCATTER_COLOR_KEY_TO_TRUTH_COL.get(subby)
+            if sub_col is None or sub_col not in truth_df.columns:
+                return empty
+            sub_labels = truth_df[sub_col].astype(str).to_numpy()
+    else:
+        col = _SCATTER_COLOR_KEY_TO_TRUTH_COL.get(color_key)
+        if col is None or col not in truth_df.columns:
+            return empty
+        mask = truth_df[col].astype(str).to_numpy() == str(stratum)
+        if not mask.any():
+            return empty
+        gene_list = list(genes)
+        t_mat = truth_df.loc[mask, gene_list].to_numpy(dtype=np.float64)
+        p_mat = pred_df.loc[mask, gene_list].to_numpy(dtype=np.float64)
+        n_rows, n_genes = t_mat.shape
+        if subby == "gene":
+            sub_labels = np.tile(np.asarray(gene_list, dtype=object), n_rows)
+        else:
+            sub_col = _SCATTER_COLOR_KEY_TO_TRUTH_COL.get(subby)
+            if sub_col is None or sub_col not in truth_df.columns:
+                return empty
+            row_vals = truth_df.loc[mask, sub_col].astype(str).to_numpy()
+            sub_labels = np.repeat(row_vals, n_genes)
+        t = t_mat.ravel()
+        p = p_mat.ravel()
+    finite = np.isfinite(t) & np.isfinite(p)
+    return t[finite], p[finite], sub_labels[finite]
+
+
+def _stratum_full_xy(
+    truth_df: pd.DataFrame,
+    pred_df: pd.DataFrame,
+    genes: Sequence[str],
+    color_key: str,
+    stratum: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite (truth, pred) flat arrays for a single stratum, on the
+    full underlying data (no sub-sampling). `stratum` is matched against the
+    raw column value; resolve via :func:`_resolve_stratum_to_raw` upstream
+    when the caller has user-supplied display labels."""
+    if color_key == "gene":
+        g = str(stratum)
+        if g not in truth_df.columns or g not in pred_df.columns:
+            return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+        t = truth_df[g].to_numpy(dtype=np.float64)
+        p = pred_df[g].to_numpy(dtype=np.float64)
+    else:
+        col = _SCATTER_COLOR_KEY_TO_TRUTH_COL.get(color_key)
+        if col is None or col not in truth_df.columns:
+            return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+        mask = truth_df[col].astype(str).to_numpy() == str(stratum)
+        if not mask.any():
+            return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+        gene_list = list(genes)
+        t = truth_df.loc[mask, gene_list].to_numpy(dtype=np.float64).ravel()
+        p = pred_df.loc[mask, gene_list].to_numpy(dtype=np.float64).ravel()
+    finite = np.isfinite(t) & np.isfinite(p)
+    return t[finite], p[finite]
+
+
+def _render_isolated_stratum_panel(
+    ax: plt.Axes,
+    *,
+    truth_df: pd.DataFrame,
+    pred_df: pd.DataFrame,
+    genes: Sequence[str],
+    color_key: str,
+    stratum: str,
+    palette: Mapping[str, object],
+    lim_lo: float,
+    lim_hi: float,
+    point_size: float,
+    alpha: float,
+    rasterized: bool,
+    fit_line_color: str | None,
+    annotation_metric: str,
+    fonts: Mapping[str, int],
+    model_name: str,
+    ticks: np.ndarray,
+    subby: str | None = None,
+    subby_top_n: int = 10,
+) -> None:
+    base_color = palette.get(str(stratum), "#777777") if palette else "#777777"
+
+    if subby is None:
+        # Single-color path: all stratum points get the base color.
+        t, p = _stratum_full_xy(truth_df, pred_df, genes, color_key, stratum)
+        if t.size > 0:
+            ax.scatter(
+                t, p,
+                s=point_size, alpha=alpha,
+                color=base_color, linewidths=0, rasterized=rasterized,
+            )
+        sub_legend_handles = None
+    else:
+        # Sub-coloring path: pull labels per point, top-N → gradient shades.
+        t, p, sub_labels = _stratum_full_xy_with_labels(
+            truth_df, pred_df, genes, color_key, stratum, subby,
+        )
+        sub_legend_handles = []
+        if t.size > 0:
+            unique, counts = np.unique(sub_labels.astype(str), return_counts=True)
+            sort_idx = np.argsort(-counts, kind="mergesort")
+            unique = unique[sort_idx]
+            counts = counts[sort_idx]
+            n_top = min(int(subby_top_n), len(unique))
+            top_cats = unique[:n_top].tolist()
+            top_set = set(top_cats)
+            shades = _stratum_subby_gradient(base_color, n_top)
+            # "Other" overflow: muted gray, smaller markers, plotted first.
+            other_mask = ~np.isin(sub_labels.astype(str), list(top_set))
+            if other_mask.any():
+                ax.scatter(
+                    t[other_mask], p[other_mask],
+                    s=max(0.5, point_size * 0.55),
+                    alpha=max(0.15, alpha * 0.55),
+                    color="#a6a6a6", linewidths=0, rasterized=rasterized,
+                )
+            for cat, shade in zip(top_cats, shades):
+                m = sub_labels.astype(str) == str(cat)
+                if not m.any():
+                    continue
+                ax.scatter(
+                    t[m], p[m],
+                    s=point_size, alpha=alpha,
+                    color=shade, linewidths=0, rasterized=rasterized,
+                )
+                sub_legend_handles.append(
+                    Line2D([0], [0], marker="o", linestyle="none",
+                           color=shade, markersize=6,
+                           label=_scatter_legend_label(cat, subby)),
+                )
+            if other_mask.any():
+                sub_legend_handles.append(
+                    Line2D([0], [0], marker="o", linestyle="none",
+                           color="#a6a6a6", markersize=5,
+                           label=f"Other ({int(other_mask.sum()):,})"),
+                )
+
+    ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi], color="#252525", linestyle="--", linewidth=0.9, alpha=0.8)
+
+    # Fit line on ALL stratum points regardless of subby (it summarizes the
+    # whole stratum's slope, independent of how points are colored within).
+    if t.size >= 2:
+        slope, intercept = np.polyfit(t, p, 1)
+        xs = np.array([lim_lo, lim_hi], dtype=np.float64)
+        ys = slope * xs + intercept
+        fit_c = fit_line_color if fit_line_color else _hex_darken(base_color, 0.45)
+        ax.plot(xs, ys, color=fit_c, linewidth=1.8, linestyle="-", zorder=10)
+
+    ax.set_xlim(lim_lo, lim_hi)
+    ax.set_ylim(lim_lo, lim_hi)
+    ax.set_aspect("equal", adjustable="box")
+    tick_labels = [f"{tk:g}" for tk in ticks]
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
+    ax.set_xticklabels(tick_labels)
+    ax.set_yticklabels(tick_labels)
+    ax.tick_params(
+        axis="both", which="both",
+        bottom=True, left=True, top=False, right=False,
+        labelbottom=True, labelleft=True, labeltop=False, labelright=False,
+        labelsize=fonts["tick"],
+    )
+    ax.xaxis.set_ticks_position("bottom")
+    ax.yaxis.set_ticks_position("left")
+
+    sym = _SCATTER_METRIC_SYMBOL.get(str(annotation_metric).lower(), str(annotation_metric))
+    if t.size >= 2:
+        value, _ = _per_category_metric_value(t, p, annotation_metric)
+        shown = "n/a" if not np.isfinite(value) else f"{value:.2f}"
+        title_suffix = f" ({sym}={shown}, n={t.size:,})"
+    else:
+        title_suffix = " (no data)"
+    title_label = _scatter_legend_label(stratum, color_key)
+    ax.set_title(
+        f"{title_label} — {model_label(model_name)}{title_suffix}",
+        fontsize=fonts["title"],
+    )
+    ax.set_xlabel("Held-Out Truth", fontsize=fonts["xlabel"])
+    ax.set_ylabel("Prediction", fontsize=fonts["ylabel"])
+    ax.grid(True, alpha=0.16)
+
+    if sub_legend_handles:
+        sub_title = f"by {format_legend_label(subby)}"
+        ax.legend(
+            handles=sub_legend_handles,
+            title=sub_title,
+            loc="lower right",
+            frameon=True, fancybox=False,
+            edgecolor="#7a7a7a", facecolor="white", framealpha=0.92,
+            fontsize=max(6, fonts["tick"] - 1),
+            title_fontsize=max(7, fonts["tick"]),
+            handletextpad=0.5, labelspacing=0.35, borderpad=0.4,
+        )
 
 
 _GLOBAL_SCATTER_FONTS = {
@@ -1611,6 +2148,19 @@ def plot_global_prediction_scatter(
     random_seed: int = 0,
     figsize: Tuple[float, float] = (17.8, 6.4),
     dpi: int = 220,
+    annotate_metric_in_legend: bool = False,
+    annotation_metric: str = "pearson_r",
+    annotation_model: str | None = None,
+    isolate_stratum: str | Sequence[str] | None = None,
+    isolate_color_subby: str | None = None,
+    isolate_color_subby_top_n: int = 10,
+    fit_line_color: str | None = None,
+    gene_selection: str = "list_order",
+    gene_rank_metric: str = "pearson_r",
+    gene_rank_model: str | None = None,
+    gene_rank_lookup: Mapping[str, float] | None = None,
+    highlight_genes: Sequence[str] | None = None,
+    base_alpha_factor: float = 0.35,
     font_sizes: Mapping[str, str | int] | None = None,
 ) -> Tuple[plt.Figure, np.ndarray]:
     fonts = _resolve_fonts(_GLOBAL_SCATTER_FONTS, font_sizes)
@@ -1647,9 +2197,85 @@ def plot_global_prediction_scatter(
         plot_payloads[model] = payload
         n_total_by_model[model] = n_total
 
-    color_key, category_order, category_palette = _global_scatter_color_spec(plot_payloads, color_by=color_by, top_n=top_n, genes=genes)
+    # When color_by='gene' + gene_selection in {'top','bottom'}, build a per-gene
+    # metric lookup from the FULL underlying data so the same gene set
+    # highlights consistently across calls. For other color_by axes / selection
+    # modes, this is a no-op. Caller can pass a precomputed `gene_rank_lookup`
+    # to avoid repeated compute (or to rank against a model not in the current
+    # filtered view).
+    gene_rank_lookup_dict: dict[str, float] | None = (
+        {str(k): float(v) for k, v in gene_rank_lookup.items()}
+        if gene_rank_lookup is not None else None
+    )
+    gene_rank_higher = bool(_HIGHER_IS_BETTER_GENE_RANK.get(str(gene_rank_metric).lower(), True))
+    if (
+        gene_rank_lookup_dict is None
+        and _scatter_color_key(color_by) == "gene"
+        and str(gene_selection).lower() in {"top", "bottom"}
+        and not highlight_genes
+    ):
+        rank_model = (
+            str(gene_rank_model).lower() if gene_rank_model is not None else models[0]
+        )
+        if rank_model not in pred_dfs:
+            raise KeyError(
+                f"gene_rank_model={rank_model!r} not in view['pred_dfs']. "
+                f"Either include it in the view's `models`, or precompute "
+                f"the per-gene metric and pass via `gene_rank_lookup={{gene: value}}`."
+            )
+        rank_pairs = _compute_per_category_metric(
+            truth_df, pred_dfs[rank_model], genes,
+            color_key="gene", category_order=list(genes),
+            metric=gene_rank_metric,
+        )
+        gene_rank_lookup_dict = {g: float(v[0]) for g, v in rank_pairs.items() if np.isfinite(v[0])}
+
+    color_key, category_order, category_palette = _global_scatter_color_spec(
+        plot_payloads, color_by=color_by, top_n=top_n, genes=genes,
+        gene_selection=gene_selection,
+        gene_rank_lookup=gene_rank_lookup_dict,
+        gene_rank_higher_is_better=gene_rank_higher,
+        highlight_genes=highlight_genes,
+        random_seed=int(random_seed),
+    )
     lim_lo, lim_hi = _axis_identity_limits([p["x"] for p in plot_payloads.values()] + [p["y"] for p in plot_payloads.values()], quantiles=axis_limit_quantiles)
-    fig, axes = plt.subplots(1, len(models), figsize=figsize, dpi=int(dpi), constrained_layout=False, squeeze=False)
+    ticks = _nice_interval_ticks(lim_lo, lim_hi, n_ticks=6)
+    tick_labels = [f"{t:g}" for t in ticks]
+
+    # Resolve isolated-stratum list. Accepts either the display form
+    # ("Amygdala") or the raw form ("Brain - Amygdala"); maps both back to
+    # the raw category so palette lookup + row mask agree.
+    if isolate_stratum is None:
+        iso_list_raw: list[str] = []
+    elif isinstance(isolate_stratum, str):
+        iso_list_raw = [str(isolate_stratum)]
+    else:
+        iso_list_raw = [str(s) for s in isolate_stratum]
+    if iso_list_raw and color_key is None:
+        raise ValueError("isolate_stratum requires color_by != 'none'")
+    iso_list: list[str] = []
+    for s_in in iso_list_raw:
+        s = _resolve_stratum_to_raw(s_in, category_order or [], color_key, truth_df)
+        iso_list.append(s)
+        if category_order and s not in set(category_order):
+            warnings.warn(
+                f"isolate_stratum={s_in!r} not in top-N categories for color_by={color_by!r}; "
+                f"the panel will still attempt to filter by row mask.",
+                RuntimeWarning, stacklevel=2,
+            )
+
+    n_panels_per_model = 1 + len(iso_list)
+    n_models = len(models)
+    total_panels = n_models * n_panels_per_model
+
+    # Auto-scale figure width when isolated panels are added so each panel keeps
+    # roughly the original per-model column width. Caller can still override
+    # `figsize=` to force a specific layout.
+    if n_panels_per_model > 1:
+        eff_figsize = (figsize[0] * n_panels_per_model, figsize[1])
+    else:
+        eff_figsize = figsize
+    fig, axes = plt.subplots(1, total_panels, figsize=eff_figsize, dpi=int(dpi), constrained_layout=False, squeeze=False)
     axes = axes.ravel()
     fig.subplots_adjust(left=0.06, right=0.84, bottom=0.18, top=0.88, wspace=0.34)
     show_other_in_legend = False
@@ -1657,7 +2283,8 @@ def plot_global_prediction_scatter(
     n_subjects = int(truth_df["subject"].nunique()) if "subject" in truth_df.columns else 0
     n_samples = int(len(truth_df))
     n_genes = int(len(genes))
-    for ax, model in zip(axes, models):
+    for mi, model in enumerate(models):
+        ax = axes[mi * n_panels_per_model]
         show_other_in_legend |= _plot_categorical_scatter(
             ax,
             plot_payloads[model],
@@ -1667,17 +2294,16 @@ def plot_global_prediction_scatter(
             point_size=point_size,
             alpha=alpha,
             rasterized=rasterized,
+            base_alpha_factor=base_alpha_factor,
         )
         ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi], color="#252525", linestyle="--", linewidth=0.9, alpha=0.8)
         ax.set_xlim(lim_lo, lim_hi)
         ax.set_ylim(lim_lo, lim_hi)
         ax.set_aspect("equal", adjustable="box")
-        ticks = _nice_interval_ticks(lim_lo, lim_hi, n_ticks=6)
-        labels = [f"{t:g}" for t in ticks]
         ax.set_xticks(ticks)
         ax.set_yticks(ticks)
-        ax.set_xticklabels(labels)
-        ax.set_yticklabels(labels)
+        ax.set_xticklabels(tick_labels)
+        ax.set_yticklabels(tick_labels)
         ax.tick_params(axis="both", which="both", bottom=True, left=True, top=False, right=False, labelbottom=True, labelleft=True, labeltop=False, labelright=False, labelsize=fonts["tick"])
         ax.xaxis.set_ticks_position("bottom")
         ax.yaxis.set_ticks_position("left")
@@ -1699,12 +2325,1011 @@ def plot_global_prediction_scatter(
                 fontsize=fonts["annotation"],
                 bbox={"facecolor": "white", "edgecolor": "#7f7f7f", "alpha": 0.92, "boxstyle": "round,pad=0.28"},
             )
-    handles = _scatter_legend_handles(category_order, category_palette, show_other=show_other_in_legend, color_key=color_key)
+
+        # Per-stratum isolated panels immediately to the right of this model's global.
+        for si, stratum in enumerate(iso_list):
+            ax_iso = axes[mi * n_panels_per_model + 1 + si]
+            _render_isolated_stratum_panel(
+                ax_iso,
+                truth_df=truth_df,
+                pred_df=pred_dfs[model],
+                genes=genes,
+                color_key=color_key,
+                stratum=stratum,
+                palette=category_palette,
+                lim_lo=lim_lo, lim_hi=lim_hi,
+                point_size=max(point_size * 2.4, 4.0),
+                alpha=min(1.0, alpha + 0.30),
+                rasterized=rasterized,
+                fit_line_color=fit_line_color,
+                annotation_metric=annotation_metric,
+                fonts=fonts,
+                model_name=model,
+                ticks=ticks,
+                subby=(_scatter_color_key(isolate_color_subby) if isolate_color_subby else None),
+                subby_top_n=int(isolate_color_subby_top_n),
+            )
+    label_map = None
+    if bool(annotate_metric_in_legend) and color_key is not None and category_order:
+        # Compute on the FULL underlying data (no sub-sampling). For multi-model
+        # views, defaults to the first model in `view['models']`; override via
+        # `annotation_model=`.
+        metric_model = (
+            str(annotation_model).lower() if annotation_model is not None else models[0]
+        )
+        if metric_model not in pred_dfs:
+            raise KeyError(f"annotation_model={metric_model!r} not in view['pred_dfs']")
+        cat_metrics = _compute_per_category_metric(
+            truth_df, pred_dfs[metric_model], genes,
+            color_key, category_order, annotation_metric,
+        )
+        sym = _SCATTER_METRIC_SYMBOL.get(str(annotation_metric).lower(), str(annotation_metric))
+        label_map = {}
+        for cat in category_order:
+            value, _n = cat_metrics.get(str(cat), (float("nan"), 0))
+            shown = "n/a" if not np.isfinite(value) else f"{value:.2f}"
+            label_map[str(cat)] = f"{_scatter_legend_label(cat, color_key)} ({sym}={shown})"
+
+    handles = _scatter_legend_handles(category_order, category_palette, show_other=show_other_in_legend, color_key=color_key, label_map=label_map)
     if handles:
         title = _scatter_legend_title(color_by, color_key=color_key, n_shown=len(category_order), gene_list_label=gene_list_label)
+        if bool(annotate_metric_in_legend) and label_map:
+            metric_model_for_title = (
+                str(annotation_model).lower() if annotation_model is not None else models[0]
+            )
+            title = f"{title}\n({format_legend_label(annotation_metric)} per category — {model_label(metric_model_for_title)})"
         fig.legend(handles=handles, title=title, loc="center left", bbox_to_anchor=(0.855, 0.50), frameon=True, fancybox=False, edgecolor="#4a4a4a", facecolor="white", framealpha=0.96, fontsize=fonts["legend"], title_fontsize=fonts["legend_title"])
     fig.suptitle("Global Held-Out Truth vs Prediction", fontsize=fonts["suptitle"], y=0.94)
     return fig, axes
+
+
+# ---------------------------------------------------------------------------
+# Genewise (per-gene) metrics + visualization
+# ---------------------------------------------------------------------------
+
+_GENEWISE_GROUP_TO_TRUTH_COL = {
+    "model":        "model",
+    "gtex_region":  "gtex_region",
+    "region":       "gtex_region",
+    "region_group": "region_group",
+    "subject":      "subject",
+    "sex":          "sex",
+    "age":          "age",
+}
+
+
+def _normalize_group_by(group_by: str) -> str:
+    g = str(group_by).lower().strip()
+    if g not in _GENEWISE_GROUP_TO_TRUTH_COL:
+        raise ValueError(
+            f"group_by must be one of {sorted(_GENEWISE_GROUP_TO_TRUTH_COL)} (got {group_by!r})"
+        )
+    return _GENEWISE_GROUP_TO_TRUTH_COL[g]
+
+
+def _tissue_to_region_group(tissue: str) -> str:
+    """Fallback `gtex_region → region_group` classification when no lookup is
+    provided. Maps `parcel_label_group` 5-group output to the 4-group
+    `_SCATTER_REGION_GROUP_ORDER` used by the existing scatter palette."""
+    g = parcel_label_group(tissue)
+    if g in {"basal_ganglia", "limbic_midbrain"}:
+        return "subcortical"
+    return g
+
+
+def _tissue_palette(
+    tissues: Sequence[str],
+    *,
+    region_group_lookup: Mapping[str, str] | None = None,
+    weights: Mapping[str, int] | None = None,
+) -> dict[str, object]:
+    """Color map for `gtex_region` values, matching the existing global scatter
+    convention (`plot_global_prediction_scatter(color_by='region')`).
+
+    Tissues are grouped by `region_group` (4 buckets:
+    `cortical | subcortical | cerebellar | other` from
+    `_SCATTER_REGION_GROUP_ORDER`). Subcortical further splits into
+    `subcortical_basal_ganglia` / `subcortical_other` via
+    `_scatter_subcortical_palette_key`. Colors are assigned round-robin from
+    `_SCATTER_REGION_GROUP_COLORS`.
+
+    `region_group_lookup`: dict `tissue → region_group`. When `None`, falls
+    back to `_tissue_to_region_group` (parcel_label_group with subcortical
+    collapsed). For full consistency with existing scatters, pass the
+    lookup from `truth_df[['gtex_region','region_group']]`.
+
+    `weights`: dict `tissue → count` for within-group ordering (mirrors the
+    `(-count, label)` sort in `_global_scatter_color_spec`). When `None`,
+    sorts by `format_legend_label` alphabetically.
+    """
+    tset = list({str(t) for t in tissues})
+    if region_group_lookup is None:
+        rg = {t: _tissue_to_region_group(t) for t in tset}
+    else:
+        rg = {t: str(region_group_lookup.get(t, "other")) for t in tset}
+
+    palette: dict[str, object] = {}
+    counters: dict[str, int] = {}
+
+    # Iterate region groups in the canonical order so colors land
+    # deterministically across panels.
+    for group in _SCATTER_REGION_GROUP_ORDER:
+        group_tissues = [t for t in tset if rg.get(t) == group]
+        if not group_tissues:
+            continue
+        if weights is not None:
+            group_tissues = sorted(
+                group_tissues,
+                key=lambda r: (-int(weights.get(r, 0)), format_legend_label(r)),
+            )
+        else:
+            group_tissues = sorted(group_tissues, key=format_legend_label)
+        for tissue in group_tissues:
+            palette_key = (
+                _scatter_subcortical_palette_key(tissue) if group == "subcortical" else group
+            )
+            colors = _SCATTER_REGION_GROUP_COLORS.get(palette_key, _SCATTER_REGION_GROUP_COLORS["other"])
+            j = counters.get(palette_key, 0)
+            palette[tissue] = colors[j % len(colors)]
+            counters[palette_key] = j + 1
+
+    # Tissues whose region group isn't in the canonical 4 → bucket into "other".
+    leftover = [t for t in tset if t not in palette]
+    for tissue in sorted(leftover, key=format_legend_label):
+        colors = _SCATTER_REGION_GROUP_COLORS["other"]
+        j = counters.get("other", 0)
+        palette[tissue] = colors[j % len(colors)]
+        counters["other"] = j + 1
+    return palette
+
+
+def _resolve_group_palette(
+    group_by: str,
+    group_values: Sequence[str],
+    palette_override: Mapping[str, object] | None,
+    df: pd.DataFrame | None = None,
+) -> dict[str, object]:
+    if palette_override is not None:
+        return {str(k): v for k, v in palette_override.items()}
+    g = str(group_by).lower()
+    if g == "model":
+        return {str(v): MODEL_COLORS.get(str(v).lower(), "#777777") for v in group_values}
+    if g in {"gtex_region", "region"}:
+        rg_lookup = None
+        weights = None
+        if df is not None and "region_group" in df.columns:
+            rg_lookup = (
+                df[["gtex_region", "region_group"]]
+                .dropna()
+                .drop_duplicates()
+                .astype(str)
+                .set_index("gtex_region")["region_group"]
+                .to_dict()
+            )
+        if df is not None and "n_samples" in df.columns:
+            weights = (
+                df.dropna(subset=["gtex_region"])
+                .groupby("gtex_region")["n_samples"]
+                .first()
+                .astype(int)
+                .to_dict()
+            )
+        return _tissue_palette(group_values, region_group_lookup=rg_lookup, weights=weights)
+    if g == "region_group":
+        return {str(v): _SCATTER_REGION_GROUP_BASE.get(str(v), "#777777") for v in group_values}
+    palette_colors = sns.color_palette("tab20", n_colors=max(1, len(group_values)))
+    return {str(v): palette_colors[i % len(palette_colors)] for i, v in enumerate(group_values)}
+
+
+def _ordered_group_values(
+    group_by: str,
+    values: Sequence[str],
+    df: pd.DataFrame | None = None,
+) -> list[str]:
+    """Display order for the group axis. For `'gtex_region'` mirrors the
+    palette's group → frequency → label sort (so legend order matches
+    color order)."""
+    g = str(group_by).lower()
+    raw = list({str(v) for v in values})
+    if g == "model":
+        return ordered_models(raw)
+    if g in {"gtex_region", "region"}:
+        # Build the same lookup the palette uses, then order accordingly.
+        rg_lookup: dict[str, str]
+        if df is not None and "region_group" in df.columns:
+            rg_lookup = (
+                df[["gtex_region", "region_group"]]
+                .dropna().drop_duplicates().astype(str)
+                .set_index("gtex_region")["region_group"]
+                .to_dict()
+            )
+        else:
+            rg_lookup = {t: _tissue_to_region_group(t) for t in raw}
+        if df is not None and "n_samples" in df.columns:
+            weights = (
+                df.dropna(subset=["gtex_region"])
+                .groupby("gtex_region")["n_samples"]
+                .first().astype(int).to_dict()
+            )
+        else:
+            weights = {}
+        ordered: list[str] = []
+        for group in _SCATTER_REGION_GROUP_ORDER:
+            ts = [t for t in raw if rg_lookup.get(t, "other") == group]
+            ts = sorted(ts, key=lambda r: (-int(weights.get(r, 0)), format_legend_label(r)))
+            ordered.extend(ts)
+        leftover = [t for t in raw if t not in ordered]
+        ordered.extend(sorted(leftover, key=format_legend_label))
+        return ordered
+    if g == "region_group":
+        present = set(raw)
+        return [v for v in _SCATTER_REGION_GROUP_ORDER if v in present] + sorted(
+            v for v in present if v not in _SCATTER_REGION_GROUP_ORDER
+        )
+    return sorted(raw)
+
+
+def compute_genewise_metrics(
+    view: Mapping[str, object],
+    models: Sequence[str] | None = None,
+    metrics: Sequence[str] = ("pearson_r", "r2", "rmse"),
+    stratify_by: str | None = None,
+    n_jobs: int | None = None,
+    chunk_size: int = 256,
+) -> pd.DataFrame:
+    """Per-(model[, stratum], gene) metric table.
+
+    Wraps :func:`compute_prediction_metrics` with `unit='gene'`. When
+    `stratify_by` is set (e.g. ``'gtex_region'``), the view is filtered per
+    stratum value, gene-wise metrics are computed within each filter, and the
+    results are concatenated with the stratum value attached as a column.
+    `n_samples` becomes per-stratum in that case (the actual count used for
+    that gene's metric within that tissue).
+
+    Robust to alternate gene panels — the gene axis is whatever
+    ``view['genes']`` resolves to (set upstream via
+    ``make_prediction_eval_view(eval_gene_list_path=...)``).
+    """
+    base_view = dict(view)
+    if models is not None:
+        base_view["models"] = list(models)
+
+    if stratify_by is None:
+        metric_df, _ = compute_prediction_metrics(
+            base_view, unit="gene", metrics=metrics,
+            n_jobs=n_jobs, chunk_size=chunk_size,
+        )
+        metric_df["model"] = metric_df["model"].astype(str).str.lower()
+        return metric_df
+
+    truth_df = base_view["truth_df"]
+    pred_dfs = base_view["pred_dfs"]
+    col = _normalize_stratify_by(stratify_by, truth_df.columns)
+    if col is None:
+        raise KeyError(f"stratify_by={stratify_by!r} not found in truth_df columns")
+
+    rows: list[pd.DataFrame] = []
+    # Pre-compute auxiliary lookups so the plotters can route through the
+    # existing scatter palette convention (region_group → 4-bucket palette).
+    aux_cols: list[str] = []
+    if col == "gtex_region" and "region_group" in truth_df.columns:
+        aux_cols.append("region_group")
+    aux_lookup: dict[str, dict[str, str]] = {}
+    for ac in aux_cols:
+        aux_lookup[ac] = (
+            truth_df[[col, ac]].dropna().drop_duplicates().astype(str)
+            .set_index(col)[ac].to_dict()
+        )
+
+    for stratum_val, idx in truth_df.groupby(col, sort=False).groups.items():
+        sub_truth = truth_df.loc[idx].reset_index(drop=True)
+        sub_preds = {m: df.loc[idx].reset_index(drop=True) for m, df in pred_dfs.items()}
+        sub_view = dict(base_view)
+        sub_view["truth_df"] = sub_truth
+        sub_view["pred_dfs"] = sub_preds
+        d, _ = compute_prediction_metrics(
+            sub_view, unit="gene", metrics=metrics,
+            n_jobs=n_jobs, chunk_size=chunk_size,
+        )
+        d[col] = str(stratum_val)
+        for ac, lookup in aux_lookup.items():
+            d[ac] = lookup.get(str(stratum_val), "other")
+        rows.append(d)
+    out = pd.concat(rows, ignore_index=True)
+    out["model"] = out["model"].astype(str).str.lower()
+    return out
+
+
+_GENEWISE_RANKED_FONTS = {
+    "title":        "xl",
+    "xlabel":       "l",
+    "ylabel":       "l",
+    "tick":         "m",
+    "legend":       "m",
+    "legend_title": "m",
+    "gene_label":   "s",
+    "subtitle":     "s+1",
+}
+
+_GENEWISE_HIST_FONTS = {
+    "title":        "xl",
+    "xlabel":       "l",
+    "ylabel":       "l",
+    "tick":         "m",
+    "legend":       "m",
+    "legend_title": "m",
+    "subtitle":     "s+1",
+}
+
+
+def _genewise_rank_ascending(metric: str) -> bool:
+    """Direction-aware rank order for 'worst → best' on the x-axis."""
+    return str(metric).lower() != "rmse"
+
+
+def _format_n_samples_subtitle(group_summary: pd.DataFrame) -> str:
+    vals = pd.to_numeric(group_summary.get("n_samples", pd.Series([])), errors="coerce").dropna()
+    if vals.empty:
+        return ""
+    vmin = int(vals.min())
+    vmax = int(vals.max())
+    if vmin == vmax:
+        return f"n = {vmin:,} samples"
+    return f"n = {vmin:,} … {vmax:,} samples (varies by group)"
+
+
+def plot_genewise_ranked_overlay(
+    genewise_df: pd.DataFrame,
+    metric: str = "pearson_r",
+    group_by: str = "model",
+    groups: Sequence[str] | None = None,
+    anchor: str | None = None,
+    palette_override: Mapping[str, object] | None = None,
+    gene_label_step_pct: float | None = 10.0,
+    labeled_genes: Sequence[str] | None = None,
+    figsize: Tuple[float, float] = (13.0, 6.5),
+    dpi: int = 180,
+    line_width: float = 1.8,
+    font_sizes: Mapping[str, str | int] | None = None,
+) -> Tuple[plt.Figure, plt.Axes, dict[str, pd.DataFrame]]:
+    """Per-gene metric ranked across all genes, one line per `group_by` value.
+
+    `group_by`:
+      - ``'model'`` (default) — line per model, colored via `MODEL_COLORS`.
+      - ``'gtex_region'`` — line per tissue (caller usually pre-filters to one model).
+      - ``'region_group' | 'sex' | 'age' | 'subject'`` — analogous.
+
+    Sorting is direction-aware (`'rmse'` descending). `anchor` is the group
+    value whose rank order anchors the gene-name labels; defaults to `'plam'`
+    for model mode, otherwise the first group in display order. Labels are
+    placed **on the curve** (slightly offset above) at the anchor's
+    `(rank_pct, metric)` value.
+
+    Each legend entry includes per-group `n_samples` so you can see at a
+    glance how many GTEx samples backed that line — uniform across models at
+    the global level, varying when stratified by tissue.
+    """
+    metric = str(metric).lower()
+    needed = {"gene", "model", metric}
+    missing = needed - set(genewise_df.columns)
+    if missing:
+        raise KeyError(f"genewise_df missing columns: {sorted(missing)}")
+
+    group_col = _normalize_group_by(group_by)
+    if group_col != "model" and group_col not in genewise_df.columns:
+        raise KeyError(
+            f"group_by={group_by!r} requires column {group_col!r} in genewise_df; "
+            f"compute the table with stratify_by={group_col!r}"
+        )
+
+    df = genewise_df.copy()
+    df["model"] = df["model"].astype(str).str.lower()
+    if groups is not None:
+        keep = {str(g) for g in groups}
+        df = df[df[group_col].astype(str).isin(keep)]
+
+    group_values = _ordered_group_values(group_by, df[group_col].astype(str).unique(), df=df)
+    if not group_values:
+        raise RuntimeError("genewise_df is empty after group filter")
+
+    if anchor is None:
+        anchor_resolved = "plam" if "plam" in group_values else group_values[0]
+    else:
+        anchor_resolved = str(anchor)
+    if anchor_resolved not in group_values:
+        raise ValueError(f"anchor={anchor_resolved!r} not in groups: {group_values}")
+
+    fonts = _resolve_fonts(_GENEWISE_RANKED_FONTS, font_sizes)
+    palette = _resolve_group_palette(group_by, group_values, palette_override, df=df)
+
+    ascending = _genewise_rank_ascending(metric)
+    ranked: dict[str, pd.DataFrame] = {}
+    summary_rows: list[dict] = []
+    for g in group_values:
+        d = df[df[group_col].astype(str) == g].dropna(subset=[metric]).copy()
+        if len(d) == 0:
+            continue
+        d = d.sort_values([metric, "gene"], ascending=[ascending, True]).reset_index(drop=True)
+        d["rank_pct"] = (
+            np.linspace(0.0, 100.0, len(d)) if len(d) > 1 else np.array([50.0])
+        )
+        ranked[g] = d
+        n_samp = int(d["n_samples"].iloc[0]) if "n_samples" in d.columns and len(d) else 0
+        summary_rows.append({"group": g, "n_genes": len(d), "n_samples": n_samp})
+    if not ranked:
+        raise RuntimeError("All groups empty after dropping NaN metric values")
+    group_summary = pd.DataFrame(summary_rows)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+    for g in group_values:
+        d = ranked.get(g)
+        if d is None:
+            continue
+        n_samp = int(d["n_samples"].iloc[0]) if "n_samples" in d.columns and len(d) else 0
+        n_label = f"{n_samp:,}" if n_samp else "?"
+        legend_label = (
+            model_label(g) if group_by == "model" else format_legend_label(g)
+        )
+        ax.plot(
+            d["rank_pct"].to_numpy(dtype=np.float64),
+            d[metric].to_numpy(dtype=np.float64),
+            color=palette.get(g, "#777777"),
+            linewidth=float(line_width), alpha=0.95,
+            label=f"{legend_label} (n={len(d):,} genes, {n_label} samples)",
+        )
+
+    n_genes_max = int(group_summary["n_genes"].max())
+    ax.set_xlim(0.0, 100.0)
+    ax.set_xticks([0, 25, 50, 75, 100])
+    direction = "worst → best" if ascending else "worst (high RMSE) → best (low RMSE)"
+    ax.set_xlabel(f"Gene rank percentile ({direction})", fontsize=fonts["xlabel"])
+    ax.set_ylabel(format_legend_label(metric), fontsize=fonts["ylabel"])
+    ax.set_title(
+        f"Per-Gene {format_legend_label(metric)} — Ranked by {format_legend_label(group_by)}"
+        f"  (n={n_genes_max:,} genes per line)",
+        fontsize=fonts["title"],
+    )
+    subtitle = _format_n_samples_subtitle(group_summary)
+    if subtitle:
+        ax.text(
+            0.0, 1.012, subtitle,
+            transform=ax.transAxes, ha="left", va="bottom",
+            fontsize=fonts["subtitle"], color="#444444",
+        )
+    ax.grid(True, alpha=0.18)
+    apply_tick_style(ax, label_fontsize=fonts["tick"])
+
+    legend_title = (
+        f"{format_legend_label(group_by)}  (anchor: {format_legend_label(anchor_resolved)})"
+        if group_by != "model"
+        else f"Model  (anchor: {model_label(anchor_resolved)})"
+    )
+    ax.legend(
+        title=legend_title,
+        frameon=True, fancybox=False, loc="best",
+        fontsize=fonts["legend"], title_fontsize=fonts["legend_title"],
+    )
+
+    if gene_label_step_pct is not None and float(gene_label_step_pct) > 0:
+        anchor_d = ranked.get(anchor_resolved)
+        if anchor_d is not None and len(anchor_d) > 0:
+            n = len(anchor_d)
+            step = float(gene_label_step_pct)
+            anchor_pcts = np.arange(0.0, 100.0 + 1e-9, step)
+            anchor_pcts = anchor_pcts[(anchor_pcts >= 0.0) & (anchor_pcts <= 100.0)]
+            anchor_color = palette.get(anchor_resolved, "#222222")
+            for pct in anchor_pcts:
+                idx = int(round(pct / 100.0 * (n - 1)))
+                idx = max(0, min(idx, n - 1))
+                gene = str(anchor_d.iloc[idx]["gene"])
+                y_val = float(anchor_d.iloc[idx][metric])
+                ax.annotate(
+                    gene,
+                    xy=(float(pct), y_val),
+                    xytext=(0, 10),
+                    textcoords="offset points",
+                    ha="center", va="bottom",
+                    rotation=55, rotation_mode="anchor",
+                    fontsize=fonts["gene_label"],
+                    color=anchor_color,
+                )
+
+    if labeled_genes:
+        anchor_d = ranked.get(anchor_resolved)
+        if anchor_d is not None:
+            anchor_lookup = anchor_d.set_index("gene")
+            for gene in labeled_genes:
+                g = str(gene)
+                if g not in anchor_lookup.index:
+                    continue
+                row = anchor_lookup.loc[g]
+                x_pos = float(row["rank_pct"])
+                y_pos = float(row[metric])
+                ax.annotate(
+                    g,
+                    xy=(x_pos, y_pos),
+                    xytext=(0, 26),
+                    textcoords="offset points",
+                    ha="center", va="bottom",
+                    fontsize=fonts["gene_label"] + 1,
+                    color="#222222",
+                    arrowprops=dict(arrowstyle="-", color="#666", lw=0.6),
+                )
+
+    fig.tight_layout()
+    return fig, ax, ranked
+
+
+def plot_genewise_histogram(
+    genewise_df: pd.DataFrame,
+    metric: str = "pearson_r",
+    group_by: str = "model",
+    groups: Sequence[str] | None = None,
+    palette_override: Mapping[str, object] | None = None,
+    bins: int = 60,
+    alpha: float = 0.42,
+    show_median: bool = True,
+    figsize: Tuple[float, float] = (10.5, 5.4),
+    dpi: int = 180,
+    font_sizes: Mapping[str, str | int] | None = None,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Overlapping per-gene metric histograms, one per `group_by` value.
+
+    Same `group_by` semantics as :func:`plot_genewise_ranked_overlay`. When
+    `group_by='gtex_region'`, caller typically pre-filters to a single model.
+    Median rule per group is drawn in that group's color when
+    `show_median=True`. Each legend entry includes the per-group `n_samples`.
+    """
+    metric = str(metric).lower()
+    if "model" not in genewise_df.columns or metric not in genewise_df.columns:
+        raise KeyError(f"genewise_df must include 'model' and '{metric}' columns")
+
+    group_col = _normalize_group_by(group_by)
+    if group_col != "model" and group_col not in genewise_df.columns:
+        raise KeyError(
+            f"group_by={group_by!r} requires column {group_col!r} in genewise_df"
+        )
+
+    df = genewise_df.copy()
+    df["model"] = df["model"].astype(str).str.lower()
+    if groups is not None:
+        keep = {str(g) for g in groups}
+        df = df[df[group_col].astype(str).isin(keep)]
+    group_values = _ordered_group_values(group_by, df[group_col].astype(str).unique(), df=df)
+    if not group_values:
+        raise RuntimeError("genewise_df is empty after group filter")
+
+    fonts = _resolve_fonts(_GENEWISE_HIST_FONTS, font_sizes)
+    palette = _resolve_group_palette(group_by, group_values, palette_override, df=df)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+    n_samples_summary = []
+    for g in group_values:
+        sub = df[df[group_col].astype(str) == g]
+        d = pd.to_numeric(sub[metric], errors="coerce").dropna()
+        if len(d) == 0:
+            continue
+        n_samp = int(sub["n_samples"].iloc[0]) if "n_samples" in sub.columns and len(sub) else 0
+        n_samples_summary.append({"group": g, "n_samples": n_samp})
+        med = float(d.median())
+        c = palette.get(g, "#777777")
+        legend_label = model_label(g) if group_by == "model" else format_legend_label(g)
+        ax.hist(
+            d.to_numpy(dtype=np.float64),
+            bins=int(bins),
+            alpha=float(alpha),
+            color=c,
+            linewidth=0.4,
+            edgecolor="white",
+            label=f"{legend_label} (n={len(d):,} genes, {n_samp:,} samples; med={med:.3f})",
+        )
+        if show_median:
+            ax.axvline(med, color=c, linestyle="--", linewidth=1.0, alpha=0.9, zorder=5)
+
+    ax.set_xlabel(format_legend_label(metric), fontsize=fonts["xlabel"])
+    ax.set_ylabel("Number of genes", fontsize=fonts["ylabel"])
+    ax.set_title(
+        f"Per-Gene {format_legend_label(metric)} — Distribution by {format_legend_label(group_by)}",
+        fontsize=fonts["title"],
+    )
+    if n_samples_summary:
+        sub = _format_n_samples_subtitle(pd.DataFrame(n_samples_summary))
+        if sub:
+            ax.text(
+                0.0, 1.012, sub,
+                transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=fonts["subtitle"], color="#444444",
+            )
+    ax.grid(True, axis="y", alpha=0.18)
+    apply_tick_style(ax, label_fontsize=fonts["tick"])
+    ax.legend(
+        title=format_legend_label(group_by),
+        frameon=True, fancybox=False, loc="best",
+        fontsize=fonts["legend"], title_fontsize=fonts["legend_title"],
+    )
+    fig.tight_layout()
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# Within-subject spatial Kendall-τ (per gene, across that subject's regions)
+# ---------------------------------------------------------------------------
+
+
+def _kendall_cache_key(view: Mapping[str, object], models: Sequence[str], min_regions: int) -> str:
+    import hashlib
+    truth = view["truth_df"]
+    fields: list[tuple[str, str]] = [
+        ("models", ",".join(sorted(str(m).lower() for m in models))),
+        ("min_regions", str(int(min_regions))),
+        ("n_genes", str(len(view["genes"]))),
+        ("genes_head", ",".join(sorted(map(str, view["genes"]))[:32])),
+        ("subjects", ",".join(sorted(truth["subject"].astype(str).unique().tolist()))),
+        ("n_rows", str(len(truth))),
+    ]
+    return hashlib.sha256(repr(sorted(fields)).encode("utf-8")).hexdigest()[:16]
+
+
+def compute_within_subject_kendall(
+    view: Mapping[str, object],
+    models: Sequence[str] | None = None,
+    *,
+    min_regions: int = 5,
+    cache: bool = True,
+    cache_dir: str | Path | None = None,
+    force_rebuild: bool = False,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Per (subject, gene, model) Kendall-τ between truth and prediction across
+    that subject's covered regions.
+
+    For each subject `s` with `k_s` covered regions, computes
+    ``scipy.stats.kendalltau(truth[s, regions, gene], pred[s, regions, gene])``
+    for every gene. Subjects with `k_s < min_regions` are dropped (Kendall
+    on small `k` is dominated by sampling noise of the τ itself).
+
+    Returns a long DataFrame with columns:
+    ``subject, gene, model, kendall_tau, n_regions``.
+
+    Disk-cached to ``out/genewise_kendall/<hash>.pkl`` keyed on
+    `(models, min_regions, gene panel, subject set, row count)`. Pass
+    ``force_rebuild=True`` to bypass.
+
+    Cost: ~250 subjects × ~13k genes × 3 models ≈ 10M scipy.kendalltau calls;
+    expect minutes at all-genes scope, seconds for HVG-100. Use a smaller gene
+    panel via ``view`` (built with `eval_gene_list_path=...`) to iterate.
+    """
+    import pickle, time
+    from scipy.stats import kendalltau
+
+    truth_df = view["truth_df"]
+    pred_dfs = view["pred_dfs"]
+    genes = list(view["genes"])
+    use_models = ordered_models(list(models) if models is not None else view["models"])
+    min_regions = max(2, int(min_regions))
+
+    cache_root = Path(cache_dir) if cache_dir is not None else Path("notebooks/cache/genewise_kendall")
+    digest = _kendall_cache_key(view, use_models, min_regions)
+    cache_path = cache_root / f"{digest}.pkl"
+
+    if cache and cache_path.exists() and not force_rebuild:
+        if verbose:
+            sz = cache_path.stat().st_size / (1024 * 1024)
+            print(f"[kendall_cache] hit  {cache_path}  ({sz:.1f} MB)")
+        with cache_path.open("rb") as fh:
+            return pickle.load(fh)
+
+    if "subject" not in truth_df.columns:
+        raise KeyError("truth_df must include 'subject'")
+    n_genes = len(genes)
+    if n_genes == 0:
+        raise RuntimeError("view has no genes")
+
+    if verbose:
+        print(f"[kendall_cache] miss {cache_path} — computing within-subject Kendall-τ...")
+        print(f"   subjects: {truth_df['subject'].nunique()}, genes: {n_genes}, models: {use_models}, min_regions={min_regions}")
+    t0 = time.time()
+
+    rows: list[pd.DataFrame] = []
+    subj_groups = truth_df.groupby("subject", sort=False).indices
+    for model in use_models:
+        if model not in pred_dfs:
+            raise KeyError(f"pred_dfs missing model={model!r}")
+        pred_df = pred_dfs[model]
+        if len(pred_df) != len(truth_df):
+            raise ValueError(f"pred_df[{model}] not aligned to truth_df")
+        n_done = 0
+        n_kept_subj = 0
+        for subj, idx in subj_groups.items():
+            idx_arr = np.asarray(idx, dtype=np.int64)
+            k_s = int(len(idx_arr))
+            if k_s < min_regions:
+                continue
+            n_kept_subj += 1
+            T = truth_df.iloc[idx_arr][genes].to_numpy(dtype=np.float64)
+            P = pred_df.iloc[idx_arr][genes].to_numpy(dtype=np.float64)
+            taus = np.full(n_genes, np.nan, dtype=np.float64)
+            for gi in range(n_genes):
+                t_col = T[:, gi]
+                p_col = P[:, gi]
+                finite = np.isfinite(t_col) & np.isfinite(p_col)
+                if int(finite.sum()) < min_regions:
+                    continue
+                tt = t_col[finite]
+                pp = p_col[finite]
+                # Constant-truth (or constant-pred) genes have undefined τ.
+                if np.ptp(tt) == 0.0 or np.ptp(pp) == 0.0:
+                    continue
+                try:
+                    tau, _ = kendalltau(tt, pp)
+                except Exception:
+                    continue
+                if np.isfinite(tau):
+                    taus[gi] = float(tau)
+            d = pd.DataFrame({
+                "subject": [str(subj)] * n_genes,
+                "gene":    genes,
+                "model":   [str(model).lower()] * n_genes,
+                "kendall_tau": taus,
+                "n_regions":   [k_s] * n_genes,
+            })
+            rows.append(d)
+            n_done += 1
+            if verbose and n_done % 25 == 0:
+                print(f"   [{model}] {n_done} subjects processed ({n_kept_subj} kept; "
+                      f"{time.time() - t0:.0f}s elapsed)")
+        if verbose:
+            print(f"   [{model}] {n_kept_subj} subjects kept (k ≥ {min_regions}), "
+                  f"{n_done - n_kept_subj} skipped")
+
+    if not rows:
+        raise RuntimeError(
+            f"No subjects had ≥ {min_regions} covered regions; nothing computed."
+        )
+    out = pd.concat(rows, ignore_index=True)
+    elapsed = time.time() - t0
+    if verbose:
+        print(f"[kendall_cache] computed in {elapsed:.0f}s, {len(out):,} rows")
+
+    if cache:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        try:
+            cache_root.chmod(cache_root.stat().st_mode | 0o700)
+        except PermissionError:
+            pass
+        tmp_path = cache_path.with_suffix(".pkl.tmp")
+        try:
+            with tmp_path.open("wb") as fh:
+                pickle.dump(out, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            tmp_path.replace(cache_path)
+            cache_path.chmod(cache_path.stat().st_mode | 0o600)
+            if verbose:
+                sz = cache_path.stat().st_size / (1024 * 1024)
+                print(f"[kendall_cache] saved {cache_path} ({sz:.1f} MB)")
+        except PermissionError as e:
+            if verbose:
+                print(f"[kendall_cache] WARNING — could not write {cache_path}: {e}")
+    return out
+
+
+def summarize_kendall_per_unit(
+    kendall_long: pd.DataFrame,
+    unit_col: str,
+) -> pd.DataFrame:
+    """Aggregate the long Kendall table to one row per (model, unit) with
+    ``median, mean, std, n_units, n_valid``.
+
+    `unit_col` is `'gene'` (group across subjects) or `'subject'` (group
+    across genes). The opposite axis becomes the inner unit count.
+
+    NaN τ values (constant-truth genes, too-few-finite-regions) are skipped
+    by all aggregations; `n_valid` records how many τ values went into the
+    median for that (model, unit) cell.
+    """
+    if unit_col not in {"subject", "gene"}:
+        raise ValueError("unit_col must be 'subject' or 'gene'")
+    inner_col = "gene" if unit_col == "subject" else "subject"
+    if not {"model", "subject", "gene", "kendall_tau"}.issubset(kendall_long.columns):
+        raise KeyError("kendall_long must include subject, gene, model, kendall_tau columns")
+
+    grp = kendall_long.groupby(["model", unit_col], dropna=False)["kendall_tau"]
+    summary = pd.DataFrame({
+        "median": grp.median(),
+        "mean":   grp.mean(),
+        "std":    grp.std(ddof=1),
+        "n_inner_total": grp.size(),
+        "n_valid":  grp.apply(lambda s: int(s.notna().sum())),
+    }).reset_index()
+    summary = summary.rename(columns={"n_inner_total": f"n_{inner_col}"})
+    summary["model"] = summary["model"].astype(str).str.lower()
+    return summary
+
+
+_KENDALL_RANKED_FONTS = {
+    "title":        "xxl",
+    "xlabel":       "l+1",
+    "ylabel":       "l+2",
+    "tick":         "s",
+    "legend":       "m+2",
+    "legend_title": "m+3",
+}
+
+
+def plot_unitwise_kendall_ranked(
+    summary_df: pd.DataFrame,
+    unit_col: str,
+    *,
+    metric_col: str = "median",
+    models: Sequence[str] | None = None,
+    sparsify: int | None = 100,
+    anchor_model: str = "plam",
+    figsize: Tuple[float, float] | None = None,
+    dpi: int = 180,
+    bottom_quantile: float | None = 0.20,
+    top_quantile: float | None = None,
+    font_sizes: Mapping[str, str | int] | None = None,
+) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
+    """Ranked plot of within-subject Kendall-τ aggregated per unit.
+
+    Mirrors :func:`eval_single_subject.plot_subject_performance_ranked` but
+    operates on the generic `(model, unit_col, metric_col)` summary produced
+    by :func:`summarize_kendall_per_unit`. `unit_col` is ``'gene'`` (one x
+    per gene) or ``'subject'`` (one x per subject); `metric_col` is
+    ``'median'`` (default, NaN-robust) or ``'mean'``.
+
+    Sort order: worst → best by anchor model's `metric_col`. Markers only
+    (no connecting lines), faint dotted y-grid, two-line tick labels with
+    unit ID + anchor-percentile when sparsified, optional bottom-quantile
+    red shading.
+    """
+    if unit_col not in {"subject", "gene"}:
+        raise ValueError("unit_col must be 'subject' or 'gene'")
+    needed = {"model", unit_col, metric_col}
+    missing = needed - set(summary_df.columns)
+    if missing:
+        raise KeyError(f"summary_df missing columns: {sorted(missing)}")
+
+    df = summary_df.copy()
+    df["model"] = df["model"].astype(str).str.lower()
+    if models is not None:
+        keep = {str(m).lower() for m in models}
+        df = df[df["model"].isin(keep)]
+    if df.empty:
+        raise RuntimeError("summary_df is empty after model filter")
+
+    anchor = str(anchor_model).lower()
+    plot_models = ordered_models(df["model"].unique())
+    if anchor not in plot_models:
+        raise ValueError(f"anchor_model={anchor!r} not in {plot_models}")
+
+    # Anchor sort: worst → best (Kendall-τ is higher = better).
+    anchor_d = (
+        df[df["model"] == anchor]
+        .dropna(subset=[metric_col])
+        .sort_values([metric_col, unit_col], ascending=[True, True])
+        .reset_index(drop=True)
+    )
+    keep_units = list(anchor_d[unit_col].astype(str))
+
+    # Sparsify if requested: pick evenly-spaced anchor-percentile units.
+    if sparsify is not None and int(sparsify) > 0 and len(keep_units) > int(sparsify):
+        n = int(sparsify)
+        step = len(keep_units) / n
+        idxs = [min(len(keep_units) - 1, int(round(step * (i + 0.5)))) for i in range(n)]
+        keep_units = [keep_units[i] for i in idxs]
+
+    sparsified = sparsify is not None and int(sparsify or 0) > 0 and len(keep_units) <= int(sparsify or 0)
+    n_units = len(keep_units)
+
+    # Per-unit anchor-percentile (computed against the FULL anchor distribution,
+    # not the post-sparsification subset, so labels are honest).
+    anchor_pcts = (
+        anchor_d.assign(_rank=np.linspace(0, 100, len(anchor_d)) if len(anchor_d) > 1 else np.array([50.0]))
+        .set_index(unit_col)["_rank"].astype(float)
+    )
+
+    df_kept = df[df[unit_col].astype(str).isin(keep_units)].copy()
+    pos = {u: i for i, u in enumerate(keep_units)}
+    df_kept["_x"] = df_kept[unit_col].astype(str).map(pos)
+    df_kept = df_kept.sort_values(["model", "_x"]).reset_index(drop=True)
+
+    fonts = _resolve_fonts(_KENDALL_RANKED_FONTS, font_sizes)
+    if figsize is None:
+        figsize = (min(28.0, max(10.0, 0.16 * n_units + 4.0)), 5.4)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+
+    if bottom_quantile is not None and 0.0 < float(bottom_quantile) < 1.0:
+        bottom_n = max(1, int(round(float(bottom_quantile) * n_units)))
+        ax.axvspan(-0.5, bottom_n - 0.5, color="#cc0000", alpha=0.07, zorder=0)
+    if top_quantile is not None and 0.0 < float(top_quantile) < 1.0:
+        top_n = max(1, int(round(float(top_quantile) * n_units)))
+        ax.axvspan(n_units - top_n - 0.5, n_units - 0.5, color="#1b7837", alpha=0.07, zorder=0)
+
+    # Tick density auto-scales with n_units.
+    if n_units <= 20:
+        tick_default = "s+1"
+    elif n_units <= 60:
+        tick_default = "s"
+    elif n_units <= 150:
+        tick_default = "xs"
+    else:
+        tick_default = "xs-1"
+    if font_sizes is None or "tick" not in font_sizes:
+        local = dict(font_sizes or {})
+        local["tick"] = tick_default
+        fonts = _resolve_fonts(_KENDALL_RANKED_FONTS, local)
+
+    for m in plot_models:
+        dm = df_kept[df_kept["model"] == m]
+        if dm.empty:
+            continue
+        c = MODEL_COLORS.get(m, "#777777")
+        is_anchor = (m == anchor)
+        yerr = dm["std"].fillna(0.0) if "std" in dm.columns else None
+        ax.errorbar(
+            dm["_x"], dm[metric_col],
+            yerr=yerr,
+            fmt="o", color=c, ecolor=c,
+            markersize=4.6 if is_anchor else 4.0,
+            linewidth=0.0,
+            elinewidth=0.7, capsize=1.6,
+            label=model_label(m) + (" (anchor)" if is_anchor else ""),
+            alpha=0.92 if is_anchor else 0.78,
+            zorder=3 if is_anchor else 2,
+        )
+
+    x_idx = np.arange(n_units)
+    ax.set_xticks(x_idx)
+    ax.set_xticklabels(keep_units, rotation=80, ha="right", fontsize=fonts["tick"])
+
+    pct_fontsize = max(5, fonts["tick"] - 1)
+    for x_i, unit in zip(x_idx, keep_units):
+        pct = float(anchor_pcts.get(unit, np.nan))
+        if not np.isfinite(pct):
+            continue
+        ax.text(
+            float(x_i), 0.012, f"{pct:.0f}",
+            transform=ax.get_xaxis_transform(),
+            ha="center", va="bottom",
+            fontsize=pct_fontsize, color="#444444",
+        )
+
+    direction_word = "ascending"  # always: Kendall-τ higher = better → worst-first sort is ascending
+    ax.set_xlabel(
+        f"{format_legend_label(unit_col)} (worst → best by {model_label(anchor)} {direction_word} {format_legend_label('kendall_tau')})",
+        fontsize=fonts["xlabel"],
+    )
+    metric_word = format_legend_label(metric_col).lower() if metric_col != "median" else "median"
+    ax.set_ylabel(
+        f"{metric_word} {format_legend_label('kendall_tau')} per {format_legend_label(unit_col).lower()}",
+        fontsize=fonts["ylabel"],
+    )
+    ax.set_title(
+        f"Within-Subject Kendall-τ — {format_legend_label(unit_col)} ({metric_word} across "
+        f"{'genes' if unit_col == 'subject' else 'subjects'})",
+        fontsize=fonts["title"],
+    )
+    ax.grid(True, axis="y", alpha=0.12, linewidth=0.6, linestyle=":")
+    ax.set_axisbelow(True)
+
+    from matplotlib.patches import Patch
+    handles, labels = ax.get_legend_handles_labels()
+    if bottom_quantile is not None and 0.0 < float(bottom_quantile) < 1.0:
+        pct = int(round(float(bottom_quantile) * 100))
+        handles.append(Patch(facecolor="#cc0000", edgecolor="none", alpha=0.07))
+        labels.append(f"Bottom {pct}% (`bottom_quantile`)")
+    if top_quantile is not None and 0.0 < float(top_quantile) < 1.0:
+        pct = int(round(float(top_quantile) * 100))
+        handles.append(Patch(facecolor="#1b7837", edgecolor="none", alpha=0.07))
+        labels.append(f"Top {pct}% (`top_quantile`)")
+    ax.legend(
+        handles, labels, title="Model",
+        frameon=True, fancybox=False, loc="upper left",
+        fontsize=fonts["legend"], title_fontsize=fonts["legend_title"],
+    )
+    apply_tick_style(ax, label_fontsize=fonts["tick"])
+    fig.tight_layout()
+    return fig, ax, df_kept
 
 
 def plot_metric_violins(

@@ -33,7 +33,7 @@ def main() -> None:
     cfg: Dict[str, Any] = load_workflow_config(Path(args.config))
     bundle = load_dataset_bundle(
         str(cfg.get("csv_path", "data/raw/gxp_samples.csv")),
-        str(cfg.get("hvg_path", "out/raw/gene_lists/ahba_100hvg.txt")),
+        str(cfg.get("hvg_path", "data/metadata/gene_lists/ahba_100hvg.txt")),
         cfg,
     )
     model_results = {

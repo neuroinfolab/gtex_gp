@@ -63,6 +63,7 @@ __all__ = [
     "plot_subject_region_count_distribution",
     "prepare_atlas_median_comparison",
     "prepare_pre_post_harmonization",
+    "prepare_pre_post_harmonization_cached",
     "pretty_gtex_label",
     "region_covariance_matrices",
     "load_eval_gene_list",
@@ -71,6 +72,122 @@ __all__ = [
     "set_academic_style",
     "subject_region_count_distribution",
 ]
+
+
+def _prepost_cache_key(cfg: "EDAConfig") -> str:
+    """Stable 16-hex digest of CFG fields that affect PREPOST output.
+
+    Includes the CSV / HVG file mtime + size so the cache invalidates if
+    those files change.
+    """
+    import hashlib
+    fields: list[tuple[str, str]] = []
+    for attr in (
+        "csv_path", "hvg_path", "gene_scope",
+        "min_observed_parcels", "combat_use_covariates",
+        "gtex_rep_mode", "gtex_hemi_mode",
+    ):
+        if hasattr(cfg, attr):
+            fields.append((attr, str(getattr(cfg, attr))))
+    # Resolved matching policy (auto-detected from cache when cfg.matching_policy is None).
+    # Different policies produce different gtex parcel_idx assignments, so PREPOST blobs
+    # must not be shared across them.
+    try:
+        from src.eval_utils.results_eda import resolve_matching_policy
+        fields.append(("matching_policy", resolve_matching_policy(cfg)))
+    except Exception:
+        fields.append(("matching_policy", str(getattr(cfg, "matching_policy", "centroids") or "centroids")))
+    for path_attr in ("csv_path", "hvg_path"):
+        p = getattr(cfg, path_attr, None)
+        if not p:
+            continue
+        full = Path(p)
+        if not full.is_absolute():
+            full = full.resolve()
+        try:
+            stat = full.stat()
+            fields.append((f"{path_attr}_mtime_ns", str(int(stat.st_mtime_ns))))
+            fields.append((f"{path_attr}_size", str(int(stat.st_size))))
+        except FileNotFoundError:
+            pass
+    blob = repr(sorted(fields)).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def prepare_pre_post_harmonization_cached(
+    cfg: "EDAConfig",
+    *,
+    force_rebuild: bool = False,
+    cache_dir: str | Path | None = None,
+    verbose: bool = True,
+) -> Dict[str, object]:
+    """Disk-cached `prepare_pre_post_harmonization`.
+
+    First call computes PREPOST and pickles it under
+    `out/prepost_cache/<hash>.pkl` (override via `cache_dir`). Subsequent calls
+    on the same EDAConfig load from disk in seconds rather than re-fitting
+    ComBat. The hash key covers the CSV/HVG paths (with their mtime + size),
+    `gene_scope`, `min_observed_parcels`, `combat_use_covariates`,
+    `gtex_rep_mode`, `gtex_hemi_mode` — change any of those and the cache is
+    rebuilt automatically. Set `force_rebuild=True` to bypass.
+
+    Pickled blob includes the harmonized cubes, eligible-subject metadata,
+    and dataframes — typically a few hundred MB at the all-genes scope, much
+    smaller for HVG.
+    """
+    import pickle
+    import time
+
+    cache_root = Path(cache_dir) if cache_dir is not None else Path("notebooks/cache/prepost")
+    digest = _prepost_cache_key(cfg)
+    cache_path = cache_root / f"{digest}.pkl"
+
+    # Repair permissions on dir + existing pickle if NFS/umask created them
+    # without owner read/write (recurring on this filesystem).
+    if cache_root.exists():
+        try:
+            cache_root.chmod(cache_root.stat().st_mode | 0o700)
+            if cache_path.exists():
+                cache_path.chmod(cache_path.stat().st_mode | 0o600)
+        except PermissionError:
+            pass
+
+    if cache_path.exists() and not force_rebuild:
+        if verbose:
+            sz = cache_path.stat().st_size / (1024 * 1024)
+            print(f"[prepost_cache] hit  {cache_path}  ({sz:.1f} MB)")
+        with cache_path.open("rb") as fh:
+            return pickle.load(fh)
+
+    if verbose:
+        print(f"[prepost_cache] miss {cache_path} — computing PREPOST (this is the slow path)...")
+    t0 = time.time()
+    prepost = prepare_pre_post_harmonization(cfg)
+    elapsed = time.time() - t0
+
+    cache_root.mkdir(parents=True, exist_ok=True)
+    # Force owner-rwx on the directory so subsequent writes from the same user
+    # don't trip on NFS-set 0o000 modes.
+    try:
+        cache_root.chmod(cache_root.stat().st_mode | 0o700)
+    except PermissionError:
+        pass
+
+    tmp_path = cache_path.with_suffix(".pkl.tmp")
+    try:
+        with tmp_path.open("wb") as fh:
+            pickle.dump(prepost, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp_path.replace(cache_path)
+        cache_path.chmod(cache_path.stat().st_mode | 0o600)
+    except PermissionError as e:
+        if verbose:
+            print(f"[prepost_cache] WARNING — could not write {cache_path}: {e}")
+            print(f"[prepost_cache] returning computed PREPOST without caching; "
+                  f"fix perms with `chmod -R u+rwX {cache_root}` or pass cache_dir=...")
+    if cache_path.exists() and verbose:
+        sz = cache_path.stat().st_size / (1024 * 1024)
+        print(f"[prepost_cache] computed in {elapsed:.1f}s, cached to {cache_path} ({sz:.1f} MB)")
+    return prepost
 
 
 def _first_non_null(s: pd.Series) -> object:
@@ -181,7 +298,9 @@ def resolve_eval_gene_list_path(path_str: str) -> Path:
                 (root / p).resolve(),
                 (root.parent / "out" / "raw" / "gene_lists" / p).resolve(),
                 (root / "out" / "raw" / "gene_lists" / p).resolve(),
+                (root / "data" / "metadata" / "gene_lists" / p).resolve(),
                 (root / "data" / "raw" / "gene_lists" / p).resolve(),
+                (root / "data" / "metadata" / p).resolve(),
                 (root / "data" / "raw" / p).resolve(),
             ]
         )
@@ -191,7 +310,9 @@ def resolve_eval_gene_list_path(path_str: str) -> Path:
                     (root / f"{raw}.txt").resolve(),
                     (root.parent / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
                     (root / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
+                    (root / "data" / "metadata" / "gene_lists" / f"{raw}.txt").resolve(),
                     (root / "data" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
+                    (root / "data" / "metadata" / f"{raw}.txt").resolve(),
                     (root / "data" / "raw" / f"{raw}.txt").resolve(),
                 ]
             )

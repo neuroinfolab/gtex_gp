@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atlas-agg", choices=["mean", "median"], default=SubjectCacheConfig.atlas_agg)
     p.add_argument("--gtex-rep-mode", choices=["centroid", "medoid"], default=SubjectCacheConfig.gtex_rep_mode)
     p.add_argument("--gtex-hemi-mode", choices=["native", "mirror_left"], default=SubjectCacheConfig.gtex_hemi_mode)
+    p.add_argument(
+        "--matching-policy",
+        choices=["centroids", "centroids_and_volumes"],
+        default=SubjectCacheConfig.matching_policy,
+    )
     return p.parse_args()
 
 
@@ -91,6 +96,7 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         atlas_agg=str(a.atlas_agg).lower(),
         gtex_rep_mode=str(a.gtex_rep_mode).lower(),
         gtex_hemi_mode=str(a.gtex_hemi_mode).lower(),
+        matching_policy=str(a.matching_policy).lower(),
     )
 
 
