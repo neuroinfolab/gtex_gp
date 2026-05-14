@@ -77,13 +77,15 @@ __all__ = [
 def _prepost_cache_key(cfg: "EDAConfig") -> str:
     """Stable 16-hex digest of CFG fields that affect PREPOST output.
 
-    Includes the CSV / HVG file mtime + size so the cache invalidates if
-    those files change.
+    Includes the CSV file mtime + size so the cache invalidates if the
+    underlying expression CSV changes. (HVG list is no longer part of
+    EDAConfig — for gene_scope='hvg', the gene panel comes from the
+    LORO cache itself, which is keyed by `cache_root`.)
     """
     import hashlib
     fields: list[tuple[str, str]] = []
     for attr in (
-        "csv_path", "hvg_path", "gene_scope",
+        "csv_path", "cache_root", "gene_scope",
         "min_observed_parcels", "combat_use_covariates",
         "gtex_rep_mode", "gtex_hemi_mode",
     ):
@@ -97,7 +99,7 @@ def _prepost_cache_key(cfg: "EDAConfig") -> str:
         fields.append(("matching_policy", resolve_matching_policy(cfg)))
     except Exception:
         fields.append(("matching_policy", str(getattr(cfg, "matching_policy", "centroids") or "centroids")))
-    for path_attr in ("csv_path", "hvg_path"):
+    for path_attr in ("csv_path",):
         p = getattr(cfg, path_attr, None)
         if not p:
             continue

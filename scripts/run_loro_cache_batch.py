@@ -109,8 +109,17 @@ def _pick_subjects(eligible: List[str], a: argparse.Namespace) -> List[str]:
         task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", "1"))
         idx = int(task_id) - 1
     if idx is not None:
-        if idx < 0 or idx >= len(eligible):
-            raise IndexError(f"subject index {idx} out of bounds for n={len(eligible)}")
+        if idx < 0:
+            raise IndexError(f"subject index {idx} is negative")
+        if idx >= len(eligible):
+            # Sbatch arrays are sized to a generous upper bound (full GTEx pool)
+            # so the same submission works across policies / floors. Tasks that
+            # land beyond the actual eligible count exit cleanly with no work.
+            print(
+                f"[skip-out-of-range] task_id={idx + 1} n_eligible={len(eligible)} "
+                "-- nothing to do, exiting cleanly"
+            )
+            return []
         return [str(eligible[idx])]
 
     out = list(eligible)

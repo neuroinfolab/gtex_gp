@@ -48,7 +48,6 @@ FONT = {"title": 11, "label": 10, "tick": 9, "legend": 9, "small": 8}
 @dataclass
 class EDAConfig:
     csv_path: str = "data/raw/gxp_samples.csv"
-    hvg_path: str = "data/metadata/gene_lists/ahba_100hvg.txt"
     cache_root: str = "out/loro_subject_cache"
     naive_cache_dirname: str = "naive"
     dlam_cache_dirname: str = "dlam"
@@ -116,42 +115,41 @@ def _resolve_eval_gene_path(path_str: str) -> Path:
     raise FileNotFoundError(f"Could not resolve eval gene file from {path_str!r}")
 
 
-def _resolve_hvg_path(path_str: str) -> Path:
-    raw = str(path_str).strip()
-    candidates: List[Path] = []
-    if raw:
-        p = Path(raw)
-        if p.is_absolute():
-            candidates.append(p)
-        else:
-            candidates.append((REPO_ROOT / p).resolve())
-    candidates.extend(
-        [
-            (REPO_ROOT.parent / "out" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
-            (REPO_ROOT / "out" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
-            (REPO_ROOT / "data" / "metadata" / "gene_lists" / "ahba_100hvg.txt").resolve(),
-            (REPO_ROOT / "data" / "raw" / "gene_lists" / "ahba_100hvg.txt").resolve(),
-            (REPO_ROOT / "data" / "metadata" / "ahba_100hvg.txt").resolve(),
-            (REPO_ROOT / "data" / "raw" / "ahba_100hvg.txt").resolve(),
-            (REPO_ROOT / "ahba_100hvg.txt").resolve(),
-        ]
-    )
-    seen: set[Path] = set()
-    for c in candidates:
-        if c in seen:
-            continue
-        seen.add(c)
-        if c.exists():
-            return c
-    raise FileNotFoundError(
-        "Could not resolve HVG gene list path. Tried: "
-        + ", ".join(str(c) for c in candidates)
-    )
-
-
 @lru_cache(maxsize=32)
-def _cached_gene_header(csv_path_str: str, hvg_path_str: str) -> Dict[str, List[str]]:
-    return io_utils.load_gene_header_and_hvg(Path(csv_path_str), Path(hvg_path_str))
+def _cached_csv_genes_all(csv_path_str: str) -> Tuple[str, ...]:
+    """Return the gene column header of `csv_path` (all genes, not HVG-subsetted)."""
+    import csv as _csv
+    with open(csv_path_str, newline="") as fh:
+        header = next(_csv.reader(fh))
+    return tuple(header[6:])
+
+
+def _genes_from_cache(cfg: "EDAConfig") -> List[str]:
+    """Return the gene set used by the LORO cache at cfg.cache_root/<gene_scope>/.
+
+    Reads `gene_names` from any one subject npz under any model dir. Used when
+    `cfg.gene_scope` == 'hvg' so PREPOST aligns with the gene set the cache
+    was built on (no separate hvg_path needed).
+    """
+    scope_root = (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower()).resolve()
+    if not scope_root.exists():
+        raise FileNotFoundError(f"LORO cache scope dir not found: {scope_root}")
+    for model_attr in ("naive_cache_dirname", "dlam_cache_dirname", "plam_cache_dirname"):
+        sub = scope_root / str(getattr(cfg, model_attr, ""))
+        if not sub.exists():
+            continue
+        for npz_path in sorted(sub.glob("*.npz")):
+            try:
+                with np.load(npz_path, allow_pickle=True) as z:
+                    gns = z["gene_names"].tolist()
+                if gns:
+                    return [str(g) for g in gns]
+            except Exception:
+                continue
+    raise RuntimeError(
+        f"Could not read gene_names from any subject npz under {scope_root}; "
+        "rebuild the LORO cache or set gene_scope='allgenes'."
+    )
 
 
 @lru_cache(maxsize=64)
@@ -180,8 +178,11 @@ def _resolve_eval_gene_set(
     if mode == "all":
         return mode, None, None
     if mode == "hvg":
-        hdr = _cached_gene_header(str(_resolve_repo_path(cfg.csv_path)), str(_resolve_repo_path(cfg.hvg_path)))
-        return mode, str(_resolve_repo_path(cfg.hvg_path)), set(str(g) for g in hdr["genes_hvg"])
+        # cfg.hvg_path is no longer part of EDAConfig; the HVG set for an
+        # `eval_gene_mode='hvg'` request is sourced from the LORO cache itself
+        # (which was built with the corresponding HVG list).
+        genes_cache = _genes_from_cache(cfg)
+        return mode, None, set(str(g) for g in genes_cache)
     if custom_gene_list is None:
         raise ValueError("custom_gene_list is required when eval_gene_mode='custom'")
     genes = set(str(g) for g in custom_gene_list)
@@ -760,9 +761,17 @@ def _pretty_gtex_label(name: str) -> str:
 
 def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
     csv_path = _resolve_repo_path(cfg.csv_path)
-    hvg_path = _resolve_hvg_path(cfg.hvg_path)
-    header = io_utils.load_gene_header_and_hvg(csv_path, hvg_path)
-    genes = header["genes_all"] if str(cfg.gene_scope).lower() == "allgenes" else header["genes_hvg"]
+    genes_all = list(_cached_csv_genes_all(str(csv_path)))
+    scope = str(cfg.gene_scope).lower()
+    if scope == "allgenes":
+        genes = genes_all
+        genes_scope = genes_all
+    elif scope == "hvg":
+        # HVG gene set for the cache is stored inside each subject npz; read once.
+        genes_scope = _genes_from_cache(cfg)
+        genes = genes_scope
+    else:
+        raise ValueError(f"Unknown gene_scope={cfg.gene_scope!r}; expected 'allgenes' or 'hvg'")
     if not genes:
         raise RuntimeError(f"No genes found for scope={cfg.gene_scope}")
 
@@ -779,15 +788,7 @@ def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
     lk = dict(zip(target["tissue_or_parcel"], target["parcel_idx"]))
     ahba_raw["parcel_idx"] = ahba_raw["tissue_or_parcel"].map(lk).astype(np.int32)
     gtex_raw = map_gtex_to_target(gtex_raw, target)
-    # Eligibility is computed on the centroid-mapped parcel_idx, *before* any
-    # policy override. This keeps eligibility a property of the underlying
-    # data (how many distinct anatomical regions a subject contributed),
-    # not an artefact of how we bucket cortical/cerebellar samples
-    # downstream — see eval_population_copy debugging notes 2026-05-07.
-    target_meta = add_target_meta(target)
-    elig = build_subject_eligibility(gtex_raw, min_observed_parcels=int(cfg.min_observed_parcels))
-    subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
-    # Now apply the matching policy used by the LORO cache so prediction
+    # Apply the matching policy used by the LORO cache first so prediction
     # parcel_idx values agree at merge time. Auto-detected from the cache;
     # defaults to 'centroids' for legacy caches.
     policy = resolve_matching_policy(cfg)
@@ -798,11 +799,15 @@ def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
             target,
             matching_policy=policy,
         )
+    # Eligibility is measured under the active policy (matches loro_cache).
+    target_meta = add_target_meta(target)
+    elig = build_subject_eligibility(gtex_raw, min_observed_parcels=int(cfg.min_observed_parcels))
+    subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
     ahba_raw = add_sample_groups(ahba_raw, target_meta)
     gtex_raw = add_sample_groups(gtex_raw, target_meta)
     return {
-        "genes_all": header["genes_all"],
-        "genes_hvg": header["genes_hvg"],
+        "genes_all": genes_all,
+        "genes_hvg": genes_scope if scope == "hvg" else genes_all,
         "genes": genes,
         "ahba_raw": ahba_raw,
         "gtex_raw": gtex_raw,
@@ -810,7 +815,6 @@ def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
         "eligibility": elig,
         "eligible_subjects": subjects,
         "csv_path": csv_path,
-        "hvg_path": hvg_path,
     }
 
 

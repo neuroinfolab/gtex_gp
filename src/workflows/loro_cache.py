@@ -110,15 +110,6 @@ def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
     lk = dict(zip(target["tissue_or_parcel"], target["parcel_idx"]))
     ahba_raw["parcel_idx"] = ahba_raw["tissue_or_parcel"].map(lk).astype(np.int32)
     gtex_raw = map_gtex_to_target(gtex_raw, target)
-    target_meta = add_target_meta(target)
-    # Compute subject eligibility on the centroid-mapped parcel_idx, *before*
-    # apply_gtex_ahba_matching_policy. The policy can collapse anatomical
-    # regions (e.g. cerebellum + cerebellar hemisphere → Cerebellar_Region7),
-    # which would artificially drop subjects below `min_observed_parcels` even
-    # though they sampled enough distinct regions. Eligibility should reflect
-    # the underlying data, not the bucketing convention.
-    elig = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
-    eligible_subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
     gtex_raw = apply_gtex_ahba_matching_policy(
         gtex_raw,
         target,
@@ -126,6 +117,13 @@ def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
         validate_expected=True,
         repo_root=REPO_ROOT,
     )
+    target_meta = add_target_meta(target)
+    # Eligibility is measured against the POST-POLICY parcel scheme. The active
+    # matching_policy IS the analysis bucketing, so `min_observed_parcels` is a
+    # post-collapse floor: subjects with fewer than k distinct parcels after
+    # policy application never enter the cache.
+    elig = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
+    eligible_subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
     ahba_raw = add_sample_groups(ahba_raw, target_meta)
     gtex_raw = add_sample_groups(gtex_raw, target_meta)
     coords_full = target_meta[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)

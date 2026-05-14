@@ -10,16 +10,19 @@
 #SBATCH --error=/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp/out/slurm/loro_array_%A_%a.err
 #SBATCH --mail-type=END
 #SBATCH --mail-user=asr655@nyu.edu
-#SBATCH --array=1-318%64
+#SBATCH --array=1-385%64
+# 385 = full GTEx subject pool (absolute upper bound). Tasks whose index
+# exceeds the policy's eligible-subject count exit cleanly via
+# scripts/run_loro_cache_batch.py (logged as `[skip-out-of-range] ...`).
 
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/scratch/asr655/neuroinformatics/Seq2GeneEx/gtex_gp}"
 MODEL_NAME="${MODEL_NAME:-all}"
 GENE_SCOPE="${GENE_SCOPE:-hvg}"
-HVG_PATH="${HVG_PATH:-data/raw/gene_lists/ahba_100hvg.txt}"
+HVG_PATH="${HVG_PATH:-data/metadata/gene_lists/ahba_100hvg.txt}"
 USE_CACHE="${USE_CACHE:-true}"
-OUT_ROOT="${OUT_ROOT:-out/loro_subject_cache}"
+OUT_ROOT="${OUT_ROOT:-out/loro_subject_cache_c}"  # convention: _c=centroids, _cv=centroids_and_volumes
 LATENT_DIM="${LATENT_DIM:-3}"
 DYNAMIC_RANK="${DYNAMIC_RANK:-false}"
 PLAM_MAX_RANK="${PLAM_MAX_RANK:-10}"

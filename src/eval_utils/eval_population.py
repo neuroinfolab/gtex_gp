@@ -506,7 +506,6 @@ def _manifest_for_global_tables(
             "plam": str(cfg.plam_cache_dirname),
         },
         "csv_path": str(cfg.csv_path),
-        "hvg_path": str(cfg.hvg_path),
         "truth_expression_space": "harmonized",
         "prediction_expression_space": "harmonized",
         "gtex_rep_mode": str(cfg.gtex_rep_mode),

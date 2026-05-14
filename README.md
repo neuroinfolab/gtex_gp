@@ -40,7 +40,8 @@ Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `
 - Per-section mini-config cells: only global config (CFG, MODELS, gene list, view subset, default metric) sits at the top of each eval notebook; section-local knobs live immediately above their use sites for fluid in-notebook iteration. The genewise notebook adds a `build_panel_view(gene_list_path, models=None)` helper closure to consolidate `make_prediction_eval_view` boilerplate.
 - DLAM diagnostics utilities live in `src/eval_utils/dlam_diagnostics.py`.
 - **GTEx<->AHBA matching policy auto-detected from the cache.** `EDAConfig.matching_policy` defaults to `None`; `resolve_matching_policy(cfg)` reads the field from any subject JSON in `<cache_root>/<gene_scope>/<model>/` (top-level or nested under `config.matching_policy`) and falls back to `'centroids'` for legacy caches. PREPOST applies the resolved policy so its parcel_idx values agree with the cache's. Switch `cfg.cache_root` between `loro_subject_cache` and `loro_subject_cache_coord_vol` and the right policy is applied automatically.
-- **Subject eligibility is computed *before* the matching policy** in both `loro_cache.load_dataset` and `_load_expression`. This keeps eligibility a property of the underlying data (distinct centroid-mapped parcels per subject, ≥`min_observed_parcels`) rather than an artefact of the cerebellum/cortex bucketing applied downstream — `centroids_and_volumes` no longer drops subjects that had cerebellum + cerebellar hemisphere by collapsing them to one parcel before the eligibility check.
+- **Subject eligibility follows the matching policy** in both `loro_cache.load_dataset` and `_load_expression`: policy is applied first, then `build_subject_eligibility` measures distinct post-policy parcels. `min_observed_parcels` is therefore a post-collapse floor — subjects whose post-policy coverage is below the threshold never enter the LORO cache and are filtered identically by PREPOST. Empirically: `centroids` floor=5 → 318 eligible, `centroids_and_volumes` floor=5 → 313 (the 5-subject delta is the boundary subjects that carry both cerebellum forms, which collapse from k=5 to k=4); floor=4 admits 17 additional sparse-sampled subjects.
+- **Dynamic sbatch array sizing**: `run_loro_cache_array.sbatch` is fixed at `--array=1-385%64` (full GTEx subject pool ceiling). Tasks beyond the policy's eligible count exit cleanly with a `[skip-out-of-range]` log line via `scripts/run_loro_cache_batch.py`. The same submission line works across all `MATCHING_POLICY` × `MIN_OBSERVED_PARCELS` configurations.
 
 ## Repository Layout
 
@@ -58,6 +59,9 @@ Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `
 Expected defaults:
 - `data/raw/gxp_samples.csv`
 - `data/raw/ahba_100hvg.txt`
+- `docs/samples_builder.md` — detailed pre-`gxp_samples.csv` builder and GTEx
+  filtering workflow (`SMRIN > 6`, TPM/read-count thresholds, AHBA overlap
+  audit)
 
 Legacy root-level fallbacks (`gxp_samples.csv`, `ahba_100hvg.txt`) remain supported for migration, but default code paths use `data/raw/`.
 
@@ -181,4 +185,4 @@ GENE_SCOPE=hvg sbatch scripts/sbatch/run_loro_cache_array.sbatch
 - Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
 - See `CONTEXT.md` for a fast onboarding summary intended for parallel agents, and `context_packages/results_eda_refactor_plan.md` for the live refactor plan.
 
-Last updated at: 2026-05-06
+Last updated at: 2026-05-13
