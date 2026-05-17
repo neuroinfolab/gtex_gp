@@ -61,7 +61,9 @@ Expected defaults:
 - `data/raw/ahba_100hvg.txt`
 - `docs/samples_builder.md` — detailed pre-`gxp_samples.csv` builder and GTEx
   filtering workflow (`SMRIN > 6`, TPM/read-count thresholds, AHBA overlap
-  audit)
+  audit), strict duplicate-subject handling within GTEx tissue files, and
+  atlas-coordinate file fallback behavior when local metadata mirrors are
+  incomplete
 
 Legacy root-level fallbacks (`gxp_samples.csv`, `ahba_100hvg.txt`) remain supported for migration, but default code paths use `data/raw/`.
 
@@ -185,4 +187,4 @@ GENE_SCOPE=hvg sbatch scripts/sbatch/run_loro_cache_array.sbatch
 - Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
 - See `CONTEXT.md` for a fast onboarding summary intended for parallel agents, and `context_packages/results_eda_refactor_plan.md` for the live refactor plan.
 
-Last updated at: 2026-05-13
+Last updated at: 2026-05-14

@@ -58,6 +58,15 @@ Row semantics differ by dataset:
 - `dataset == "GTEx"`: one row per donor per GTEx brain tissue; gene values come from GTEx brain GCT files, averaged within donor for that tissue, then `log1p` transformed; `coordinates` is a list of atlas-derived MNI coordinates for that tissue, shared across donors
 - `dataset == "AHBA"`: one row per AHBA donor per parcel; gene values come from AHBA parcel-level expression tables; `coordinates` is typically a single `(x, y, z)` parcel coordinate
 
+Current builder note:
+
+- GTEx duplicate sample-columns that collapse to the same parsed subject ID
+  within a tissue file are now treated as an error during rebuild, rather than
+  being silently averaged into one row.
+- Optional pre-build GTEx filtering (`SMRIN > 6`, TPM/read-count thresholds,
+  GTEx ∩ AHBA overlap audit) is documented in
+  [`docs/samples_builder.md`](../docs/samples_builder.md).
+
 ### Downstream Note
 
 In `gtex_gp`, the GTEx `coordinates` list is later reduced to a single centroid and then mapped to one AHBA parcel by nearest-neighbor distance. So the spatial assignment used by the modeling pipeline is a downstream simplification of the atlas-derived coordinate lists stored in this CSV.

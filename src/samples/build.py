@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +17,17 @@ from .gtex import (
 from .schema import META_COLS, ordered_columns, validate_gxp_samples
 
 
-def _atlas_file(atlas_dir: Path, name: str) -> Path:
+def _csv_has_columns(path: Path, required_columns: set[str]) -> bool:
+    try:
+        with path.open(newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, [])
+    except OSError:
+        return False
+    return required_columns.issubset({str(col).strip() for col in header})
+
+
+def _atlas_file(atlas_dir: Path, name: str, *, required_columns: set[str] | None = None) -> Path:
     candidates = [
         atlas_dir / name,
         atlas_dir / "AtlasMaps" / name,
@@ -24,7 +35,7 @@ def _atlas_file(atlas_dir: Path, name: str) -> Path:
         Path("/scratch/asr655/neuroinformatics/GeneEx2Conn_data/atlas_info/AtlasMaps") / name,
     ]
     for p in candidates:
-        if p.exists():
+        if p.exists() and (required_columns is None or _csv_has_columns(p, required_columns)):
             return p
     raise FileNotFoundError(f"Could not resolve atlas file {name!r} from {atlas_dir}")
 
@@ -164,6 +175,18 @@ def compute_gtex_ahba_overlap_report(
 
 
 def _align_and_concat(gtex_df: pd.DataFrame, ahba_df: pd.DataFrame, gene_panel: list[str] | None) -> pd.DataFrame:
+    if not gtex_df.columns.is_unique:
+        dupes = gtex_df.columns[gtex_df.columns.duplicated()].unique().tolist()
+        raise ValueError(
+            "GTEx build table has duplicate columns before alignment. "
+            f"Sample duplicates: {dupes[:10]}"
+        )
+    if not ahba_df.columns.is_unique:
+        dupes = ahba_df.columns[ahba_df.columns.duplicated()].unique().tolist()
+        raise ValueError(
+            "AHBA build table has duplicate columns before alignment. "
+            f"Sample duplicates: {dupes[:10]}"
+        )
     gtex_genes = [c for c in gtex_df.columns if c not in META_COLS]
     ahba_genes = [c for c in ahba_df.columns if c not in META_COLS]
     common = sorted(set(gtex_genes) & set(ahba_genes))
@@ -223,8 +246,16 @@ def build_gxp_samples(
     coord_map = build_tissue_coordinate_map(
         ba_atlas_map=_atlas_file(atlas_dir, "MaptoBA.csv"),
         s156_atlas_map=_atlas_file(atlas_dir, "MaptoS156.csv"),
-        brodmann_coords_path=_atlas_file(atlas_dir, "overlay_brodmann_2mm_MNI_reformatted.csv"),
-        s156_coords_path=_atlas_file(atlas_dir, "atlas-4S156Parcels_dseg_reformatted.csv"),
+        brodmann_coords_path=_atlas_file(
+            atlas_dir,
+            "overlay_brodmann_2mm_MNI_reformatted.csv",
+            required_columns={"mni_x", "mni_y", "mni_z"},
+        ),
+        s156_coords_path=_atlas_file(
+            atlas_dir,
+            "atlas-4S156Parcels_dseg_reformatted.csv",
+            required_columns={"mni_x", "mni_y", "mni_z"},
+        ),
     )
 
     gtex_parts = []

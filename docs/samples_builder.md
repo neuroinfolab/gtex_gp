@@ -204,6 +204,13 @@ resulting GTEx ∩ AHBA overlap (and any optional smaller panel layered on top),
 and can return that overlap report alongside the dataframe via
 `return_overlap_info=True`.
 
+In practice this means the notebook can be split cleanly into:
+
+1. an exploratory phase that calls `compute_gtex_ahba_overlap_report(...)`
+   directly on a subsetted gene list, and
+2. a formal build phase that passes the same GTEx filtering arguments into
+   `build_gxp_samples(...)`.
+
 ## Gene Matching
 
 The default matching key is gene symbol because AHBA tables are symbol-facing.
@@ -231,6 +238,32 @@ The current mapping is:
 
 These coordinate lists are stored in `coordinates` as text. They are not the
 same as the downstream `parcel_idx` assignment.
+
+The builder resolves the coordinate-bearing atlas CSVs by schema, not only by
+filename. This matters because the repo-local `data/metadata/atlas_info`
+mirror may contain a Brodmann label table without `mni_x`, `mni_y`, `mni_z`,
+while the full coordinate-bearing file lives in the upstream
+`GeneEx2Conn_data/atlas_info` source tree.
+
+## Duplicate GTEx Subjects Within a Tissue File
+
+GTEx source GCTs are sample-level, not subject-level. After parsing sample IDs
+down to subject IDs, duplicates can appear within a tissue file. The original
+neuroVformer path averaged those duplicated subject rows before `log1p`. The
+current builder does not. It raises instead.
+
+This is intentional:
+
+- the canonical CSV is meant to represent one GTEx row per subject per tissue,
+- silent averaging changes both row count and expression values,
+- technical replicate handling should be an explicit decision, not an implicit
+  side effect of the builder.
+
+Separately, GTEx symbol-mode loading can encounter duplicated gene symbols in
+the GCT `Description` column. The current builder resolves that by keeping the
+first occurrence of each symbol when constructing the row-level GTEx table, so
+the final CSV always has unique gene columns. This is stricter and more stable
+than letting duplicate symbol columns survive until final concatenation.
 
 ## Original Mean/Median Alignment Option
 

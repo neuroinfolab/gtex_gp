@@ -24,6 +24,17 @@ BRAIN_TISSUE_NAME_MAP = {
 }
 
 
+def _unique_positions(values: list[str]) -> list[int]:
+    seen: set[str] = set()
+    keep: list[int] = []
+    for i, value in enumerate(values):
+        if value in seen:
+            continue
+        seen.add(value)
+        keep.append(i)
+    return keep
+
+
 def gtex_subject_id(sample_or_subject_id: str) -> str:
     parts = str(sample_or_subject_id).strip().split("-")
     if len(parts) >= 2 and parts[0].upper() == "GTEX":
@@ -328,6 +339,10 @@ def load_gct_as_subject_genes(
         gene_ids = df["Name"].astype(str).str.split(".").str[0].tolist()
     else:
         raise ValueError("gene_id_style must be 'symbol' or 'ensembl'")
+    keep_gene_positions = _unique_positions(gene_ids)
+    if len(keep_gene_positions) != len(gene_ids):
+        df = df.iloc[keep_gene_positions].reset_index(drop=True)
+        gene_ids = [gene_ids[i] for i in keep_gene_positions]
     sample_ids = [c for c in df.columns if c not in ("Name", "Description")]
     if not sample_ids:
         return pd.DataFrame()

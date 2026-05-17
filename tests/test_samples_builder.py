@@ -3,8 +3,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.samples.build import compute_gtex_ahba_overlap_report
-from src.samples.gtex import list_brain_gct_files, tissue_label_from_gct
+from src.samples.build import _atlas_file, compute_gtex_ahba_overlap_report
+from src.samples.gtex import list_brain_gct_files, load_gct_as_subject_genes, tissue_label_from_gct
 from src.samples.legacy_alignment import aggregate_parcels_to_tissues_by_key, evaluate_tissue_gene_alignment, read_gene_list
 from src.samples.schema import validate_gxp_samples
 
@@ -149,3 +149,54 @@ def test_compute_gtex_ahba_overlap_report(tmp_path: Path):
     assert report["ahba_genes_available_in_chosen_preprocessing"] == 2
     assert report["final_gtex_ahba_overlap_size"] == 1
     assert info["filtered_genes"] == ["G1"]
+
+
+def test_atlas_file_skips_incomplete_local_coordinate_csv(tmp_path: Path):
+    atlas_dir = tmp_path / "atlas_info"
+    atlas_dir.mkdir()
+    local_incomplete = atlas_dir / "overlay_brodmann_2mm_MNI_reformatted.csv"
+    local_incomplete.write_text(
+        "BA,id,hemisphere,structure\n"
+        "BA1,1,L,cortex\n"
+    )
+    atlas_maps = atlas_dir / "AtlasMaps"
+    atlas_maps.mkdir()
+    fallback_complete = atlas_maps / "overlay_brodmann_2mm_MNI_reformatted.csv"
+    fallback_complete.write_text(
+        "label,id,hemisphere,structure,mni_x,mni_y,mni_z\n"
+        "BA1,1,L,cortex,-1.0,-2.0,3.0\n"
+    )
+
+    resolved = _atlas_file(
+        atlas_dir,
+        "overlay_brodmann_2mm_MNI_reformatted.csv",
+        required_columns={"mni_x", "mni_y", "mni_z"},
+    )
+
+    assert resolved == fallback_complete
+
+
+def test_load_gct_as_subject_genes_dedupes_duplicate_symbol_columns(tmp_path: Path):
+    gct = tmp_path / "gene_tpm_v11_brain_cortex.gct"
+    gct.write_text(
+        "#1.2\n"
+        "3\t1\n"
+        "Name\tDescription\tGTEX-A-0001-SM-1\n"
+        "ENSG1.1\tDUP\t1.0\n"
+        "ENSG2.1\tDUP\t2.0\n"
+        "ENSG3.1\tKEEP\t3.0\n"
+    )
+
+    out = load_gct_as_subject_genes(
+        gct,
+        "brain - cortex",
+        [(0.0, 0.0, 0.0)],
+        transform="none",
+        gene_id_style="symbol",
+    )
+
+    assert out.columns.is_unique
+    assert "DUP" in out.columns
+    assert "KEEP" in out.columns
+    assert out.loc[0, "DUP"] == 1.0
+    assert out.loc[0, "KEEP"] == 3.0
