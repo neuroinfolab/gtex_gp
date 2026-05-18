@@ -154,6 +154,34 @@ def v2_reconstruction(npz_data, atlas_aligned, gene_name):
                             'loro_fused_subject_h', 'loro_eval_mask', gene_name)
 
 
+def v2_residual(npz_data, atlas_aligned, gene_name):
+    """V2 residual: LORO prediction minus harmonized ground truth at eval parcels.
+
+    Residual = loro_fused_subject_h − loro_truth_subject_h.
+    Both arrays are in the same combat-harmonized space, so the difference
+    is meaningful.  Positive values = model over-predicts; negative = under-predicts.
+    """
+    g_idx = get_gene_idx(npz_data, gene_name)
+    mask  = npz_data['loro_eval_mask'].astype(bool)
+    pred  = npz_data['loro_fused_subject_h'][:, g_idx]
+    truth = npz_data['loro_truth_subject_h'][:, g_idx]
+    resid = pred - truth
+
+    cortex_dict    = {}
+    subcortex_dict = {}
+    for i, row in atlas_aligned.iterrows():
+        if not mask[i]:
+            continue
+        v = float(resid[i])
+        if np.isnan(v):
+            continue
+        if row['structure'] == 'cortex':
+            cortex_dict[row['label']] = v
+        else:
+            subcortex_dict[row['label']] = v
+    return cortex_dict, subcortex_dict
+
+
 def v3_ground_truth(npz_data, atlas_aligned, gene_name):
     """V3: AHBA ground truth at LORO-evaluated GTEx parcels (loro_truth_subject_h, loro_eval_mask).
 

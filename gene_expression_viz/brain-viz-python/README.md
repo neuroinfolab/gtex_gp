@@ -130,23 +130,44 @@ If the cortical atlas has not been built yet, that is still okay:
 - subcortical regions will render normally
 - cortical surfaces will appear grey
 
-The app shows three side-by-side viewports sharing a single camera — rotating in any
-panel rotates all three simultaneously. Use mouse drag to rotate, scroll wheel to zoom.
+The app shows four side-by-side viewports sharing a single camera — rotating in any
+panel rotates all four simultaneously. Use mouse drag to rotate, scroll wheel to zoom.
 
-### Toolbar controls
+### Drawer controls
+
+**Data**
 
 | Control | Options | Notes |
 |---|---|---|
-| **Gene** | 88-gene dropdown (filtered from `ahba_100hvg.txt`) | Switching is instant — re-slices the in-memory array, no I/O |
-| **Subject** | GTEX-1117F, GTEX-13OW8 | Reloads the NPZ for the selected subject |
-| **Model** | naive / dlam / plam | Only affects V2 and V3; reloads the NPZ |
-| **Full / Half** | Toggle | Half clips at x = 0, keeping the left hemisphere for a sagittal view |
-| **Cortex** slider | 0 → 1 | Cortex surface opacity — lower to reveal subcortical structures underneath |
-| **Rotate** ← → ↑ ↓ | Step buttons | Discrete camera rotation; step size configurable (5° / 10° / 15° / 30° / 45°) |
+| **Gene** | 88-gene dropdown (filtered from `ahba_100hvg.txt`) | Instant — re-slices the in-memory array, no I/O |
+| **Subject** | GTEX-1117F, GTEX-13OW8, GTEX-11DZ1, GTEX-1B996, GTEX-1JMPZ | Reloads NPZ for the selected subject |
+| **Model** | naive / dlam / plam | Affects V2 and V3; reloads the NPZ |
+
+**V2 Panel**
+
+| Control | Options | Notes |
+|---|---|---|
+| **V2 mode** | Reconstruction / Residual | Residual = LORO prediction − harmonized ground truth; switches V2 to a diverging colormap |
+
+**View**
+
+| Control | Options | Notes |
+|---|---|---|
+| **Brain clip** | Full / Half | Half clips at x = 0, keeping the left hemisphere; camera snaps to lateral view |
+| **Color scale** | Local / Shared / WBF | Local: per-panel auto-scale. Shared: joint scale across models. WBF: lock all panels to the V3 range |
+
+**Opacity**
+
+| Control | Range | Notes |
+|---|---|---|
+| **Cortex** slider | 0 → 1 | Cortex surface opacity — lower to reveal subcortical structures |
+| **Subcortex** slider | 0 → 1 | Deep nuclei opacity (thalamus, basal ganglia, etc.) |
+| **Cerebellum** slider | 0 → 1 | Cerebellar parcel opacity |
 
 ### Colour scheme
 
-- Colormap: `RdYlBu_r`, range auto-scaled per panel to the current gene's data values
+- Sequential colormap: `viridis`, range auto-scaled per panel (or shared, see Color scale control)
+- Diverging colormap: `RdBu_r`, used for V2 in Residual mode and V3 in Residual mode with dlam/plam
 - Unmapped parcels (outside mask or NaN): light grey
 - Background: white
 
@@ -154,19 +175,20 @@ panel rotates all three simultaneously. Use mouse drag to rotate, scroll wheel t
 
 ## Data views
 
-Three panels are always shown simultaneously:
+Four panels are always shown simultaneously:
 
 | Panel | .npz array | Mask | What it shows |
 |---|---|---|---|
 | **V1 GTEx Values** | `loro_truth_subject_raw` | `loro_eval_mask` | Raw GTEx measurements at LORO held-out parcels (~9 parcels) |
-| **V2 Reconstruction** | `loro_fused_subject_h` | `gtex_mask` | Out-of-sample LORO model predictions at all 12 GTEx parcels |
-| **V3 Whole-brain Fit** | `fullfit_subject_h` | `imputed_mask` ∪ `gtex_mask` | Dense whole-brain fit across all 150 parcels |
+| **V2 Reconstruction** | `loro_fused_subject_h` | `loro_eval_mask` | Out-of-sample LORO model predictions at held-out parcels. In Residual mode: shows `loro_fused_subject_h − loro_truth_subject_h` on a diverging colormap; click tooltip breaks down Truth / Predicted / Δ |
+| **V3 Whole-brain Fit** | `fullfit_subject_h` | `imputed_mask` ∪ `gtex_mask` | Dense whole-brain fit across all 150 parcels. In Residual mode (dlam/plam only): shows WBF − AHBA Reference (naive fullfit); click tooltip shows AHBA / WBF / Δ |
+| **V4 AHBA Reference** | `fullfit_subject_h` (naive) | `imputed_mask` ∪ `gtex_mask` | Naive model whole-brain fit used as a fixed AHBA reference baseline for the V3 residual map |
 
 V1 and V2 remap RH-labelled parcels to their nearest LH neighbour so everything
-renders on the left hemisphere (consistent with the upstream pipeline). V3 renders
-bilateral — the full-fit predictions are already roughly symmetric.
+renders on the left hemisphere (consistent with the upstream pipeline). V3 and V4
+render bilateral — the full-fit predictions are mirrored symmetrically.
 
-V1 is model-independent. V2 and V3 change with the Model dropdown.
+V1 and V4 are model-independent. V2 and V3 change with the Model dropdown.
 
 ---
 
@@ -225,10 +247,9 @@ are omitted, and PyVista renders those as `nan_color` automatically.
 
 ### `app.py`
 
-- Loads atlas alignment, RH→LH map, and subject NPZ once at startup.
-- `_make_viewport(col, title)` builds one viewport: cortex + subcortical meshes with
-  NaN scalars. All three viewports share a single VTK camera object.
-- `update_scene(c1, s1, c2, s2, c3, s3, gene)` updates scalar arrays and colour limits
-  in-place — no actor teardown, efficient re-render.
-- State callbacks: `on_gene`, `on_subject`, `on_model`, `on_half_brain`, `on_cortex_alpha`,
-  plus rotation counters (`rot_left/right/up/down`).
+- Loads atlas alignment, RH→LH map, and subject NPZ once at startup. Naive-model NPZ is also kept in memory as the fixed AHBA reference for the V3 residual map.
+- `_make_viewport(col, title, subtitle)` builds one viewport: cortex + subcortical meshes with NaN scalars. All four viewports share a single VTK camera object. Returns mesh actors and title/subtitle text actors for later mutation.
+- `update_scene(c1, s1, c2, s2, c3, s3, c4, s4, gene, cbar_mode, sc, v2_is_residual, v3_is_residual)` updates scalar arrays and colour limits in-place — no actor teardown, efficient re-render. Switches V2/V3 between sequential (`viridis`) and diverging (`RdBu_r`) LUTs based on residual flags.
+- `_reload_scene(c1, s1, c2, s2, c3, s3, gene, v2_is_residual)` orchestrates a full scene refresh: computes the V3 residual (WBF − naive reference) when applicable, updates V3 title/subtitle text actors, populates `_residual_truth`/`_residual_pred`/`_v3_residual_ref` lookup dicts used by the click tooltip, and calls `update_scene` + `_update_cbars`.
+- `_on_click` picks the clicked parcel label and value from the active actor, then builds a simple or three-row tooltip depending on which panel was clicked and whether residual mode is active.
+- State callbacks: `on_gene`, `on_subject`, `on_model`, `on_v2_mode`, `on_half_brain`, `on_cortex_alpha`, `on_subcortex_alpha`, `on_cerebellum_alpha`, `on_cbar_mode`, plus rotation counters (`rot_left/right/up/down`).

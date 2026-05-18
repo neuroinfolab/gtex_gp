@@ -1,0 +1,238 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{mdframed}
+\usepackage{titlesec}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+}
+
+\title{\textbf{Brain Gene Expression Explorer}\\
+  \large User Feedback \& Expert Evaluation}
+
+\author{Thiago Viegas\\
+  \small New York University}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document collects structured feedback on the \emph{Brain Gene Expression Explorer}
+gathered from three domain experts during and after development.
+The reviewers span neuroinformatics research, scientific software engineering, and
+applied data science, providing complementary perspectives on both the scientific
+utility and the design quality of the tool.
+All three reviewers interacted with a live instance of the application.
+\end{abstract}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Reviewer 1 — Ph.D.\ Researcher, NYU Neuroinformatics Lab}
+
+\subsection*{Background}
+
+This reviewer is a doctoral student in the same lab that develops the GTEx--AHBA
+integration pipeline.
+They contributed directly to the upstream modelling work and were a primary guide
+throughout the development of the visualization, providing domain context, data
+interpretation, and iterative feedback across multiple sessions.
+
+\subsection*{Feedback on Scientific Utility}
+
+The reviewer noted that the four-panel side-by-side layout immediately made
+previously invisible patterns legible.
+In particular, the simultaneous display of V1 (raw GTEx measurements) and V2
+(LORO reconstructions) at the same held-out parcels allowed the team to verify,
+at a glance, whether the model's predictions were tracking ground-truth values
+or diverging systematically.
+
+\begin{quote}
+\itshape
+``Being able to switch genes and immediately see how the prediction holds up
+at the held-out parcels---without exporting CSVs or writing plot scripts---
+has genuinely sped up how we diagnose model failures.
+The residual map was especially useful: seeing the signed error in anatomical
+space made it obvious that cerebellar parcels were consistently under-predicted
+in a way that summary statistics alone never made clear.''
+\end{quote}
+
+The reviewer also noted that the V3 WBF-minus-AHBA-Reference residual map
+(active for DLAM and PLAM) helped the team understand where the spatial
+regularisation terms in those models were making a difference relative to
+the naive baseline, providing visual evidence that the more complex models
+were producing smoother and more anatomically plausible bilateral patterns.
+
+\subsection*{Suggestions for Future Work}
+
+Several of the future-work items in the main report originate directly from
+this reviewer's suggestions:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Expand subject coverage.}
+        The reviewer observed that five donors is sufficient for early debugging
+        but that differences in model behaviour across subjects—especially
+        outlier donors—would only become visible with a larger cohort.
+        They suggested adding support for additional GTEx donors as pipeline
+        outputs become available.
+
+  \item \textbf{Gene groups and functional categories.}
+        Rather than exploring genes individually, the reviewer suggested
+        allowing users to load predefined gene sets, such as pathway-annotated
+        genes or high-differential-expression clusters, so that biological
+        hypotheses can be interrogated across a curated subset rather than one
+        gene at a time.
+
+  \item \textbf{Uncertainty visualisation.}
+        The upstream pipeline produces bootstrap confidence estimates alongside
+        point predictions.
+        The reviewer suggested exposing these as a secondary visual channel,
+        such as parcel-level stippling or opacity modulation, to help
+        distinguish high-confidence predictions from uncertain extrapolations.
+
+  \item \textbf{Multi-subject overlay.}
+        Averaging predictions across donors and displaying the group mean
+        alongside individual subjects would help distinguish donor-specific
+        idiosyncrasies from systematic model behaviour.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Reviewer 2 — Software Engineer, Urban Data Analytics}
+
+\subsection*{Background}
+
+This reviewer is a software engineer with experience building interactive
+geospatial and data visualization dashboards for urban analytics applications.
+Although not a domain expert in neuroimaging, they brought a strong perspective
+on interaction design, data density, and usability patterns common across
+spatial visualization tools.
+
+\subsection*{Feedback on Interaction Design}
+
+The reviewer evaluated the tool from the perspective of a technically
+sophisticated user encountering it for the first time without domain
+background.
+Their primary observation was that the colour-only encoding of the 3D brain
+panels, while visually engaging, made it difficult to recover the identity and
+precise value of a parcel without additional context.
+
+\begin{quote}
+\itshape
+``When you have a spatial view coloured by a continuous variable, the natural
+next question is always: which region is that, and what is its exact value?
+Without hover or click feedback, the brain looks beautiful but you are
+essentially reading a map with no legend for the individual features.''
+\end{quote}
+
+Based on this feedback, two features were implemented:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Parcel-level click tooltips.}
+        Clicking any parcel in any of the four panels now displays a floating
+        card showing the parcel name and expression value.
+        In residual mode, the tooltip expands to show Truth, Predicted, and
+        $\Delta$ for V2, and AHBA Reference, WBF, and $\Delta$ for V3,
+        giving exact numerical context for whatever is visible in colour.
+
+  \item \textbf{V5 Model Analytics panel.}
+        The reviewer suggested adding a supplementary statistical view that
+        would allow users to identify where each parcel sits in the overall
+        distribution of predictions---not just its colour on the surface.
+        This motivated the V5 panel: a two-row analytics overlay with a
+        colour-coded held-out parcel scatter (row 1, current gene) and a
+        global per-gene mean-expression scatter alongside a ranked
+        Pearson-$r$ bar chart (row 2, all genes).
+        The reviewer noted that position and length are more precise
+        quantitative channels than colour, and that the combination allows
+        users to contextualise any individual parcel or gene within the
+        full dataset without leaving the application.
+\end{enumerate}
+
+The reviewer also praised the opacity sliders for cortex, subcortex, and
+cerebellum as an effective solution to the occlusion problem that is typical
+in 3D spatial views, drawing a parallel to layer-toggle controls in GIS
+mapping tools.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Reviewer 3 — Professor of Neuroinformatics}
+
+\subsection*{Background}
+
+This reviewer is a faculty member in neuroinformatics whose research involves
+computational methods for integrating multimodal brain data, including
+transcriptomic and imaging datasets of the type used in this project.
+They evaluated the tool as an external expert in both the domain and the
+broader landscape of neuroimaging visualization.
+
+\subsection*{Endorsement and Key Observations}
+
+The reviewer endorsed the tool as a meaningful contribution to the model
+development workflow, emphasising in particular its value for understanding
+how the models extrapolate sparse measurements to the rest of the brain.
+
+\begin{quote}
+\itshape
+``What strikes me about this tool is that it makes the extrapolation step
+legible. The models take a handful of measured parcels and predict expression
+everywhere else---that is a significant inferential leap, and V3 makes the
+result of that leap visible in anatomical space. Being able to compare the
+dense whole-brain fit against the sparse ground truth in the same frame of
+reference, and then toggle to a residual view, is exactly the kind of check
+that should happen before these predictions are used for downstream analysis.''
+\end{quote}
+
+The reviewer highlighted two specific aspects as particularly well-executed:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Anatomical faithfulness.}
+        Mapping predictions directly onto the parcellation atlas, with correct
+        subcortical mesh geometry and hemisphere handling, ensures that the
+        spatial interpretation of the visualisation is biologically grounded
+        rather than schematic.
+        The reviewer noted that many model-debugging dashboards use simplified
+        region representations that can obscure anatomically specific patterns.
+
+  \item \textbf{Model-variant comparison.}
+        The ability to switch between naive, DLAM, and PLAM within the same
+        four-panel layout, with the naive model fixed as the V4 reference,
+        was identified as a strong design choice that supports rigorous
+        comparative evaluation without requiring users to maintain multiple
+        browser tabs or coordinate separate export steps.
+\end{enumerate}
+
+The reviewer also noted that the tool would be well-suited for use in a
+graduate seminar context, where trainees need to develop intuition for how
+spatial transcriptomic models behave before interpreting their outputs
+quantitatively.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{p{3.2cm} p{3.5cm} p{6.5cm}}
+\hline
+\textbf{Reviewer} & \textbf{Background} & \textbf{Primary contribution} \\
+\hline
+Ph.D.\ researcher & Neuroinformatics, pipeline co-developer &
+  Validated scientific utility; sourced future-work suggestions including
+  subject expansion, gene groups, and uncertainty visualisation \\[4pt]
+Software engineer & Urban data / geospatial dashboards &
+  Identified colour-only encoding limitation; motivated click tooltips
+  and V5 analytics panel \\[4pt]
+Neuroinformatics professor & Faculty, multimodal brain data &
+  Endorsed extrapolation legibility and anatomical faithfulness; suggested
+  pedagogical use case \\
+\hline
+\end{tabular}
+\end{center}
+
+\end{document}
