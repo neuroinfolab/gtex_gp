@@ -6,6 +6,7 @@ from src.spatial.parcel_matching import (
     AtlasOverlapPaths,
     apply_gtex_ahba_matching_policy,
     apply_tissue_parcel_overrides,
+    build_gtex_ahba_assignment_variant_tables,
     build_expression_pair_score_pivot,
     compute_cerebellar_expression_rankings,
     compute_ba_schaefer_overlap_table,
@@ -95,6 +96,86 @@ def test_matching_policy_centroids_adds_audit_columns_without_changing_assignmen
     assert set(out["matching_rule"]) == {"coordinate_nearest_centroid"}
 
 
+def test_matching_policy_force_left_centroids_restricts_coordinate_candidates():
+    target = pd.DataFrame(
+        {
+            "parcel_idx": [0, 1],
+            "tissue_or_parcel": ["RH_TestParcel", "LH_TestParcel"],
+            "coord_x": [0.0, 10.0],
+            "coord_y": [0.0, 0.0],
+            "coord_z": [0.0, 0.0],
+        }
+    )
+    gtex = pd.DataFrame(
+        {
+            "subject": ["S1"],
+            "tissue_or_parcel": ["brain - hippocampus"],
+            "coord_x": [0.1],
+            "coord_y": [0.0],
+            "coord_z": [0.0],
+            "parcel_idx": [0],
+            "mapped_parcel": ["RH_TestParcel"],
+            "mapping_distance": [0.1],
+        }
+    )
+
+    out = apply_gtex_ahba_matching_policy(
+        gtex,
+        target,
+        matching_policy="centroids",
+        matching_policy_hemi_mode="force_left",
+    )
+
+    assert out["mapped_parcel"].tolist() == ["LH_TestParcel"]
+    assert out["parcel_idx"].tolist() == [1]
+    assert set(out["matching_rule"]) == {"coordinate_nearest_left_centroid"}
+
+
+def test_assignment_variant_tables_collapse_to_one_to_one_mappings():
+    samples = pd.DataFrame(
+        {
+            "subject": ["A1", "A2", "A3", "G1", "G2"],
+            "age": ["", "", "", "", ""],
+            "sex": ["", "", "", "", ""],
+            "dataset": ["AHBA", "AHBA", "AHBA", "GTEx", "GTEx"],
+            "tissue_or_parcel": [
+                "LH_TestParcel",
+                "RH_TestParcel",
+                "Cerebellar_Region7",
+                "brain - test",
+                "brain - test",
+            ],
+            "coordinates": [
+                "(10, 0, 0)",
+                "(0, 0, 0)",
+                "(0, 10, 0)",
+                "(0.1, 0, 0)",
+                "(0.2, 0, 0)",
+            ],
+        }
+    )
+
+    out = build_gtex_ahba_assignment_variant_tables(
+        samples,
+        variants=(
+            ("centroid", "centroids", "default"),
+            ("centroid_force_left", "centroids", "force_left"),
+        ),
+    )
+    centroid = out["centroid"]["mapping"].set_index("original_gtex_tissue")
+    force_left = out["centroid_force_left"]["mapping"].set_index("original_gtex_tissue")
+
+    assert centroid.loc["brain - test", "final_mapped_parcel"] == "RH_TestParcel"
+    assert centroid.loc["brain - test", "matching_rule"] == "coordinate_nearest_centroid"
+    assert int(centroid.loc["brain - test", "n_input_rows"]) == 2
+    assert int(centroid.loc["brain - test", "n_policy_rows"]) == 2
+    assert int(centroid.loc["brain - test", "n_final_parcels_for_source"]) == 1
+
+    assert force_left.loc["brain - test", "final_mapped_parcel"] == "LH_TestParcel"
+    assert force_left.loc["brain - test", "matching_rule"] == "coordinate_nearest_left_centroid"
+    assert int(force_left.loc["brain - test", "n_dropped_rows"]) == 0
+
+
 def test_matching_policy_centroids_and_volumes_cortex_from_computed_ba_overlap():
     target = _target(
         [
@@ -137,8 +218,8 @@ def test_matching_policy_centroids_and_volumes_cortex_from_computed_ba_overlap()
     assert by_tissue.loc["brain - cortex", "matching_rule"] == "cortical_ba_schaefer_voxel_overlap"
 
 
-def test_matching_policy_centroids_and_volumes_cerebellar_duplicate_and_fallback():
-    target = _target(["old_coordinate_match", "Cerebellar_Region7"])
+def test_matching_policy_centroids_and_volumes_cerebellar_manual_assignments_by_default():
+    target = _target(["old_coordinate_match", "Cerebellar_Region4", "Cerebellar_Region7"])
     gtex = pd.DataFrame(
         {
             "subject": ["S1", "S1", "S2", "S3"],
@@ -158,6 +239,41 @@ def test_matching_policy_centroids_and_volumes_cerebellar_duplicate_and_fallback
         gtex,
         target,
         matching_policy="centroids_and_volumes",
+        atlas_paths=AtlasOverlapPaths(),
+        validate_expected=True,
+    )
+
+    assert len(out) == 4
+    by_tissue = out.set_index("original_gtex_tissue")
+    assert by_tissue.loc["brain - cerebellar hemisphere", "mapped_parcel"] == "Cerebellar_Region4"
+    assert set(out[out["original_gtex_tissue"] == "brain - cerebellum"]["mapped_parcel"]) == {"Cerebellar_Region7"}
+    assert set(out[out["original_gtex_tissue"].isin(["brain - cerebellum", "brain - cerebellar hemisphere"])]["matching_rule"]) == {
+        "cerebellar_manual_region_policy"
+    }
+
+
+def test_matching_policy_centroids_and_volumes_cerebellar_collapse_is_opt_in():
+    target = _target(["old_coordinate_match", "Cerebellar_Region4", "Cerebellar_Region7"])
+    gtex = pd.DataFrame(
+        {
+            "subject": ["S1", "S1", "S2", "S3"],
+            "tissue_or_parcel": [
+                "brain - cerebellum",
+                "brain - cerebellar hemisphere",
+                "brain - cerebellum",
+                "brain - hippocampus",
+            ],
+            "parcel_idx": [0, 0, 0, 0],
+            "mapped_parcel": ["old_coordinate_match"] * 4,
+            "mapping_distance": [10.0, 11.0, 12.0, 2.0],
+        }
+    )
+
+    out = apply_gtex_ahba_matching_policy(
+        gtex,
+        target,
+        matching_policy="centroids_and_volumes",
+        collapse_cerebellum=True,
         atlas_paths=AtlasOverlapPaths(),
         validate_expected=True,
     )

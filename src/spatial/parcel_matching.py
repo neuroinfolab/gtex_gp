@@ -9,12 +9,53 @@ META_COLS = ["subject", "age", "sex", "dataset", "tissue_or_parcel", "coordinate
 DEFAULT_CEREBELLAR_GTEX_TISSUES = ("brain - cerebellum", "brain - cerebellar hemisphere")
 MATCHING_POLICY_CENTROIDS = "centroids"
 MATCHING_POLICY_CENTROIDS_AND_VOLUMES = "centroids_and_volumes"
+MATCHING_POLICY_HEMI_DEFAULT = "default"
+MATCHING_POLICY_HEMI_FORCE_LEFT = "force_left"
+DEFAULT_ASSIGNMENT_TABLE_VARIANTS = (
+    ("centroid", MATCHING_POLICY_CENTROIDS, MATCHING_POLICY_HEMI_DEFAULT),
+    ("centroid_force_left", MATCHING_POLICY_CENTROIDS, MATCHING_POLICY_HEMI_FORCE_LEFT),
+    ("centroid_volume", MATCHING_POLICY_CENTROIDS_AND_VOLUMES, MATCHING_POLICY_HEMI_DEFAULT),
+    (
+        "centroid_volume_force_left",
+        MATCHING_POLICY_CENTROIDS_AND_VOLUMES,
+        MATCHING_POLICY_HEMI_FORCE_LEFT,
+    ),
+)
+PARCEL_ASSIGNMENT_ROW_COLS = [
+    "subject",
+    "original_gtex_tissue",
+    "normalized_gtex_tissue",
+    "coordinate_mapped_parcel",
+    "coordinate_mapping_distance",
+    "final_mapped_parcel",
+    "parcel_idx",
+    "mapping_distance",
+    "matching_rule",
+    "matching_rule_detail",
+]
+PARCEL_ASSIGNMENT_MAPPING_COLS = [
+    "matching_policy",
+    "matching_policy_hemi_mode",
+    "original_gtex_tissue",
+    "normalized_gtex_tissue",
+    "final_mapped_parcel",
+    "parcel_idx",
+    "matching_rule",
+    "n_input_rows",
+    "n_policy_rows",
+    "n_dropped_rows",
+    "n_subjects",
+    "n_final_parcels_for_source",
+    "coordinate_mapped_parcels",
+]
 EXPECTED_CORTICAL_BA_MATCHES = {
     "brain - frontal cortex (ba9)": "LH_SalVentAttn_PFCl_1",
     "brain - anterior cingulate cortex (ba24)": "LH_SalVentAttn_Med_1",
     "brain - cortex": "RH_Cont_PFCl_1",
 }
 CEREBELLAR_REGION7_PARCEL = "Cerebellar_Region7"
+CEREBELLAR_HEMISPHERE_PARCEL = "Cerebellar_Region4"
+CEREBELLUM_PARCEL = "Cerebellar_Region7"
 CEREBELLAR_NORMALIZED_LABEL = "Cerebellar hemisphere"
 
 
@@ -101,6 +142,30 @@ DEFAULT_CORTICAL_BA_PRIORS: tuple[BAPrior, ...] = (
         ba_id=110,
         ba_label="BA110",
         preferred_target_hemisphere="R",
+    ),
+)
+
+FORCE_LEFT_CORTICAL_BA_PRIORS: tuple[BAPrior, ...] = (
+    BAPrior(
+        source_gtex_tissue="brain - frontal cortex (ba9)",
+        source_description="frontal cortex",
+        ba_id=9,
+        ba_label="BA9",
+        preferred_target_hemisphere="L",
+    ),
+    BAPrior(
+        source_gtex_tissue="brain - anterior cingulate cortex (ba24)",
+        source_description="anterior cingulate cortex",
+        ba_id=24,
+        ba_label="BA24",
+        preferred_target_hemisphere="L",
+    ),
+    BAPrior(
+        source_gtex_tissue="brain - cortex",
+        source_description="generic cortex, forced left BA10",
+        ba_id=10,
+        ba_label="BA10",
+        preferred_target_hemisphere="L",
     ),
 )
 
@@ -462,6 +527,8 @@ def apply_gtex_ahba_matching_policy(
     target_parcels,
     *,
     matching_policy: str = MATCHING_POLICY_CENTROIDS,
+    matching_policy_hemi_mode: str = MATCHING_POLICY_HEMI_DEFAULT,
+    collapse_cerebellum: bool = False,
     atlas_paths: AtlasOverlapPaths | None = None,
     validate_expected: bool = True,
     expected_cortical_matches: Mapping[str, str] | None = EXPECTED_CORTICAL_BA_MATCHES,
@@ -479,18 +546,194 @@ def apply_gtex_ahba_matching_policy(
             "matching_policy must be one of: "
             f"{MATCHING_POLICY_CENTROIDS!r}, {MATCHING_POLICY_CENTROIDS_AND_VOLUMES!r}"
         )
+    hemi_mode = str(matching_policy_hemi_mode).strip().lower()
+    if hemi_mode not in {MATCHING_POLICY_HEMI_DEFAULT, MATCHING_POLICY_HEMI_FORCE_LEFT}:
+        raise ValueError(
+            "matching_policy_hemi_mode must be one of: "
+            f"{MATCHING_POLICY_HEMI_DEFAULT!r}, {MATCHING_POLICY_HEMI_FORCE_LEFT!r}"
+        )
 
-    out = _initialize_matching_audit_columns(gtex_df)
+    base = gtex_df
+    if hemi_mode == MATCHING_POLICY_HEMI_FORCE_LEFT:
+        base = _apply_force_left_coordinate_match(base, target_parcels)
+
+    out = _initialize_matching_audit_columns(base)
     if policy == MATCHING_POLICY_CENTROIDS:
+        if bool(collapse_cerebellum):
+            out = _apply_cerebellar_policy(out, target_parcels, collapse_cerebellum=True)
         return out
 
-    overlap_df = compute_ba_schaefer_overlap_table(paths=atlas_paths, repo_root=repo_root)
+    priors = (
+        FORCE_LEFT_CORTICAL_BA_PRIORS
+        if hemi_mode == MATCHING_POLICY_HEMI_FORCE_LEFT
+        else DEFAULT_CORTICAL_BA_PRIORS
+    )
+    overlap_df = compute_ba_schaefer_overlap_table(priors=priors, paths=atlas_paths, repo_root=repo_root)
     cortical_overrides = top_overlap_overrides(overlap_df)
-    if bool(validate_expected):
+    if bool(validate_expected) and hemi_mode == MATCHING_POLICY_HEMI_DEFAULT:
         _validate_cortical_overrides(cortical_overrides, expected_cortical_matches or {})
     out = _apply_cortical_overlap_policy(out, target_parcels, cortical_overrides)
-    out = _apply_cerebellar_region7_policy(out, target_parcels)
+    out = _apply_cerebellar_policy(out, target_parcels, collapse_cerebellum=bool(collapse_cerebellum))
     return out.reset_index(drop=True)
+
+
+def build_gtex_ahba_assignment_outputs(
+    samples_df,
+    *,
+    matching_policy: str = MATCHING_POLICY_CENTROIDS,
+    matching_policy_hemi_mode: str = MATCHING_POLICY_HEMI_DEFAULT,
+    collapse_cerebellum: bool = False,
+    rep_mode: str = "centroid",
+    hemi_mode: str = "mirror_left",
+    atlas_paths: AtlasOverlapPaths | None = None,
+    validate_expected: bool = True,
+    repo_root: str | Path | None = None,
+):
+    """Build detailed and collapsed GTEx-to-AHBA assignment tables for one policy variant."""
+    np, _ = _require_array_stack()
+    from src.io import parse_coordinate_representative
+    from src.preprocess import build_target_parcels, map_gtex_to_target
+
+    meta = samples_df[META_COLS].copy()
+    xyz = np.vstack(
+        [
+            parse_coordinate_representative(coord_text, rep_mode=rep_mode, hemi_mode=hemi_mode)
+            for coord_text in meta["coordinates"]
+        ]
+    )
+    spatial_df = meta.assign(
+        coord_x=xyz[:, 0],
+        coord_y=xyz[:, 1],
+        coord_z=xyz[:, 2],
+        coord_abs_x=np.abs(xyz[:, 0]),
+        gtex_rep_mode=str(rep_mode).strip().lower(),
+        gtex_hemi_mode=str(hemi_mode).strip().lower(),
+    )
+    spatial_df = spatial_df.dropna(subset=["coord_x", "coord_y", "coord_z"]).copy()
+    spatial_df["dataset_upper"] = spatial_df["dataset"].astype(str).str.upper().str.strip()
+    spatial_df["subject"] = spatial_df["subject"].astype(str)
+    spatial_df["tissue_or_parcel"] = spatial_df["tissue_or_parcel"].astype(str)
+
+    ahba_raw = spatial_df[spatial_df["dataset_upper"] == "AHBA"].copy().reset_index(drop=True)
+    gtex_raw = spatial_df[spatial_df["dataset_upper"] == "GTEX"].copy().reset_index(drop=True)
+    target_parcels = build_target_parcels(ahba_raw)
+    gtex_mapped = map_gtex_to_target(gtex_raw, target_parcels)
+    input_counts = (
+        gtex_mapped.groupby("tissue_or_parcel", as_index=False)
+        .agg(n_input_rows=("subject", "size"))
+        .rename(columns={"tissue_or_parcel": "original_gtex_tissue"})
+    )
+    matched = apply_gtex_ahba_matching_policy(
+        gtex_mapped,
+        target_parcels,
+        matching_policy=matching_policy,
+        matching_policy_hemi_mode=matching_policy_hemi_mode,
+        collapse_cerebellum=bool(collapse_cerebellum),
+        atlas_paths=atlas_paths,
+        validate_expected=validate_expected,
+        repo_root=repo_root,
+    )
+    row_table = matched[PARCEL_ASSIGNMENT_ROW_COLS].copy()
+    row_table = row_table.sort_values(["subject", "original_gtex_tissue", "final_mapped_parcel"]).reset_index(drop=True)
+    row_table.insert(0, "matching_policy", str(matching_policy).strip().lower())
+    row_table.insert(1, "matching_policy_hemi_mode", str(matching_policy_hemi_mode).strip().lower())
+    mapping_table = collapse_assignment_rows_to_mapping(row_table, input_counts)
+    return row_table, mapping_table
+
+
+def build_gtex_ahba_assignment_variant_tables(
+    samples_df,
+    *,
+    variants=DEFAULT_ASSIGNMENT_TABLE_VARIANTS,
+    collapse_cerebellum: bool = False,
+    rep_mode: str = "centroid",
+    hemi_mode: str = "mirror_left",
+    atlas_paths: AtlasOverlapPaths | None = None,
+    validate_expected: bool = True,
+    repo_root: str | Path | None = None,
+):
+    """Build row and one-to-one mapping tables for named parcel-matching variants."""
+    outputs = {}
+    for name, matching_policy, matching_policy_hemi_mode in variants:
+        row_table, mapping_table = build_gtex_ahba_assignment_outputs(
+            samples_df,
+            matching_policy=matching_policy,
+            matching_policy_hemi_mode=matching_policy_hemi_mode,
+            collapse_cerebellum=bool(collapse_cerebellum),
+            rep_mode=rep_mode,
+            hemi_mode=hemi_mode,
+            atlas_paths=atlas_paths,
+            validate_expected=validate_expected,
+            repo_root=repo_root,
+        )
+        outputs[str(name)] = {"rows": row_table, "mapping": mapping_table}
+    return outputs
+
+
+def collapse_assignment_rows_to_mapping(row_table, input_counts):
+    """Collapse per-row assignment output into GTEx source-tissue to final-parcel mappings."""
+    _, pd = _require_array_stack()
+    grouped = (
+        row_table.groupby(
+            [
+                "matching_policy",
+                "matching_policy_hemi_mode",
+                "original_gtex_tissue",
+                "normalized_gtex_tissue",
+                "final_mapped_parcel",
+                "parcel_idx",
+                "matching_rule",
+            ],
+            as_index=False,
+        ).agg(
+            n_policy_rows=("subject", "size"),
+            n_subjects=("subject", "nunique"),
+            coordinate_mapped_parcels=("coordinate_mapped_parcel", _join_unique_strings),
+            matching_rule_detail=("matching_rule_detail", "first"),
+        )
+    )
+    mapping = grouped.merge(input_counts, on="original_gtex_tissue", how="left")
+    mapping["n_input_rows"] = mapping["n_input_rows"].fillna(0).astype(int)
+    mapping["n_dropped_rows"] = mapping["n_input_rows"] - mapping["n_policy_rows"]
+    mapping["n_final_parcels_for_source"] = (
+        mapping.groupby("original_gtex_tissue")["final_mapped_parcel"].transform("nunique").astype(int)
+    )
+    mapping = mapping.sort_values(["original_gtex_tissue", "final_mapped_parcel"]).reset_index(drop=True)
+    return mapping[PARCEL_ASSIGNMENT_MAPPING_COLS + ["matching_rule_detail"]]
+
+
+def _join_unique_strings(values):
+    _, pd = _require_array_stack()
+    vals = sorted({str(v) for v in values if pd.notna(v)})
+    return " | ".join(vals)
+
+
+def _apply_force_left_coordinate_match(gtex_df, target_parcels):
+    np, _ = _require_array_stack()
+    required = {"coord_x", "coord_y", "coord_z"}
+    if not required.issubset(gtex_df.columns):
+        missing = sorted(required - set(gtex_df.columns))
+        raise ValueError(f"force_left matching requires GTEx coordinate columns, missing: {missing}")
+
+    target = target_parcels.copy()
+    labels = target["tissue_or_parcel"].astype(str)
+    left_mask = labels.str.startswith("LH") | labels.str.startswith("Cerebellar_")
+    left_target = target.loc[left_mask].copy()
+    if left_target.empty:
+        raise ValueError("force_left matching found no LH-prefixed target parcels.")
+
+    txyz = left_target[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=float)
+    gxyz = gtex_df[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=float)
+    d2 = ((gxyz[:, None, :] - txyz[None, :, :]) ** 2).sum(axis=2)
+    idx = np.argmin(d2, axis=1)
+
+    out = gtex_df.copy()
+    out["parcel_idx"] = left_target.iloc[idx]["parcel_idx"].to_numpy(dtype=np.int32)
+    out["mapped_parcel"] = left_target.iloc[idx]["tissue_or_parcel"].to_numpy()
+    out["mapping_distance"] = np.sqrt(d2[np.arange(len(out)), idx]).astype(np.float32)
+    out["matching_rule"] = "coordinate_nearest_left_centroid"
+    out["matching_rule_detail"] = "nearest-neighbor assignment constrained to LH-prefixed target parcels"
+    return out
 
 
 def _initialize_matching_audit_columns(gtex_df):
@@ -564,26 +807,29 @@ def _apply_cortical_overlap_policy(gtex_df, target_parcels, cortical_overrides):
     return out
 
 
-def _apply_cerebellar_region7_policy(gtex_df, target_parcels):
+def _apply_cerebellar_policy(gtex_df, target_parcels, *, collapse_cerebellum: bool = False):
     np, _ = _require_array_stack()
     out = gtex_df.copy()
     target_lookup = _target_label_lookup(target_parcels)
-    if CEREBELLAR_REGION7_PARCEL not in target_lookup:
-        raise ValueError(f"{CEREBELLAR_REGION7_PARCEL!r} is not present in target_parcels")
 
     tissue = out["original_gtex_tissue"].astype(str)
-    has_hemi = (
-        out[tissue == "brain - cerebellar hemisphere"]
-        .groupby("subject")
-        .size()
-        .index.astype(str)
-    )
-    drop_mask = tissue.eq("brain - cerebellum") & out["subject"].astype(str).isin(set(has_hemi))
-    out = out.loc[~drop_mask].copy()
+    if bool(collapse_cerebellum):
+        has_hemi = (
+            out[tissue == "brain - cerebellar hemisphere"]
+            .groupby("subject")
+            .size()
+            .index.astype(str)
+        )
+        drop_mask = tissue.eq("brain - cerebellum") & out["subject"].astype(str).isin(set(has_hemi))
+        out = out.loc[~drop_mask].copy()
 
-    tissue = out["original_gtex_tissue"].astype(str)
-    keep_mask = tissue.isin(DEFAULT_CEREBELLAR_GTEX_TISSUES)
-    if keep_mask.any():
+        tissue = out["original_gtex_tissue"].astype(str)
+        keep_mask = tissue.isin(DEFAULT_CEREBELLAR_GTEX_TISSUES)
+        if not keep_mask.any():
+            out["parcel_idx"] = out["parcel_idx"].astype("int32")
+            return out
+        if CEREBELLAR_REGION7_PARCEL not in target_lookup:
+            raise ValueError(f"{CEREBELLAR_REGION7_PARCEL!r} is not present in target_parcels")
         parcel_idx = np.int32(target_lookup[CEREBELLAR_REGION7_PARCEL])
         out.loc[keep_mask, "parcel_idx"] = parcel_idx
         out.loc[keep_mask, "mapped_parcel"] = CEREBELLAR_REGION7_PARCEL
@@ -597,6 +843,24 @@ def _apply_cerebellar_region7_policy(gtex_df, target_parcels):
             "prefer brain - cerebellar hemisphere; fallback brain - cerebellum; "
             f"assign {CEREBELLAR_REGION7_PARCEL}"
         )
+    else:
+        assignments = {
+            "brain - cerebellar hemisphere": CEREBELLAR_HEMISPHERE_PARCEL,
+            "brain - cerebellum": CEREBELLUM_PARCEL,
+        }
+        for source_tissue, parcel in assignments.items():
+            mask = tissue.eq(source_tissue)
+            if not mask.any():
+                continue
+            if parcel not in target_lookup:
+                raise ValueError(f"Cerebellar override parcel {parcel!r} is not present in target_parcels")
+            out.loc[mask, "parcel_idx"] = np.int32(target_lookup[parcel])
+            out.loc[mask, "mapped_parcel"] = parcel
+            out.loc[mask, "final_mapped_parcel"] = parcel
+            if "mapping_distance" in out.columns:
+                out.loc[mask, "mapping_distance"] = np.nan
+            out.loc[mask, "matching_rule"] = "cerebellar_manual_region_policy"
+            out.loc[mask, "matching_rule_detail"] = f"manual cerebellar assignment {source_tissue} -> {parcel}"
     out["parcel_idx"] = out["parcel_idx"].astype("int32")
     return out
 

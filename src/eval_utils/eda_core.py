@@ -95,10 +95,18 @@ def _prepost_cache_key(cfg: "EDAConfig") -> str:
     # Different policies produce different gtex parcel_idx assignments, so PREPOST blobs
     # must not be shared across them.
     try:
-        from src.eval_utils.results_eda import resolve_matching_policy
+        from src.eval_utils.results_eda import (
+            resolve_collapse_cerebellum,
+            resolve_matching_policy,
+            resolve_matching_policy_hemi_mode,
+        )
         fields.append(("matching_policy", resolve_matching_policy(cfg)))
+        fields.append(("matching_policy_hemi_mode", resolve_matching_policy_hemi_mode(cfg)))
+        fields.append(("collapse_cerebellum", str(resolve_collapse_cerebellum(cfg)).lower()))
     except Exception:
         fields.append(("matching_policy", str(getattr(cfg, "matching_policy", "centroids") or "centroids")))
+        fields.append(("matching_policy_hemi_mode", str(getattr(cfg, "matching_policy_hemi_mode", "default") or "default")))
+        fields.append(("collapse_cerebellum", str(getattr(cfg, "collapse_cerebellum", False)).lower()))
     for path_attr in ("csv_path",):
         p = getattr(cfg, path_attr, None)
         if not p:

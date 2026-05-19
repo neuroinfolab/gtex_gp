@@ -32,13 +32,15 @@ GTEX_HEMI_MODE="${GTEX_HEMI_MODE:-mirror_left}"
 # Parcel assignment policy:
 # - centroids: keep nearest-centroid coordinate matching for all GTEx regions.
 # - centroids_and_volumes: start from centroids, then derive cortical BA9/BA24/BA110
-#   matches from BA-to-Schaefer voxel overlap and map cerebellar samples to Cerebellar_Region7.
-MATCHING_POLICY="${MATCHING_POLICY:-centroids}"
+#   matches from BA-to-Schaefer voxel overlap and map cerebellar labels explicitly.
+MATCHING_POLICY="${MATCHING_POLICY:-centroids_and_volumes}"
+MATCHING_POLICY_HEMI_MODE="${MATCHING_POLICY_HEMI_MODE:-default}"
+COLLAPSE_CEREBELLUM="${COLLAPSE_CEREBELLUM:-false}"
 
 cd "${REPO_ROOT}"
 mkdir -p out/slurm
 
-echo "[array] repo=${REPO_ROOT} task=${SLURM_ARRAY_TASK_ID} model=${MODEL_NAME} scope=${GENE_SCOPE} matching_policy=${MATCHING_POLICY} out_root=${OUT_ROOT}"
+echo "[array] repo=${REPO_ROOT} task=${SLURM_ARRAY_TASK_ID} model=${MODEL_NAME} scope=${GENE_SCOPE} matching_policy=${MATCHING_POLICY} matching_policy_hemi_mode=${MATCHING_POLICY_HEMI_MODE} collapse_cerebellum=${COLLAPSE_CEREBELLUM} out_root=${OUT_ROOT}"
 
 SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py \
   --from-sbatch-array \
@@ -53,7 +55,9 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py 
   --atlas-agg \"${ATLAS_AGG}\" \
   --gtex-rep-mode \"${GTEX_REP_MODE}\" \
   --gtex-hemi-mode \"${GTEX_HEMI_MODE}\" \
-  --matching-policy \"${MATCHING_POLICY}\""
+  --matching-policy \"${MATCHING_POLICY}\" \
+  --matching-policy-hemi-mode \"${MATCHING_POLICY_HEMI_MODE}\" \
+  --collapse-cerebellum \"${COLLAPSE_CEREBELLUM}\""
 
 singularity exec --fakeroot \
   --overlay "/scratch/$USER/envs/vformer_env/overlay-25GB-500K.ext3:ro" \

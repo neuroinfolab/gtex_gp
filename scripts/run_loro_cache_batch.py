@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         choices=["centroids", "centroids_and_volumes"],
         default=SubjectCacheConfig.matching_policy,
     )
+    p.add_argument(
+        "--matching-policy-hemi-mode",
+        choices=["default", "force_left"],
+        default=SubjectCacheConfig.matching_policy_hemi_mode,
+    )
+    p.add_argument("--collapse-cerebellum", default=str(SubjectCacheConfig.collapse_cerebellum).lower())
     return p.parse_args()
 
 
@@ -97,6 +103,8 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         gtex_rep_mode=str(a.gtex_rep_mode).lower(),
         gtex_hemi_mode=str(a.gtex_hemi_mode).lower(),
         matching_policy=str(a.matching_policy).lower(),
+        matching_policy_hemi_mode=str(a.matching_policy_hemi_mode).lower(),
+        collapse_cerebellum=_parse_bool(a.collapse_cerebellum),
     )
 
 

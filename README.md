@@ -15,6 +15,8 @@ Active analysis notebooks (eval refactor):
 - `eval_population.ipynb` — population-level evaluation over cached LORO predictions: global scatters, sample-wise stratifications (Global / Sex / Age / Region), sex-bias forest, LORO fold-combo overlays + dist-colored gradients, fold-difficulty decomposition, distance-to-training.
 - `eval_singlesubject.ipynb` — subject-keyed analyses: per-subject performance distribution with percentile-anchored ranked plot (dynamic-shading at anchor>naive crossover), illustrative single-model scatters at p10/50/90, subject specificity (self vs other-subject truth at same region), spatial specificity (self vs mean of `k − 1` per-region metrics within subject).
 - `eval_population_genewise.ipynb` — per-gene analyses: gene-wise ranked + histogram overall and tissue-stratified; gene-sublist 3-model scatters with rank-based selection (`top` / `bottom` / `random` / `list_order`) or hand-picked highlights; ipywidgets dropdown for single-gene scatter (model + gene); within-subject spatial Kendall-τ with all-genes default + cached sublist filter.
+- `eval_gtex_gxp_samples.ipynb` / `eval_ahba_gxp_samples.ipynb` — split raw single-dataset tensor notebooks (GTEx tissue / AHBA parcel). Both render through `plot_sampled_tensor(..., dataset=...)` over the current canonical `data/raw/gxp_samples.csv` with the shared `TensorView` contract and matched-region / superset options.
+- `eval_gxp_samples.ipynb` — joint GTEx+AHBA tensor test surface over `data/raw/gxp_samples.csv` using `JointTensorView` / `plot_joint_tensor_voxels`; follow-on stages are ComBat-harmonized, LORO, and full-brain imputed joint pairs; see `context_packages/samples_visualizer.md`.
 - `notebooks/coordinate_overlay_3d_mni.ipynb` — GTEx/AHBA spatial assignment inspection.
 
 Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `results_single_subject_predictions.ipynb`, `pca_cached_predictions.ipynb`. Older exploratory variants live under `notebooks/`.
@@ -39,15 +41,18 @@ Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `
 - Tick visibility enforced globally via the rcParams updates in `set_academic_style` and the `apply_tick_style(ax)` per-axes safety helper.
 - Per-section mini-config cells: only global config (CFG, MODELS, gene list, view subset, default metric) sits at the top of each eval notebook; section-local knobs live immediately above their use sites for fluid in-notebook iteration. The genewise notebook adds a `build_panel_view(gene_list_path, models=None)` helper closure to consolidate `make_prediction_eval_view` boilerplate.
 - DLAM diagnostics utilities live in `src/eval_utils/dlam_diagnostics.py`.
-- **GTEx<->AHBA matching policy auto-detected from the cache.** `EDAConfig.matching_policy` defaults to `None`; `resolve_matching_policy(cfg)` reads the field from any subject JSON in `<cache_root>/<gene_scope>/<model>/` (top-level or nested under `config.matching_policy`) and falls back to `'centroids'` for legacy caches. PREPOST applies the resolved policy so its parcel_idx values agree with the cache's. Switch `cfg.cache_root` between `loro_subject_cache` and `loro_subject_cache_coord_vol` and the right policy is applied automatically.
-- **Subject eligibility follows the matching policy** in both `loro_cache.load_dataset` and `_load_expression`: policy is applied first, then `build_subject_eligibility` measures distinct post-policy parcels. `min_observed_parcels` is therefore a post-collapse floor — subjects whose post-policy coverage is below the threshold never enter the LORO cache and are filtered identically by PREPOST. Empirically: `centroids` floor=5 → 318 eligible, `centroids_and_volumes` floor=5 → 313 (the 5-subject delta is the boundary subjects that carry both cerebellum forms, which collapse from k=5 to k=4); floor=4 admits 17 additional sparse-sampled subjects.
+- **GTEx<->AHBA matching policy auto-detected from the cache.** `EDAConfig.matching_policy`, `matching_policy_hemi_mode`, and `collapse_cerebellum` default to cache metadata when unset. PREPOST applies the resolved settings and includes them in its cache hash so parcel_idx values agree with the cache's.
+- **Subject eligibility follows the matching policy** in both `loro_cache.load_dataset` and `_load_expression`: policy is applied first, then `build_subject_eligibility` measures distinct post-policy parcels. `centroids_and_volumes` now keeps `brain - cerebellar hemisphere` and `brain - cerebellum` separate by default (`Cerebellar_Region4` and `Cerebellar_Region7`); `collapse_cerebellum=true` restores the one-cerebellar-parcel collapse.
+- **Canonical LORO cache variants** currently use force-left matching: `out/loro_subject_cache_c` = `centroids + force_left + collapse_cerebellum=false`; `out/loro_subject_cache_cv` = `centroids_and_volumes + force_left + collapse_cerebellum=false`; `out/loro_subject_cache_cv_collapse` = `centroids_and_volumes + force_left + collapse_cerebellum=true`.
+- **Sample tensor notebooks and render sbatches** default to `data/raw/gxp_samples.csv`. The older `gxp_samples_arxiv.csv` is retained as the archived full/reference CSV, not the active default.
 - **Dynamic sbatch array sizing**: `run_loro_cache_array.sbatch` is fixed at `--array=1-385%64` (full GTEx subject pool ceiling). Tasks beyond the policy's eligible count exit cleanly with a `[skip-out-of-range]` log line via `scripts/run_loro_cache_batch.py`. The same submission line works across all `MATCHING_POLICY` × `MIN_OBSERVED_PARCELS` configurations.
+- **Sample visualizer plan**: `context_packages/samples_visualizer.md` is the live plan for explaining the full tensor pipeline: original GTEx/AHBA inputs, the raw joint ground-truth view on a shared AHBA superset region frame (`JointTensorView` + `plot_joint_tensor_voxels`, with translucent GTEx imputation-target cells driven by `future_imputation_mask`), ComBat-harmonized matched data, strict LORO imputed data, and full-brain GTEx imputed data. UMAPs are planned primarily for raw matched, ComBat harmonized, and full-brain imputed stages.
 
 ## Repository Layout
 
 - `src/`: reusable preprocessing, harmonization, models, workflows, evaluation utilities, visualization
 - `scripts/`: manuscript/workflow CLIs and cache-generation entrypoints
-- `scripts/sbatch/`: Slurm launchers for cache experiments
+- root `run_loro_cache_*.sbatch` and `render_*gxp_tensor*.sbatch`: Slurm launchers for cache and tensor-render jobs
 - `notebooks/`: write-up and supporting analysis notebooks
 - `docs/manuscript/`: TeX manuscript and mapping docs
 - `configs/`: notebook workflow configs
@@ -58,14 +63,15 @@ Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `
 
 Expected defaults:
 - `data/raw/gxp_samples.csv`
-- `data/raw/ahba_100hvg.txt`
+- `data/metadata/gene_lists/ahba_100hvg.txt`
+- `data/raw/gxp_samples_arxiv.csv` is the archived/reference sample table; active notebooks and sbatches default to `data/raw/gxp_samples.csv`.
 - `docs/samples_builder.md` — detailed pre-`gxp_samples.csv` builder and GTEx
   filtering workflow (`SMRIN > 6`, TPM/read-count thresholds, AHBA overlap
   audit), strict duplicate-subject handling within GTEx tissue files, and
   atlas-coordinate file fallback behavior when local metadata mirrors are
   incomplete
 
-Legacy root-level fallbacks (`gxp_samples.csv`, `ahba_100hvg.txt`) remain supported for migration, but default code paths use `data/raw/`.
+Legacy root-level fallbacks (`gxp_samples.csv`, `ahba_100hvg.txt`) remain supported for migration, but default code paths use `data/raw/` for expression CSVs and `data/metadata/` for gene lists / atlas metadata.
 
 ## Subject-Wise LORO Cache Workflow
 
@@ -97,8 +103,8 @@ Evaluation note:
 Core implementation modules:
 - `src/workflows/loro_cache.py`
 - `scripts/run_loro_cache_batch.py`
-- `scripts/sbatch/run_loro_cache_single_subject.sbatch`
-- `scripts/sbatch/run_loro_cache_array.sbatch`
+- `run_loro_cache_single_subject.sbatch`
+- `run_loro_cache_array.sbatch`
 - `src/eval_utils/eda_core.py`
 - `src/eval_utils/eval_population.py`
 - `src/eval_utils/eval_single_subject.py`
@@ -122,7 +128,7 @@ Current defaults:
 - GTEx samples are mapped by nearest-neighbor in 3D to AHBA parcel centroids.
 - If a row has multiple coordinates in `coordinates`, `gtex_gp` uses the configured representative point across all listed coordinates before nearest-neighbor assignment (`gtex_rep_mode=centroid|medoid`).
 - GTEx native tissue labels are retained and can be inspected alongside mapped AHBA parcel labels.
-- The formal manuscript-facing matching policy is documented in `docs/manuscript/parcel_matching.md`, with exploratory diagnostics in `parcel_assignment.ipynb`. That policy keeps default centroid matching for manually validatable subcortical structures, adds Brodmann/Schaefer voxel-overlap overrides for BA9, BA24, and BA110 cortical labels, and defines cerebellar duplicate handling with assignment to `Cerebellar_Region7`.
+- The formal manuscript-facing matching policy is documented in `docs/manuscript/parcel_matching.md`, with exploratory diagnostics and final one-to-one mapping tables in `parcel_assignment.ipynb`. The policy keeps centroid matching for manually validatable labels, adds Brodmann/Schaefer voxel-overlap overrides for cortical labels, assigns cerebellar hemisphere/cerebellum explicitly under `centroids_and_volumes`, and only collapses cerebellar labels when `collapse_cerebellum=true`.
 
 ## Quick Commands
 
@@ -153,25 +159,25 @@ python3 scripts/run_loro_cache_batch.py --subject GTEX-14ASI --model all --gene-
 Single-subject sbatch:
 
 ```bash
-SUBJECT_ID=GTEX-14ASI MODEL_NAME=all GENE_SCOPE=allgenes sbatch scripts/sbatch/run_loro_cache_single_subject.sbatch
+SUBJECT_ID=GTEX-14ASI MODEL_NAME=all GENE_SCOPE=allgenes sbatch run_loro_cache_single_subject.sbatch
 ```
 
 All-subject array sbatch:
 
 ```bash
-GENE_SCOPE=allgenes sbatch scripts/sbatch/run_loro_cache_array.sbatch
+GENE_SCOPE=allgenes sbatch run_loro_cache_array.sbatch
 ```
 
 Dynamic-rank PLAM array run (all-genes):
 
 ```bash
-MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch scripts/sbatch/run_loro_cache_array.sbatch
+MODEL_NAME=plam GENE_SCOPE=allgenes DYNAMIC_RANK=true PLAM_MAX_RANK=10 sbatch run_loro_cache_array.sbatch
 ```
 
 HVG array run:
 
 ```bash
-GENE_SCOPE=hvg sbatch scripts/sbatch/run_loro_cache_array.sbatch
+GENE_SCOPE=hvg sbatch run_loro_cache_array.sbatch
 ```
 
 ## Notes for Contributors
@@ -185,6 +191,6 @@ GENE_SCOPE=hvg sbatch scripts/sbatch/run_loro_cache_array.sbatch
 - Helper-level caches (PREPOST, genewise Kendall) belong under `notebooks/cache/<name>/<hash>.pkl`. `out/` is reserved for true prediction artifacts.
 - When adding a new collaborator share via `nfs4_setfacl` on `/scratch/asr655/...`, always re-assert the inheritable OWNER@ ACE on the same tree, otherwise newly-created files land with mode `0o000` (see CONTEXT.md → "NFSv4 ACL gotcha").
 - Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
-- See `CONTEXT.md` for a fast onboarding summary intended for parallel agents, and `context_packages/results_eda_refactor_plan.md` for the live refactor plan.
+- See `CONTEXT.md` for a fast onboarding summary intended for parallel agents, `context_packages/results_eda_refactor_plan.md` for the live eval refactor plan, and `context_packages/samples_visualizer.md` for the sample/tensor visualizer plan.
 
-Last updated at: 2026-05-14
+Last updated at: 2026-05-19

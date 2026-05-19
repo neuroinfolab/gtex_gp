@@ -62,6 +62,8 @@ class EDAConfig:
     # 'centroids' for legacy caches that do not record the field). Set
     # explicitly to override.
     matching_policy: str | None = None
+    matching_policy_hemi_mode: str | None = None
+    collapse_cerebellum: bool | None = None
 
 
 def set_academic_style() -> None:
@@ -252,6 +254,67 @@ def resolve_matching_policy(cfg: EDAConfig) -> str:
                 break  # first json had no field; assume legacy
             break
     return "centroids"
+
+
+def resolve_matching_policy_hemi_mode(cfg: EDAConfig) -> str:
+    explicit = getattr(cfg, "matching_policy_hemi_mode", None)
+    if explicit:
+        return str(explicit).lower()
+    scope_root = (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower()).resolve()
+    if scope_root.exists():
+        for model_attr in ("naive_cache_dirname", "dlam_cache_dirname", "plam_cache_dirname"):
+            sub = scope_root / str(getattr(cfg, model_attr, "")) if getattr(cfg, model_attr, None) else None
+            if sub is None or not sub.exists():
+                continue
+            for json_path in sorted(sub.glob("*.json")):
+                try:
+                    with json_path.open("r") as fh:
+                        meta = json.load(fh)
+                except Exception:
+                    continue
+                mode = (
+                    meta.get("matching_policy_hemi_mode")
+                    or meta.get("config", {}).get("matching_policy_hemi_mode")
+                )
+                if mode:
+                    return str(mode).lower()
+                break
+            break
+    return "default"
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def resolve_collapse_cerebellum(cfg: EDAConfig) -> bool:
+    explicit = getattr(cfg, "collapse_cerebellum", None)
+    if explicit is not None:
+        return _as_bool(explicit)
+    scope_root = (_resolve_repo_path(cfg.cache_root) / str(cfg.gene_scope).lower()).resolve()
+    if scope_root.exists():
+        for model_attr in ("naive_cache_dirname", "dlam_cache_dirname", "plam_cache_dirname"):
+            sub = scope_root / str(getattr(cfg, model_attr, "")) if getattr(cfg, model_attr, None) else None
+            if sub is None or not sub.exists():
+                continue
+            for json_path in sorted(sub.glob("*.json")):
+                try:
+                    with json_path.open("r") as fh:
+                        meta = json.load(fh)
+                except Exception:
+                    continue
+                if "collapse_cerebellum" in meta:
+                    return _as_bool(meta.get("collapse_cerebellum"))
+                config = meta.get("config", {})
+                if isinstance(config, dict) and "collapse_cerebellum" in config:
+                    return _as_bool(config.get("collapse_cerebellum"))
+                break
+            break
+    return False
 
 
 def _cache_pred_truth_arrays(z: np.lib.npyio.NpzFile) -> Tuple[np.ndarray, np.ndarray]:
@@ -792,12 +855,16 @@ def _load_expression(cfg: EDAConfig) -> Dict[str, object]:
     # parcel_idx values agree at merge time. Auto-detected from the cache;
     # defaults to 'centroids' for legacy caches.
     policy = resolve_matching_policy(cfg)
-    if policy != "centroids":
+    policy_hemi_mode = resolve_matching_policy_hemi_mode(cfg)
+    collapse_cerebellum = resolve_collapse_cerebellum(cfg)
+    if policy != "centroids" or policy_hemi_mode != "default" or bool(collapse_cerebellum):
         from src.spatial.parcel_matching import apply_gtex_ahba_matching_policy
         gtex_raw = apply_gtex_ahba_matching_policy(
             gtex_raw,
             target,
             matching_policy=policy,
+            matching_policy_hemi_mode=policy_hemi_mode,
+            collapse_cerebellum=bool(collapse_cerebellum),
         )
     # Eligibility is measured under the active policy (matches loro_cache).
     target_meta = add_target_meta(target)

@@ -101,6 +101,9 @@ def _resolve_fonts(
             merged[key] = value
     return {key: font_size(value) for key, value in merged.items()}
 DISPLAY_LABEL_PREFIXES_TO_STRIP = ("Brain - ",)
+GTEX_DISPLAY_LABEL_OVERRIDES = {
+    "cortex": "Cortex (BA10)",
+}
 PARCEL_GROUP_ORDER = ["cortical", "basal_ganglia", "limbic_midbrain", "cerebellar", "other"]
 PARCEL_GROUP_COLORS = {
     "cortical": ["#2166ac", "#4393c3", "#92c5de"],
@@ -197,7 +200,15 @@ def apply_tick_style(ax, *, label_fontsize: int | None = None) -> None:
 
 
 def pretty_gtex_label(name: str) -> str:
-    return strip_display_label_prefixes(str(name))
+    s = strip_display_label_prefixes(str(name)).strip()
+    s = re.sub(r"\s+", " ", s)
+    override = GTEX_DISPLAY_LABEL_OVERRIDES.get(s.lower())
+    if override is not None:
+        return override
+    s = re.sub(r"\(\s*ba\s*(\d+)\s*\)", r"(BA\1)", s, flags=re.IGNORECASE)
+    if s:
+        s = s[0].upper() + s[1:]
+    return s
 
 
 # Canonical typeset forms for the four supported metrics. Use mathtext so they
@@ -380,6 +391,7 @@ __all__ = [
     "DISPLAY_LABEL_PREFIXES_TO_STRIP",
     "FONT",
     "FONT_TOKENS",
+    "GTEX_DISPLAY_LABEL_OVERRIDES",
     "METRIC_LABELS",
     "METRIC_LABELS_MEAN",
     "MODEL_COLORS",

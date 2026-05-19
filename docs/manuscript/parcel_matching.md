@@ -97,17 +97,17 @@ Gene-expression similarity is used only as a secondary diagnostic for ties or am
 
 ## Cerebellar Override Policy
 
-GTEx includes both `brain - cerebellum` and `brain - cerebellar hemisphere`. Empirically, these labels have highly similar expression-based AHBA parcel profiles and both point most strongly to `Cerebellar_Region7` in the current gene-list diagnostics.
+GTEx includes both `brain - cerebellum` and `brain - cerebellar hemisphere`. The base `centroids` policy leaves both labels on their coordinate-derived nearest-centroid assignments. The volume-aware policy makes the cerebellar assignment explicit while keeping the two labels separate by default.
 
 The production policy is:
 
-1. Prefer `brain - cerebellar hemisphere` when a subject has both cerebellar labels.
-2. Discard `brain - cerebellum` for that subject when `brain - cerebellar hemisphere` is present, because the two samples behave as duplicates for parcel-matching purposes.
-3. If a subject lacks `brain - cerebellar hemisphere` but has `brain - cerebellum`, use the `brain - cerebellum` expression row as a fallback.
-4. Assign either accepted row to `Cerebellar_Region7`.
-5. Normalize the output GTEx label to `Cerebellar hemisphere` for downstream reporting, regardless of whether the input row was `brain - cerebellar hemisphere` or fallback `brain - cerebellum`.
+1. Under `centroids`, use the coordinate-derived nearest AHBA parcel.
+2. Under `centroids_and_volumes` with `collapse_cerebellum=False` (default), assign `brain - cerebellar hemisphere` to `Cerebellar_Region4` and `brain - cerebellum` to `Cerebellar_Region7`.
+3. Under `collapse_cerebellum=True`, prefer `brain - cerebellar hemisphere` when a subject has both cerebellar labels, discard that subject's broader `brain - cerebellum` row, and assign the retained cerebellar row to `Cerebellar_Region7`.
+4. If a collapsing subject lacks `brain - cerebellar hemisphere` but has `brain - cerebellum`, use the `brain - cerebellum` expression row as the fallback and assign it to `Cerebellar_Region7`.
+5. Normalize the collapsed output GTEx label to `Cerebellar hemisphere` for downstream reporting.
 
-This policy is intentionally conservative: it avoids double-counting two near-duplicate cerebellar measurements while preserving one cerebellar observation when only the broader cerebellum label is available.
+The default volume-aware policy therefore keeps both cerebellar observations when present. Collapse is an explicit override for analyses that need one cerebellar parcel.
 
 ## Assignment Precedence
 
@@ -115,7 +115,7 @@ When implemented in preprocessing, matching should be applied in this order:
 
 1. Build the default coordinate-based GTEx-to-AHBA assignment.
 2. Apply cortical Brodmann/Schaefer hard overrides for BA9, BA24, and BA110 labels.
-3. Apply cerebellar duplicate resolution and `Cerebellar_Region7` assignment.
+3. Apply explicit cerebellar assignments, or the `collapse_cerebellum` override when requested.
 4. Retain default coordinate matching for subcortical labels, with the manual validation table above as the audit reference.
 5. Preserve the original GTEx label in an audit column and expose the final normalized label used for modeling/reporting.
 
@@ -134,6 +134,8 @@ Recommended audit columns:
 The active LORO cache pipeline exposes this as a matching policy choice:
 
 - `centroids`: default coordinate/centroid nearest-neighbor matching.
-- `centroids_and_volumes`: coordinate/centroid matching followed by derived cortical BA/Schaefer voxel-overlap assignment and cerebellar `Cerebellar_Region7` duplicate/fallback handling.
+- `centroids_and_volumes`: coordinate/centroid matching followed by derived cortical BA/Schaefer voxel-overlap assignment and explicit cerebellar label assignments (`Cerebellar_Region4`, `Cerebellar_Region7`) by default.
+
+Set `collapse_cerebellum=True` to collapse cerebellar labels into one `Cerebellar_Region7` observation per subject.
 
 The exploratory notebook does not write diagnostic CSVs by default; set `SAVE_NOTEBOOK_TABLES = True` in [`parcel_assignment.ipynb`](../../parcel_assignment.ipynb) only when refreshing notebook-derived tables under `out/`.

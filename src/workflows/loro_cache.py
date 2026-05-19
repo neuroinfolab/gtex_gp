@@ -68,7 +68,9 @@ class SubjectCacheConfig:
     atlas_agg: str = "mean"
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
-    matching_policy: str = "centroids"
+    matching_policy: str = "centroids_and_volumes"
+    matching_policy_hemi_mode: str = "default"
+    collapse_cerebellum: bool = False
 
 
 def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
@@ -82,6 +84,11 @@ def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
         raise ValueError(
             "matching_policy must be 'centroids' or 'centroids_and_volumes', "
             f"got {cfg.matching_policy!r}"
+        )
+    if str(cfg.matching_policy_hemi_mode).lower() not in {"default", "force_left"}:
+        raise ValueError(
+            "matching_policy_hemi_mode must be 'default' or 'force_left', "
+            f"got {cfg.matching_policy_hemi_mode!r}"
         )
     csv_path = _resolve_optional_path(cfg.csv_path, ["gxp_samples.csv"])
     hvg_path = _resolve_optional_path(
@@ -114,13 +121,15 @@ def load_dataset(cfg: SubjectCacheConfig) -> Dict[str, object]:
         gtex_raw,
         target,
         matching_policy=str(cfg.matching_policy).lower(),
+        matching_policy_hemi_mode=str(cfg.matching_policy_hemi_mode).lower(),
+        collapse_cerebellum=bool(cfg.collapse_cerebellum),
         validate_expected=True,
         repo_root=REPO_ROOT,
     )
     target_meta = add_target_meta(target)
     # Eligibility is measured against the POST-POLICY parcel scheme. The active
     # matching_policy IS the analysis bucketing, so `min_observed_parcels` is a
-    # post-collapse floor: subjects with fewer than k distinct parcels after
+    # post-policy floor: subjects with fewer than k distinct parcels after
     # policy application never enter the cache.
     elig = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
     eligible_subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
@@ -546,6 +555,12 @@ def parse_args() -> argparse.Namespace:
         choices=["centroids", "centroids_and_volumes"],
         default=SubjectCacheConfig.matching_policy,
     )
+    p.add_argument(
+        "--matching-policy-hemi-mode",
+        choices=["default", "force_left"],
+        default=SubjectCacheConfig.matching_policy_hemi_mode,
+    )
+    p.add_argument("--collapse-cerebellum", default=str(SubjectCacheConfig.collapse_cerebellum).lower())
     return p.parse_args()
 
 
@@ -587,6 +602,8 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         gtex_rep_mode=str(a.gtex_rep_mode).lower(),
         gtex_hemi_mode=str(a.gtex_hemi_mode).lower(),
         matching_policy=str(a.matching_policy).lower(),
+        matching_policy_hemi_mode=str(a.matching_policy_hemi_mode).lower(),
+        collapse_cerebellum=_parse_bool(a.collapse_cerebellum),
     )
 
 

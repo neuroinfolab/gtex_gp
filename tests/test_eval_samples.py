@@ -5,11 +5,12 @@ import pandas as pd
 
 from src.eval_utils.eval_samples import (
     GTEX_TENSOR_REGION_ORDER,
-    build_gtex_tissue_tensor,
+    build_dataset_region_tensor,
+    build_sampled_tensor,
 )
 
 
-def test_build_gtex_tissue_tensor_respects_region_order_and_mask():
+def test_build_dataset_region_tensor_respects_region_order_and_mask():
     df = pd.DataFrame(
         {
             "subject": ["S1", "S1", "S2"],
@@ -27,11 +28,13 @@ def test_build_gtex_tissue_tensor_respects_region_order_and_mask():
         }
     )
 
-    tensor = build_gtex_tissue_tensor(
+    tensor = build_dataset_region_tensor(
         df,
+        dataset="GTEx",
         subjects=["S1", "S2"],
         genes=["GENE1", "GENE2"],
         region_order=GTEX_TENSOR_REGION_ORDER,
+        region_axis_kind="gtex_tissue",
     )
 
     assert tensor.values.shape == (2, len(GTEX_TENSOR_REGION_ORDER), 2)
@@ -49,3 +52,47 @@ def test_build_gtex_tissue_tensor_respects_region_order_and_mask():
     assert np.isclose(tensor.values[0, frontal_idx, 0], 1.0)
     assert np.isclose(tensor.values[0, cereb_idx, 1], 5.0)
     assert np.isnan(tensor.values[1, cereb_idx, 0])
+
+
+def test_build_sampled_tensor_region_matched_uses_shared_order():
+    rows = [
+        ("A1", "AHBA", "Parcel_A", "(0, 0, 0)", 10.0),
+        ("A1", "AHBA", "Parcel_B", "(10, 0, 0)", 20.0),
+        ("G1", "GTEx", "brain - frontal cortex (ba9)", "(0.1, 0, 0)", 1.0),
+        ("G1", "GTEx", "brain - hippocampus", "(9.9, 0, 0)", 2.0),
+    ]
+    df = pd.DataFrame(
+        {
+            "subject": [r[0] for r in rows],
+            "age": [40] * len(rows),
+            "sex": ["F"] * len(rows),
+            "dataset": [r[1] for r in rows],
+            "tissue_or_parcel": [r[2] for r in rows],
+            "coordinates": [r[3] for r in rows],
+            "GENE1": [r[4] for r in rows],
+        }
+    )
+
+    gtex_tensor = build_sampled_tensor(
+        df,
+        dataset="GTEx",
+        region_ordering="region_matched",
+        matching_policy="centroids",
+        gene_panel=["GENE1"],
+        n_subjects=1,
+        n_genes=1,
+        min_regions_per_subject=1,
+    )
+    ahba_tensor = build_sampled_tensor(
+        df,
+        dataset="AHBA",
+        region_ordering="region_matched",
+        matching_policy="centroids",
+        gene_panel=["GENE1"],
+        n_subjects=1,
+        n_genes=1,
+        min_regions_per_subject=1,
+    )
+
+    assert gtex_tensor.regions == ["brain - frontal cortex (ba9)", "brain - hippocampus"]
+    assert ahba_tensor.regions == ["Parcel_A", "Parcel_B"]
