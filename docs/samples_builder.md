@@ -88,6 +88,15 @@ data/GTEx/metadata/
 source of any RIN-based filtering. `SubjectPhenotypesDS.txt` is subject-level
 and supplies `SEX`, `AGE`, and `DTHHRDY`.
 
+AHBA donor metadata lives beside the AHBA source tree:
+
+```text
+GeneEx2Conn_data/AHBA/AHBA_metadata.csv
+```
+
+This file supplies `uid`, `age`, and `sex`; `uid` is the donor identifier that
+matches the per-donor AHBA expression CSV suffixes.
+
 The default row-level GTEx transform used when writing `gxp_samples.csv` is
 still `log1p(TPM)`. Before `gxp_samples.csv` is built, however, the repo now
 supports an explicit GTEx gene-filtering audit path based on sample-level QC
@@ -191,6 +200,8 @@ The library interface now supports these GTEx-side pre-build controls directly
 in `build_gxp_samples(...)`:
 
 - `gtex_sample_attributes_path`
+- `gtex_metadata_path`
+- `ahba_metadata_path`
 - `gtex_rin_threshold`
 - `gtex_tpm_threshold`
 - `gtex_reads_threshold`
@@ -203,6 +214,11 @@ GTEx-side threshold report internally, restricts the final build to the
 resulting GTEx ∩ AHBA overlap (and any optional smaller panel layered on top),
 and can return that overlap report alongside the dataframe via
 `return_overlap_info=True`.
+
+`gtex_metadata_path` should point to `SubjectPhenotypesDS.txt` for GTEx age/sex.
+`ahba_metadata_path` should point to `AHBA_metadata.csv` for AHBA age/sex. If
+these are omitted, the builder now tries the standard workspace locations
+relative to `gtex_root` and `ahba_root`.
 
 In practice this means the notebook can be split cleanly into:
 
@@ -316,6 +332,9 @@ python scripts/build_gxp_samples.py \
   --gtex-root /scratch/asr655/neuroinformatics/Seq2GeneEx/neuroVformer/data/GTEx/GTEx_v11 \
   --ahba-root /scratch/asr655/neuroinformatics/GeneEx2Conn_data/AHBA \
   --gene-panel data/metadata/gene_lists/allgenes_stability_dk/allgenes_stable_r0.2.csv \
+  --gtex-sample-attributes-path /scratch/asr655/neuroinformatics/Seq2GeneEx/neuroVformer/data/GTEx/metadata/annotations_v8_GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt \
+  --gtex-metadata-path /scratch/asr655/neuroinformatics/Seq2GeneEx/neuroVformer/data/GTEx/metadata/annotations_v8_GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt \
+  --ahba-metadata-path /scratch/asr655/neuroinformatics/GeneEx2Conn_data/AHBA/AHBA_metadata.csv \
   --output data/raw/gxp_samples.csv
 ```
 

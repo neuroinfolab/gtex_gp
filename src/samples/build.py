@@ -40,13 +40,41 @@ def _atlas_file(atlas_dir: Path, name: str, *, required_columns: set[str] | None
     raise FileNotFoundError(f"Could not resolve atlas file {name!r} from {atlas_dir}")
 
 
-def _merge_metadata(df: pd.DataFrame, meta: pd.DataFrame | None) -> pd.DataFrame:
+def _resolve_gtex_metadata_path(gtex_root: str | Path, explicit: str | Path | None) -> Path | None:
+    if explicit:
+        return Path(explicit)
+    root = Path(gtex_root)
+    candidates = [
+        root / "metadata" / "annotations_v8_GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt",
+        root.parent / "metadata" / "annotations_v8_GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt",
+        root.parent.parent / "metadata" / "annotations_v8_GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_ahba_metadata_path(ahba_root: str | Path, explicit: str | Path | None) -> Path | None:
+    if explicit:
+        return Path(explicit)
+    path = Path(ahba_root) / "AHBA_metadata.csv"
+    return path if path.exists() else None
+
+
+def _merge_metadata(df: pd.DataFrame, meta: pd.DataFrame | None, *, dataset_name: str) -> pd.DataFrame:
     if meta is None or meta.empty:
         out = df.copy()
         out.insert(1, "age", pd.NA)
         out.insert(2, "sex", pd.NA)
         return out
     merged = df.merge(meta, on="subject", how="left")
+    missing = merged[merged["age"].isna() | merged["sex"].isna()]["subject"].astype(str).unique().tolist()
+    if missing:
+        raise ValueError(
+            f"{dataset_name} metadata did not provide age/sex for {len(missing)} subject(s); "
+            f"examples: {missing[:10]}"
+        )
     rest = [c for c in merged.columns if c not in {"subject", "age", "sex"}]
     return merged[["subject", "age", "sex"] + rest]
 
@@ -273,8 +301,9 @@ def build_gxp_samples(
     if not gtex_parts:
         raise RuntimeError(f"No GTEx brain GCT files found under {gtex_root}")
     gtex_df = pd.concat(gtex_parts, ignore_index=True)
-    gtex_meta = load_gtex_metadata(gtex_metadata_path) if gtex_metadata_path else None
-    gtex_df = _merge_metadata(gtex_df, gtex_meta)
+    resolved_gtex_metadata_path = _resolve_gtex_metadata_path(gtex_root, gtex_metadata_path)
+    gtex_meta = load_gtex_metadata(resolved_gtex_metadata_path) if resolved_gtex_metadata_path else None
+    gtex_df = _merge_metadata(gtex_df, gtex_meta, dataset_name="GTEx")
 
     s156_coords = pd.read_csv(_atlas_file(atlas_dir, "atlas-4S156Parcels_dseg_reformatted.csv"))
     ahba_parts = []
@@ -284,8 +313,9 @@ def build_gxp_samples(
     if not ahba_parts:
         raise RuntimeError(f"No AHBA subject files found under {ahba_root}")
     ahba_df = pd.concat(ahba_parts, ignore_index=True)
-    ahba_meta = load_ahba_metadata(ahba_metadata_path) if ahba_metadata_path else None
-    ahba_df = _merge_metadata(ahba_df, ahba_meta)
+    resolved_ahba_metadata_path = _resolve_ahba_metadata_path(ahba_root, ahba_metadata_path)
+    ahba_meta = load_ahba_metadata(resolved_ahba_metadata_path) if resolved_ahba_metadata_path else None
+    ahba_df = _merge_metadata(ahba_df, ahba_meta, dataset_name="AHBA")
 
     out = _align_and_concat(gtex_df, ahba_df, effective_gene_panel)
     if output:

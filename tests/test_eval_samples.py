@@ -6,7 +6,7 @@ import pandas as pd
 from src.eval_utils.eval_samples import (
     GTEX_TENSOR_REGION_ORDER,
     build_dataset_region_tensor,
-    build_sampled_tensor,
+    build_native_tensor_view,
 )
 
 
@@ -54,7 +54,7 @@ def test_build_dataset_region_tensor_respects_region_order_and_mask():
     assert np.isnan(tensor.values[1, cereb_idx, 0])
 
 
-def test_build_sampled_tensor_region_matched_uses_shared_order():
+def test_build_native_tensor_view_region_matched_uses_shared_order():
     rows = [
         ("A1", "AHBA", "Parcel_A", "(0, 0, 0)", 10.0),
         ("A1", "AHBA", "Parcel_B", "(10, 0, 0)", 20.0),
@@ -73,7 +73,7 @@ def test_build_sampled_tensor_region_matched_uses_shared_order():
         }
     )
 
-    gtex_tensor = build_sampled_tensor(
+    gtex_tensor = build_native_tensor_view(
         df,
         dataset="GTEx",
         region_ordering="region_matched",
@@ -83,7 +83,7 @@ def test_build_sampled_tensor_region_matched_uses_shared_order():
         n_genes=1,
         min_regions_per_subject=1,
     )
-    ahba_tensor = build_sampled_tensor(
+    ahba_tensor = build_native_tensor_view(
         df,
         dataset="AHBA",
         region_ordering="region_matched",
@@ -94,5 +94,7 @@ def test_build_sampled_tensor_region_matched_uses_shared_order():
         min_regions_per_subject=1,
     )
 
-    assert gtex_tensor.regions == ["brain - frontal cortex (ba9)", "brain - hippocampus"]
-    assert ahba_tensor.regions == ["Parcel_A", "Parcel_B"]
+    # Display order is reversed at the view layer (cerebellum/last-ranked first),
+    # but GTEx and AHBA stay position-aligned: index 0 is the same matched pair.
+    assert gtex_tensor.regions == ["brain - hippocampus", "brain - frontal cortex (ba9)"]
+    assert ahba_tensor.regions == ["Parcel_B", "Parcel_A"]

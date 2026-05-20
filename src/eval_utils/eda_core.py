@@ -55,6 +55,7 @@ __all__ = [
     "parcel_subject_count_table",
     "plot_atlas_median_comparison_heatmaps",
     "plot_coverage_count_distribution",
+    "plot_coverage_distributions",
     "plot_gtex_demographic_breakdown",
     "plot_parcel_subject_counts",
     "plot_region_covariance_side_by_side",
@@ -87,6 +88,7 @@ def _prepost_cache_key(cfg: "EDAConfig") -> str:
     for attr in (
         "csv_path", "cache_root", "gene_scope",
         "min_observed_parcels", "combat_use_covariates",
+        "drop_macro_system_covariate",
         "gtex_rep_mode", "gtex_hemi_mode",
     ):
         if hasattr(cfg, attr):
@@ -138,7 +140,7 @@ def prepare_pre_post_harmonization_cached(
     on the same EDAConfig load from disk in seconds rather than re-fitting
     ComBat. The hash key covers the CSV/HVG paths (with their mtime + size),
     `gene_scope`, `min_observed_parcels`, `combat_use_covariates`,
-    `gtex_rep_mode`, `gtex_hemi_mode` — change any of those and the cache is
+    `drop_macro_system_covariate`, `gtex_rep_mode`, `gtex_hemi_mode` — change any of those and the cache is
     rebuilt automatically. Set `force_rebuild=True` to bypass.
 
     Pickled blob includes the harmonized cubes, eligible-subject metadata,
@@ -245,30 +247,46 @@ def plot_gtex_demographic_breakdown(
     missing = required.difference(set(g.columns))
     if missing:
         raise ValueError(f"GTEx demographic plot requires columns: {sorted(missing)}")
+    # One row per subject. `age` is a numeric decade-midpoint (e.g. 60-69 -> 64),
+    # `sex` is 'M'/'F'.
     demo = (
         g.groupby("subject", as_index=False)
         .agg(age=("age", _first_non_null), sex=("sex", _first_non_null))
         .reset_index(drop=True)
     )
-    demo["age"] = demo["age"].fillna("Unknown").astype(str)
-    demo["sex"] = demo["sex"].fillna("Unknown").astype(str)
-
-    age_counts = demo["age"].value_counts(dropna=False).rename_axis("age").reset_index(name="n_subjects")
-    age_counts = age_counts.sort_values("age", key=lambda s: s.map(_age_sort_key)).reset_index(drop=True)
-    sex_counts = demo["sex"].value_counts(dropna=False).rename_axis("sex").reset_index(name="n_subjects")
-    sex_counts = sex_counts.sort_values(["sex"]).reset_index(drop=True)
+    ages = pd.to_numeric(demo["age"], errors="coerce").dropna().to_numpy()
+    sex = demo["sex"].astype(str).str.upper().str.strip()
 
     fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
-    axes[0].bar(age_counts["age"].astype(str), age_counts["n_subjects"], color="#4c78a8")
+
+    # Age: histogram on decade brackets aligned to the GTEx age buckets.
+    if ages.size:
+        lo = int(np.floor(ages.min() / 10.0) * 10)
+        hi = int(np.ceil(ages.max() / 10.0) * 10)
+        bins = np.arange(lo, hi + 10, 10)
+        axes[0].hist(ages, bins=bins, color="#4c78a8", alpha=0.85, edgecolor="white")
+        axes[0].set_xticks(bins)
     axes[0].set_title("GTEx age distribution", fontsize=FONT["title"])
     axes[0].set_xlabel("Age")
     axes[0].set_ylabel("Subjects")
-    axes[0].tick_params(axis="x", rotation=35)
+    axes[0].tick_params(axis="x", rotation=30)
 
-    axes[1].bar(sex_counts["sex"].astype(str), sex_counts["n_subjects"], color="#f58518")
+    # Sex: two vertical bars (M, F), any other/unknown appended after.
+    sex_series = sex.value_counts(dropna=False)
+    order = [s for s in ("M", "F") if s in sex_series.index]
+    order += [s for s in sex_series.index if s not in ("M", "F")]
+    sex_series = sex_series.reindex(order)
+    sex_colors = {"M": "#69b3ff", "F": "#f58518"}
+    axes[1].bar(
+        sex_series.index.astype(str),
+        sex_series.to_numpy(),
+        color=[sex_colors.get(s, "#9c9c9c") for s in sex_series.index],
+        alpha=0.85,
+    )
     axes[1].set_title("GTEx sex distribution", fontsize=FONT["title"])
     axes[1].set_xlabel("Sex")
     axes[1].set_ylabel("Subjects")
+
     for ax in axes:
         ax.grid(True, axis="y", alpha=0.25)
         ax.grid(False, axis="x")
@@ -278,6 +296,63 @@ def plot_gtex_demographic_breakdown(
         y=1.04,
     )
     return fig, axes, demo
+
+
+def plot_coverage_distributions(
+    prepost: Dict[str, object],
+    *,
+    eligible_only: bool = True,
+    min_subjects: int = 1,
+    figsize: Tuple[float, float] = (12.0, 4.4),
+) -> Tuple[plt.Figure, np.ndarray, Dict[str, pd.DataFrame]]:
+    """Region coverage, two panels side by side.
+
+    Left  — subjects observed per region: one bar per observed region, GTEx
+            native parcel name on x (30 degree tilt), subject count on y.
+    Right — regions sampled per subject:  x = number of regions a subject
+            samples, y = number of subjects (from the eligibility table).
+    """
+    count_df = parcel_subject_count_table(
+        prepost, label_mode="gtex", eligible_only=eligible_only
+    )
+    region = count_df[count_df["n_subjects_observed"] >= int(min_subjects)].copy()
+    region = region.sort_values(
+        ["n_subjects_observed", "parcel_idx"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+    subj = subject_region_count_distribution(prepost, eligible_only=eligible_only)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+
+    axes[0].bar(
+        region["label"].astype(str), region["n_subjects_observed"],
+        color="#3274A1", alpha=0.9,
+    )
+    axes[0].set_title("Subjects observed per region", fontsize=FONT["title"])
+    axes[0].set_xlabel("Region (GTEx native)")
+    axes[0].set_ylabel("Subjects observed")
+    axes[0].tick_params(axis="x", rotation=30)
+    for lbl in axes[0].get_xticklabels():
+        lbl.set_horizontalalignment("right")
+
+    axes[1].bar(subj["n_regions_sampled"], subj["n_subjects"], color="#2E8B57", alpha=0.9)
+    axes[1].set_title("Regions sampled per subject", fontsize=FONT["title"])
+    axes[1].set_xlabel("Regions sampled per subject")
+    axes[1].set_ylabel("Number of subjects")
+    if len(subj):
+        axes[1].set_xticks(subj["n_regions_sampled"].tolist())
+
+    for ax in axes:
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.grid(False, axis="x")
+
+    n_pool = int(subj["n_subjects_pool"].iloc[0]) if len(subj) else 0
+    fig.suptitle(
+        f"Region coverage ({'eligible subjects' if bool(eligible_only) else 'all subjects'}; n={n_pool})",
+        fontsize=FONT["title"] + 1,
+        y=1.04,
+    )
+    return fig, axes, {"subjects_per_region": region, "regions_per_subject": subj}
 
 
 def _normalize_summary_stat(summary_stat: str) -> str:

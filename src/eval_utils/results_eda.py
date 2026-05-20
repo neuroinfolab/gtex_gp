@@ -55,6 +55,7 @@ class EDAConfig:
     gene_scope: str = "hvg"  # hvg | allgenes
     min_observed_parcels: int = 5
     combat_use_covariates: bool = True
+    drop_macro_system_covariate: bool = False
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
     # GTEx<->AHBA parcel matching policy used when the LORO cache was built.
@@ -896,6 +897,7 @@ def prepare_pre_post_harmonization(cfg: EDAConfig) -> Dict[str, object]:
     gtex_eligible = gtex_raw[gtex_raw["subject"].astype(str).isin(subjects)].copy()
     hcfg = SimpleNamespace(
         combat_use_covariates=bool(cfg.combat_use_covariates),
+        drop_macro_system_covariate=bool(cfg.drop_macro_system_covariate),
     )
     harmonizer = fit_harmonizer(ahba_raw, gtex_eligible, genes, method="combat", cfg=hcfg)
     gtex_h = harmonizer.transform(gtex_eligible, "GTEX")

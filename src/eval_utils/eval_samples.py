@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import functools
 import math
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -93,6 +94,29 @@ _VOXEL_TENSOR_AXIS_LABEL_ONLY_PADS = {
 }
 
 
+PIPELINE_STAGES = (
+    "native_tissue",
+    "native_parcel",
+    "raw_matched",
+    "harmonized",
+    "loro_truth",
+    "loro_recon",
+    "loro_fused",
+    "fullfit",
+)
+
+
+def _validate_pipeline_stage(stage: str | None) -> str | None:
+    if stage is None:
+        return None
+    s = str(stage)
+    if s not in PIPELINE_STAGES:
+        raise ValueError(
+            f"pipeline_stage must be one of {PIPELINE_STAGES} or None, got {s!r}"
+        )
+    return s
+
+
 @dataclass
 class TensorView:
     values: np.ndarray
@@ -103,6 +127,12 @@ class TensorView:
     dataset: str
     region_axis_kind: str
     future_imputation_mask: np.ndarray | None = None
+    matching: dict | None = None
+    pipeline_stage: str | None = None
+
+    def __post_init__(self):
+        self.values = np.asarray(self.values, dtype=np.float32)
+        self.pipeline_stage = _validate_pipeline_stage(self.pipeline_stage)
 
 
 @dataclass
@@ -118,6 +148,56 @@ class JointTensorView:
     region_axis_kind: str
     matched_region_count: int
     source_views: dict
+    matching: dict | None = None
+
+
+_MATCHING_FINGERPRINT_KEYS = (
+    "policy",
+    "hemi_mode",
+    "gtex_rep_mode",
+    "gtex_hemi_mode",
+    "collapse_cerebellum",
+)
+
+
+def matching_metadata_compatible(a: dict | None, b: dict | None) -> bool:
+    """True if two matching dicts describe the same GTEx<->AHBA matching fit.
+
+    Compares the matching policy/hemi/rep/collapse fingerprint and the full
+    GTEx->AHBA pair table. `region_ordering` and `pairs` ordering are not part
+    of the fingerprint (the same matching is reusable across orderings).
+    """
+    if a is None or b is None:
+        return a is None and b is None
+    for key in _MATCHING_FINGERPRINT_KEYS:
+        if a.get(key) != b.get(key):
+            return False
+    return a.get("gtex_to_ahba") == b.get("gtex_to_ahba")
+
+
+def _build_matching_metadata(
+    *,
+    region_ordering: str,
+    matching_policy: str,
+    matching_policy_hemi_mode: str,
+    collapse_cerebellum: bool,
+    gtex_rep_mode: str,
+    gtex_hemi_mode: str,
+    pairs_df: pd.DataFrame,
+) -> dict:
+    gtex_to_ahba = {
+        str(g): str(a)
+        for g, a in zip(pairs_df["gtex_region"].tolist(), pairs_df["ahba_region"].tolist())
+    }
+    return {
+        "region_ordering": str(region_ordering),
+        "policy": str(matching_policy),
+        "hemi_mode": str(matching_policy_hemi_mode),
+        "gtex_rep_mode": str(gtex_rep_mode),
+        "gtex_hemi_mode": str(gtex_hemi_mode),
+        "collapse_cerebellum": bool(collapse_cerebellum),
+        "gtex_to_ahba": gtex_to_ahba,
+    }
 
 
 def build_joint_tensor_view(
@@ -141,6 +221,12 @@ def build_joint_tensor_view(
             "region_axis_kind mismatch: "
             f"{gtex_view.region_axis_kind!r} vs {ahba_view.region_axis_kind!r}. "
             "Both views must live on the same region frame (e.g. 'ahba_parcel')."
+        )
+    if not matching_metadata_compatible(gtex_view.matching, ahba_view.matching):
+        raise ValueError(
+            "gtex_view and ahba_view were built under different GTEx<->AHBA matchings. "
+            "Use the same matching_policy / matching_policy_hemi_mode / "
+            "gtex_rep_mode / gtex_hemi_mode / collapse_cerebellum for both views."
         )
     stack_order = tuple(str(x) for x in stack_order)
     if set(stack_order) != {"GTEx", "AHBA"} or len(stack_order) != 2:
@@ -195,6 +281,7 @@ def build_joint_tensor_view(
         region_axis_kind=gtex_view.region_axis_kind,
         matched_region_count=matched_region_count,
         source_views={"GTEx": gtex_view, "AHBA": ahba_view},
+        matching=(gtex_view.matching if gtex_view.matching is not None else ahba_view.matching),
     )
 
 
@@ -204,6 +291,576 @@ def summarize_joint_selection(joint_view: JointTensorView) -> pd.DataFrame:
             "subject": joint_view.subjects,
             "dataset": joint_view.subject_datasets,
         }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier B adapter — cube-based source path (PREPOST + npz cache)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MatchingContext:
+    """Per-cfg metadata reused across every Tier B view built from one PREPOST.
+
+    Holds the matching dict (full GTEx<->AHBA pair table + policy fingerprint),
+    the full target-parcel ordering, and the active gene axis. Build once per
+    cfg, pass into multiple `build_*_tensor_view` calls.
+    """
+
+    matching: dict
+    target_meta: pd.DataFrame
+    regions_full: list[str]
+    genes_full: list[str]
+
+    @classmethod
+    def from_cfg(cls, cfg, prepost: dict) -> "MatchingContext":
+        # Resolve via cached path (CSV is read once per cfg fingerprint).
+        return _matching_context_for(
+            csv_path=str(cfg.csv_path),
+            policy=_resolve_policy_via_cfg(cfg),
+            hemi_mode=_resolve_hemi_via_cfg(cfg),
+            gtex_rep_mode=str(cfg.gtex_rep_mode),
+            gtex_hemi_mode=str(cfg.gtex_hemi_mode),
+            collapse_cerebellum=_resolve_collapse_via_cfg(cfg),
+            target_meta=prepost["target_meta"],
+            genes_full=tuple(prepost["genes"]),
+        )
+
+
+def _resolve_policy_via_cfg(cfg) -> str:
+    # Late-imported to avoid the heavy results_eda module at file import time.
+    from .results_eda import resolve_matching_policy
+    return str(resolve_matching_policy(cfg))
+
+
+def _resolve_hemi_via_cfg(cfg) -> str:
+    from .results_eda import resolve_matching_policy_hemi_mode
+    return str(resolve_matching_policy_hemi_mode(cfg))
+
+
+def _resolve_collapse_via_cfg(cfg) -> bool:
+    from .results_eda import resolve_collapse_cerebellum
+    return bool(resolve_collapse_cerebellum(cfg))
+
+
+@functools.lru_cache(maxsize=8)
+def _matching_pairs_cached(
+    csv_path: str,
+    policy: str,
+    hemi_mode: str,
+    gtex_rep_mode: str,
+    gtex_hemi_mode: str,
+    collapse_cerebellum: bool,
+) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    pairs_df, _, _ = _matched_region_pairs(
+        df,
+        matching_policy=policy,
+        matching_policy_hemi_mode=hemi_mode,
+        collapse_cerebellum=collapse_cerebellum,
+        gtex_rep_mode=gtex_rep_mode,
+        gtex_hemi_mode=gtex_hemi_mode,
+    )
+    return pairs_df
+
+
+def _matching_context_for(
+    *,
+    csv_path: str,
+    policy: str,
+    hemi_mode: str,
+    gtex_rep_mode: str,
+    gtex_hemi_mode: str,
+    collapse_cerebellum: bool,
+    target_meta: pd.DataFrame,
+    genes_full,
+) -> MatchingContext:
+    pairs_df = _matching_pairs_cached(
+        csv_path, policy, hemi_mode, gtex_rep_mode, gtex_hemi_mode, collapse_cerebellum,
+    )
+    matching = _build_matching_metadata(
+        region_ordering="target_parcel",
+        matching_policy=policy,
+        matching_policy_hemi_mode=hemi_mode,
+        collapse_cerebellum=collapse_cerebellum,
+        gtex_rep_mode=gtex_rep_mode,
+        gtex_hemi_mode=gtex_hemi_mode,
+        pairs_df=pairs_df,
+    )
+    regions_full = (
+        target_meta.sort_values("parcel_idx")["tissue_or_parcel"].astype(str).tolist()
+    )
+    return MatchingContext(
+        matching=matching,
+        target_meta=target_meta,
+        regions_full=regions_full,
+        genes_full=list(genes_full),
+    )
+
+
+def build_ahba_cube_from_prepost(
+    prepost: dict, *, harmonized: bool
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Group `prepost['ahba_raw'|'ahba_h']` into a `(subj, parcel, gene)` cube.
+
+    PREPOST stores AHBA as a DataFrame (one row per subject x parcel sample),
+    not a cube. This helper averages over duplicate (subject, parcel_idx) rows
+    and writes into the same orientation as `prepost['raw_cube']`.
+    """
+    df = prepost["ahba_h" if harmonized else "ahba_raw"].copy()
+    df["subject"] = df["subject"].astype(str)
+    df["parcel_idx"] = df["parcel_idx"].astype(int)
+    target_meta = prepost["target_meta"]
+    genes = list(prepost["genes"])
+    n_parc = int(len(target_meta))
+    n_genes = len(genes)
+
+    grouped = df.groupby(["subject", "parcel_idx"], as_index=False)[genes].mean()
+    subjects = sorted(grouped["subject"].unique().tolist())
+    sid_to_i = {s: i for i, s in enumerate(subjects)}
+    n_subj = len(subjects)
+
+    cube = np.full((n_subj, n_parc, n_genes), np.nan, dtype=np.float32)
+    obs_mask = np.zeros((n_subj, n_parc), dtype=bool)
+    i_idx = grouped["subject"].map(sid_to_i).to_numpy(dtype=np.intp)
+    j_idx = grouped["parcel_idx"].to_numpy(dtype=np.intp)
+    cube[i_idx, j_idx, :] = grouped[genes].to_numpy(dtype=np.float32, copy=False)
+    obs_mask[i_idx, j_idx] = True
+    return cube, obs_mask, subjects
+
+
+def stack_subject_cubes(
+    cache_dir: str | Path,
+    *,
+    field: str,
+    subjects: Sequence[str] | None = None,
+    extra_mask_field: str | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str], list[str], np.ndarray | None]:
+    """Stack per-subject .npz cube fields along axis 0.
+
+    Reads every `*.npz` under `cache_dir`, extracts `field` (e.g.
+    `loro_truth_subject_h`, `loro_fused_subject_h`, `fullfit_subject_h`),
+    and stacks into `(n_subj, n_parc, n_gene)`. Subject IDs come from
+    `npz['subject_id'][0]`; `obs_mask` is derived from `np.isfinite` (LORO
+    truth is NaN outside held-out parcels; fullfit/fused are dense).
+
+    Region labels are returned as stringified parcel indices — callers map
+    them to AHBA parcel names via `target_meta`. Gene names come from the
+    first .npz and are validated to match the rest.
+    """
+    cache_dir = Path(cache_dir)
+    paths = sorted(cache_dir.glob("*.npz"))
+    if not paths:
+        raise FileNotFoundError(f"No .npz files in {cache_dir}")
+    subjects_set = set(str(s) for s in subjects) if subjects is not None else None
+
+    cubes: list[np.ndarray] = []
+    extras: list[np.ndarray] = [] if extra_mask_field else []
+    sids: list[str] = []
+    genes_ref: list[str] | None = None
+    n_parc_ref: int | None = None
+
+    for p in paths:
+        with np.load(p, allow_pickle=True) as z:
+            sid = str(z["subject_id"][0])
+            if subjects_set is not None and sid not in subjects_set:
+                continue
+            if field not in z.files:
+                raise KeyError(f"Field {field!r} not found in {p} (have: {sorted(z.files)})")
+            block = np.asarray(z[field], dtype=np.float32)
+            genes = [str(g) for g in z["gene_names"]]
+            if genes_ref is None:
+                genes_ref = genes
+                n_parc_ref = int(block.shape[0])
+            else:
+                if int(block.shape[0]) != n_parc_ref:
+                    raise ValueError(
+                        f"parcel-axis length mismatch in {p}: {block.shape[0]} vs {n_parc_ref}"
+                    )
+                if genes != genes_ref:
+                    raise ValueError(f"gene_names mismatch in {p}")
+            cubes.append(block)
+            sids.append(sid)
+            if extra_mask_field is not None:
+                if extra_mask_field not in z.files:
+                    raise KeyError(
+                        f"extra_mask_field {extra_mask_field!r} not found in {p}"
+                    )
+                extras.append(np.asarray(z[extra_mask_field], dtype=bool))
+
+    if not cubes:
+        raise ValueError(
+            f"No matching subjects found in {cache_dir} "
+            f"(filter={'<all>' if subjects_set is None else sorted(subjects_set)[:5]}...)"
+        )
+
+    cube = np.stack(cubes, axis=0).astype(np.float32, copy=False)
+    obs_mask = np.isfinite(cube).any(axis=2)
+    regions = [str(i) for i in range(int(n_parc_ref))]
+    extra = np.stack(extras, axis=0) if extra_mask_field is not None else None
+    return cube, obs_mask, sids, regions, genes_ref or [], extra
+
+
+def build_tensor_view_from_cube(
+    cube: np.ndarray,
+    *,
+    dataset: str,
+    stage: str,
+    subjects: Sequence[str],
+    regions: Sequence[str],
+    genes: Sequence[str],
+    observed_mask: np.ndarray | None = None,
+    gene_panel: str | Path | Sequence[str] | None = None,
+    n_subjects: int | None = None,
+    n_regions: int | None = None,
+    n_genes: int | None = None,
+    random_seed: int = 42,
+    region_axis_kind: str = "target_parcel",
+    matching: dict | None = None,
+) -> TensorView:
+    """Single chokepoint adapter — every cube-based source flows through here."""
+    _validate_pipeline_stage(stage)
+    subjects = [str(s) for s in subjects]
+    regions = [str(r) for r in regions]
+    genes = [str(g) for g in genes]
+    cube = np.asarray(cube, dtype=np.float32)
+    if observed_mask is None:
+        observed_mask = np.isfinite(cube).any(axis=2)
+    observed_mask = np.asarray(observed_mask, dtype=bool)
+
+    if gene_panel is not None:
+        panel_genes = (
+            load_gene_panel(gene_panel)
+            if isinstance(gene_panel, (str, Path))
+            else [str(g) for g in gene_panel]
+        )
+        avail = {g.upper(): g for g in genes}
+        keep = [avail[g.upper()] for g in panel_genes if g.upper() in avail]
+        keep = list(dict.fromkeys(keep))
+        if not keep:
+            raise ValueError(f"No panel genes found in cube gene axis for panel={gene_panel!r}")
+        keep_idx = np.array([genes.index(g) for g in keep], dtype=np.intp)
+        cube = cube[:, :, keep_idx]
+        genes = keep
+
+    rng = np.random.default_rng(random_seed)
+
+    def _pick(axis_len: int, n: int | None) -> np.ndarray:
+        if n is None or int(n) >= axis_len:
+            return np.arange(axis_len, dtype=np.intp)
+        return np.sort(rng.choice(axis_len, size=int(n), replace=False))
+
+    subj_idx = _pick(len(subjects), n_subjects)
+    reg_idx = (
+        np.arange(len(regions), dtype=np.intp)
+        if n_regions is None
+        else np.arange(min(int(n_regions), len(regions)), dtype=np.intp)
+    )
+    gene_idx = _pick(len(genes), n_genes)
+
+    values = cube[np.ix_(subj_idx, reg_idx, gene_idx)]
+    obs = observed_mask[np.ix_(subj_idx, reg_idx)]
+
+    return TensorView(
+        values=values,
+        observed_mask=obs,
+        subjects=[subjects[i] for i in subj_idx.tolist()],
+        regions=[regions[i] for i in reg_idx.tolist()],
+        genes=[genes[i] for i in gene_idx.tolist()],
+        dataset=str(dataset),
+        region_axis_kind=region_axis_kind,
+        future_imputation_mask=np.zeros((len(subj_idx), len(reg_idx)), dtype=bool),
+        matching=matching,
+        pipeline_stage=stage,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Source facades — three, one per origin
+# ---------------------------------------------------------------------------
+
+
+REGION_ORDERINGS_TIER_B = ("target_parcel", "region_matched", "region_matched_superset")
+
+
+def _apply_region_ordering(
+    cube: np.ndarray,
+    obs: np.ndarray,
+    regions: list[str],
+    *,
+    region_ordering: str,
+    matching: dict,
+) -> tuple[np.ndarray, np.ndarray, list[str], str, list[str]]:
+    """Permute a target-parcel cube onto a matched / matched-superset axis.
+
+    Returns (cube_permuted, obs_permuted, new_regions, region_axis_kind, matched_in_view).
+    For 'target_parcel' the inputs pass through unchanged with empty matched list.
+    """
+    if region_ordering not in REGION_ORDERINGS_TIER_B:
+        raise ValueError(
+            f"region_ordering must be one of {REGION_ORDERINGS_TIER_B}, got {region_ordering!r}"
+        )
+    if region_ordering == "target_parcel":
+        return cube, obs, regions, "target_parcel", []
+    matched_ahba = list(matching["gtex_to_ahba"].values())
+    cur_pos = {r: i for i, r in enumerate(regions)}
+    matched_in_view = [r for r in matched_ahba if r in cur_pos]
+    matched_set = set(matched_in_view)
+    if region_ordering == "region_matched":
+        new_order = _display_region_axis(matched_in_view, [])
+    else:
+        rest = [r for r in regions if r not in matched_set]
+        new_order = _display_region_axis(matched_in_view, rest)
+    perm = np.array([cur_pos[r] for r in new_order], dtype=np.intp)
+    return cube[:, perm, :], obs[:, perm], new_order, "ahba_parcel", matched_in_view
+
+
+def build_combat_tensor_view(
+    prepost: dict,
+    *,
+    dataset: str,
+    stage: str,
+    cfg,
+    matching_context: MatchingContext | None = None,
+    region_ordering: str = "target_parcel",
+    gene_panel: str | Path | Sequence[str] | None = None,
+    n_subjects: int | None = None,
+    n_regions: int | None = None,
+    n_genes: int | None = None,
+    random_seed: int = 42,
+) -> TensorView:
+    """Build a Tier-B view from PREPOST. `stage` ∈ {'raw_matched','harmonized'}.
+
+    `region_ordering` selects the region axis:
+
+    - 'target_parcel' (default): parcels in `target_meta.parcel_idx` order.
+      region_axis_kind='target_parcel'.
+    - 'region_matched': only the 11 matched AHBA parcels (GTEx-rank ordered).
+      region_axis_kind='ahba_parcel'. No future_imputation cells.
+    - 'region_matched_superset': matched 11 AHBA parcels first, then remaining
+      parcels. region_axis_kind='ahba_parcel'. For GTEx views, unmatched
+      columns are flagged future_imputation_mask=True (mirrors the Phase 3
+      raw superset view).
+    """
+    if stage not in ("raw_matched", "harmonized"):
+        raise ValueError(
+            f"build_combat_tensor_view stage must be 'raw_matched' or 'harmonized', got {stage!r}"
+        )
+    ctx = matching_context or MatchingContext.from_cfg(cfg, prepost)
+    ds = _canonical_dataset_label(dataset)
+
+    if ds == "GTEx":
+        cube = prepost["raw_cube" if stage == "raw_matched" else "harm_cube"]
+        obs = prepost["obs_mask"]
+        subjects = list(prepost["subjects"])
+    else:
+        cube, obs, subjects = build_ahba_cube_from_prepost(
+            prepost, harmonized=(stage == "harmonized")
+        )
+
+    cube, obs, regions, region_axis_kind, matched_in_view = _apply_region_ordering(
+        cube, obs, list(ctx.regions_full),
+        region_ordering=region_ordering, matching=ctx.matching,
+    )
+
+    view = build_tensor_view_from_cube(
+        cube,
+        dataset=ds,
+        stage=stage,
+        subjects=subjects,
+        regions=regions,
+        genes=ctx.genes_full,
+        observed_mask=obs,
+        gene_panel=gene_panel,
+        n_subjects=n_subjects,
+        n_regions=n_regions,
+        n_genes=n_genes,
+        random_seed=random_seed,
+        region_axis_kind=region_axis_kind,
+        matching=ctx.matching,
+    )
+
+    if region_ordering == "region_matched_superset" and ds == "GTEx":
+        matched_set = set(matched_in_view)
+        for j, region in enumerate(view.regions):
+            if region not in matched_set:
+                view.future_imputation_mask[:, j] = True
+
+    return view
+
+
+def build_prediction_tensor_view(
+    cache_root: str | Path,
+    model_name: str,
+    *,
+    dataset: str,
+    stage: str,
+    cfg,
+    prepost: dict | None = None,
+    matching_context: MatchingContext | None = None,
+    region_ordering: str = "target_parcel",
+    subjects: Sequence[str] | None = None,
+    gene_panel: str | Path | Sequence[str] | None = None,
+    n_subjects: int | None = None,
+    n_regions: int | None = None,
+    n_genes: int | None = None,
+    random_seed: int = 42,
+) -> TensorView:
+    """Phase 5: build a target-parcel-frame view from per-subject npz caches.
+
+    Canonical prediction stages ∈ {'loro_truth','loro_recon','loro_fused','fullfit'}:
+
+    - 'loro_truth': held-out harmonized truth at LORO-evaluated parcels only;
+       elsewhere NaN (sparse). obs_mask reflects LORO eval coverage.
+    - 'loro_recon': LORO out-of-fold predictions at the SAME held-out parcels
+       only (sparse), directly comparable to loro_truth. Built from
+       loro_fused_subject_h masked to loro_eval_mask; non-eval cells blanked.
+    - 'loro_fused': dense reconstruction — LORO predictions at held-out parcels
+       plus full-fit extrapolation elsewhere. Non-LORO cells are flagged
+       future_imputation so renderers can distinguish anchored vs extrapolated
+       (visible only once future-imputation alpha < 1).
+    - 'fullfit': dense full-fit predictions everywhere (fit on all observed GTEx
+       data; reproduces truth at observed parcels, extrapolates elsewhere).
+
+    `region_ordering` ∈ {'target_parcel','region_matched','region_matched_superset'};
+    for 'region_matched_superset' the unmatched columns are also flagged
+    future_imputation (composing with the loro_fused eval-mask flag).
+    """
+    valid_stages = ("loro_truth", "loro_recon", "loro_fused", "fullfit")
+    if stage not in valid_stages:
+        raise ValueError(
+            f"build_prediction_tensor_view stage must be in {valid_stages}, got {stage!r}"
+        )
+    _field_for_stage = {
+        "loro_truth": "loro_truth_subject_h",
+        "loro_recon": "loro_fused_subject_h",
+        "loro_fused": "loro_fused_subject_h",
+        "fullfit": "fullfit_subject_h",
+    }
+    ctx = matching_context
+    if ctx is None:
+        if prepost is None:
+            raise ValueError(
+                "build_prediction_tensor_view requires either matching_context or prepost "
+                "to stamp the matching dict + target_meta."
+            )
+        ctx = MatchingContext.from_cfg(cfg, prepost)
+
+    cube_dir = Path(cache_root) / str(cfg.gene_scope).lower() / model_name
+    # loro_recon needs the eval mask to sparsify; loro_fused needs it to flag.
+    extra_field = "loro_eval_mask" if stage in ("loro_recon", "loro_fused") else None
+    cube, obs, npz_subjects, _region_indices, npz_genes, eval_mask = stack_subject_cubes(
+        cube_dir, field=_field_for_stage[stage], subjects=subjects,
+        extra_mask_field=extra_field,
+    )
+
+    # Validate gene + parcel-axis agreement with PREPOST context.
+    if list(npz_genes) != list(ctx.genes_full):
+        raise ValueError(
+            "npz gene_names do not match MatchingContext.genes_full. "
+            "Cache was built under a different cfg.gene_scope than the active PREPOST."
+        )
+    if int(cube.shape[1]) != len(ctx.regions_full):
+        raise ValueError(
+            f"npz parcel-axis length {cube.shape[1]} does not match "
+            f"target_meta ({len(ctx.regions_full)} parcels)."
+        )
+
+    # loro_recon: keep only the held-out (LORO-evaluated) predictions; blank the
+    # rest so the view is sparse and directly comparable to loro_truth. Done in
+    # target order, before region permutation.
+    if stage == "loro_recon":
+        cube = np.where(eval_mask[:, :, None], cube, np.nan).astype(np.float32)
+        obs = eval_mask.copy()
+
+    cube, obs, regions, region_axis_kind, matched_in_view = _apply_region_ordering(
+        cube, obs, list(ctx.regions_full),
+        region_ordering=region_ordering, matching=ctx.matching,
+    )
+
+    view = build_tensor_view_from_cube(
+        cube,
+        dataset=_canonical_dataset_label(dataset),
+        stage=stage,
+        subjects=npz_subjects,
+        regions=regions,
+        genes=ctx.genes_full,
+        observed_mask=obs,
+        gene_panel=gene_panel,
+        n_subjects=n_subjects,
+        n_regions=n_regions,
+        n_genes=n_genes,
+        random_seed=random_seed,
+        region_axis_kind=region_axis_kind,
+        matching=ctx.matching,
+    )
+
+    # loro_fused: flag extrapolated cells (non-LORO-eval) as future_imputation.
+    # Look up sampled subject + region indices against the originals
+    # (npz_subjects, ctx.regions_full) since eval_mask is in target_meta order.
+    if stage == "loro_fused":
+        sid_to_orig = {s: i for i, s in enumerate(npz_subjects)}
+        subj_lookup = np.array([sid_to_orig[s] for s in view.subjects], dtype=np.intp)
+        region_to_orig = {r: i for i, r in enumerate(ctx.regions_full)}
+        reg_lookup = np.array([region_to_orig[r] for r in view.regions], dtype=np.intp)
+        sampled_eval = eval_mask[np.ix_(subj_lookup, reg_lookup)]
+        view.future_imputation_mask = (~sampled_eval).astype(bool)
+
+    if region_ordering == "region_matched_superset":
+        matched_set = set(matched_in_view)
+        for j, region in enumerate(view.regions):
+            if region not in matched_set:
+                view.future_imputation_mask[:, j] = True
+
+    return view
+
+
+# ---------------------------------------------------------------------------
+# Cross-stage helper (one)
+# ---------------------------------------------------------------------------
+
+
+def expand_to_ahba_superset(
+    view: TensorView, *, full_ahba_axis: Sequence[str]
+) -> TensorView:
+    """Pad parcel axis from matched 11 to the full AHBA superset.
+
+    Inserts NaN-valued cells for the unmatched AHBA parcels and sets
+    `future_imputation_mask=True` on those columns. Used when a single figure
+    must compare matched-frame views (e.g. predictions) against the AHBA-superset
+    axis from Tier A native parcel space.
+    """
+    full = [str(r) for r in full_ahba_axis]
+    cur = list(view.regions)
+    cur_set = set(cur)
+    cur_pos = {r: i for i, r in enumerate(cur)}
+    n_subj = view.values.shape[0]
+    n_gene = view.values.shape[2]
+
+    values = np.full((n_subj, len(full), n_gene), np.nan, dtype=np.float32)
+    obs = np.zeros((n_subj, len(full)), dtype=bool)
+    future = np.zeros((n_subj, len(full)), dtype=bool)
+    for j, region in enumerate(full):
+        if region in cur_set:
+            values[:, j, :] = view.values[:, cur_pos[region], :]
+            obs[:, j] = view.observed_mask[:, cur_pos[region]]
+            if view.future_imputation_mask is not None:
+                future[:, j] = view.future_imputation_mask[:, cur_pos[region]]
+        else:
+            future[:, j] = True
+
+    return TensorView(
+        values=values,
+        observed_mask=obs,
+        subjects=list(view.subjects),
+        regions=full,
+        genes=list(view.genes),
+        dataset=view.dataset,
+        region_axis_kind="ahba_parcel",
+        future_imputation_mask=future,
+        matching=view.matching,
+        pipeline_stage=view.pipeline_stage,
     )
 
 
@@ -368,11 +1025,12 @@ def build_dataset_region_tensor(
     region_to_j = {r: j for j, r in enumerate(regions)}
 
     subset = subset[subset["subject"].isin(subjects) & subset["tissue_or_parcel"].isin(regions)]
-    for _, row in subset.iterrows():
-        i = subject_to_i[row["subject"]]
-        j = region_to_j[row["tissue_or_parcel"]]
-        values[i, j, :] = row[genes].to_numpy(dtype=np.float64)
-        observed_mask[i, j] = True
+    if not subset.empty:
+        i_idx = subset["subject"].map(subject_to_i).to_numpy(dtype=np.intp)
+        j_idx = subset["tissue_or_parcel"].map(region_to_j).to_numpy(dtype=np.intp)
+        gene_block = subset[genes].to_numpy(dtype=np.float64, copy=False)
+        values[i_idx, j_idx, :] = gene_block
+        observed_mask[i_idx, j_idx] = True
 
     future_imputation_mask = np.zeros((len(subjects), len(regions)), dtype=bool)
     if future_imputation_regions:
@@ -412,6 +1070,33 @@ def _default_region_order(df: pd.DataFrame, dataset: str) -> list[str]:
         return list(GTEX_TENSOR_REGION_ORDER)
     subset = df.loc[df["dataset"].astype(str).str.upper().eq(dataset_label.upper())]
     return sorted(subset["tissue_or_parcel"].astype(str).unique().tolist())
+
+
+# ---------------------------------------------------------------------------
+# Display-order reversal (global). Matching/dedup is resolved on the canonical
+# order upstream; these helpers only set the y-axis DISPLAY order and are
+# called by both the native (CSV) and cube (PREPOST / npz) region-resolution
+# paths so every tensor shares the same axis convention.
+# ---------------------------------------------------------------------------
+
+
+def _hemisphere_display_order(parcels: Sequence[str]) -> list[str]:
+    """LH parcels first (reverse-sorted), then RH (reverse-sorted), then
+    non-hemisphere parcels (e.g. cerebellar, no LH/RH prefix) sorted at the end.
+    Keeps left-hemisphere parcels visible first while pushing the
+    no-hemisphere (cerebellar) parcels off the front of the axis."""
+    parcels = [str(p) for p in parcels]
+    lh = sorted([p for p in parcels if p.upper().startswith("LH")], reverse=True)
+    rh = sorted([p for p in parcels if p.upper().startswith("RH")], reverse=True)
+    other = sorted([p for p in parcels if not p.upper().startswith(("LH", "RH"))])
+    return lh + rh + other
+
+
+def _display_region_axis(matched: Sequence[str], remaining: Sequence[str]) -> list[str]:
+    """Compose the display region axis from a matched block + an AHBA-remaining
+    block. The matched block is reversed (so the cerebellum-matched parcel leads
+    instead of frontal cortex); the remaining block is hemisphere-ordered."""
+    return list(reversed([str(m) for m in matched])) + _hemisphere_display_order(remaining)
 
 
 def _with_representative_coordinates(
@@ -500,7 +1185,7 @@ def _resolve_region_ordered_dataset(
     gtex_rep_mode: str = "centroid",
     gtex_hemi_mode: str = "mirror_left",
     repo_root: str | Path | None = None,
-) -> tuple[pd.DataFrame, list[str], list[str]]:
+) -> tuple[pd.DataFrame, list[str], list[str], dict | None]:
     dataset_label = _canonical_dataset_label(dataset)
     ordering = str(region_ordering).strip().lower()
     if ordering not in REGION_ORDERINGS:
@@ -508,8 +1193,13 @@ def _resolve_region_ordered_dataset(
 
     if ordering == REGION_ORDERING_DATASET:
         dataset_df = df.loc[df["dataset"].astype(str).str.upper().eq(dataset_label.upper())].copy()
-        all_regions = [str(r) for r in region_order] if region_order is not None else _default_region_order(df, dataset_label)
-        return dataset_df, all_regions, []
+        if region_order is not None:
+            all_regions = [str(r) for r in region_order]
+        elif dataset_label == "GTEx":
+            all_regions = list(reversed(_default_region_order(df, dataset_label)))
+        else:
+            all_regions = _hemisphere_display_order(_default_region_order(df, dataset_label))
+        return dataset_df, all_regions, [], None
 
     pairs, gtex_mapped, ahba_raw = _matched_region_pairs(
         df,
@@ -520,33 +1210,44 @@ def _resolve_region_ordered_dataset(
         gtex_hemi_mode=gtex_hemi_mode,
         repo_root=repo_root,
     )
+    matching_meta = _build_matching_metadata(
+        region_ordering=ordering,
+        matching_policy=matching_policy,
+        matching_policy_hemi_mode=matching_policy_hemi_mode,
+        collapse_cerebellum=bool(collapse_cerebellum),
+        gtex_rep_mode=gtex_rep_mode,
+        gtex_hemi_mode=gtex_hemi_mode,
+        pairs_df=pairs,
+    )
     matched_gtex_regions = pairs["gtex_region"].astype(str).tolist()
     matched_ahba_regions = pairs["ahba_region"].astype(str).tolist()
 
     if dataset_label == "GTEx":
         if ordering == REGION_ORDERING_MATCHED:
-            return gtex_mapped, matched_gtex_regions, []
+            return gtex_mapped, _display_region_axis(matched_gtex_regions, []), [], matching_meta
         all_ahba_regions = _default_region_order(ahba_raw, "AHBA")
         matched_set = set(matched_ahba_regions)
-        superset_regions = matched_ahba_regions + [r for r in all_ahba_regions if r not in matched_set]
-        future_imputation_regions = [r for r in all_ahba_regions if r not in matched_set]
+        remaining = [r for r in all_ahba_regions if r not in matched_set]
+        superset_regions = _display_region_axis(matched_ahba_regions, remaining)
+        future_imputation_regions = remaining
         kept_gtex_regions = set(matched_gtex_regions)
         gtex_on_ahba_axis = gtex_mapped.loc[
             gtex_mapped["tissue_or_parcel"].astype(str).isin(kept_gtex_regions)
         ].copy()
         gtex_on_ahba_axis["tissue_or_parcel"] = gtex_on_ahba_axis["mapped_parcel"].astype(str)
-        return gtex_on_ahba_axis, superset_regions, future_imputation_regions
+        return gtex_on_ahba_axis, superset_regions, future_imputation_regions, matching_meta
 
     if ordering == REGION_ORDERING_MATCHED:
-        return ahba_raw, matched_ahba_regions, []
+        return ahba_raw, _display_region_axis(matched_ahba_regions, []), [], matching_meta
 
     all_ahba_regions = _default_region_order(ahba_raw, "AHBA")
     matched_set = set(matched_ahba_regions)
-    superset_regions = matched_ahba_regions + [r for r in all_ahba_regions if r not in matched_set]
-    return ahba_raw, superset_regions, []
+    remaining = [r for r in all_ahba_regions if r not in matched_set]
+    superset_regions = _display_region_axis(matched_ahba_regions, remaining)
+    return ahba_raw, superset_regions, [], matching_meta
 
 
-def build_sampled_tensor(
+def build_native_tensor_view(
     samples: pd.DataFrame | str | Path,
     *,
     dataset: str,
@@ -567,7 +1268,7 @@ def build_sampled_tensor(
 ) -> TensorView:
     df = load_gxp_samples_table(samples) if isinstance(samples, (str, Path)) else samples.copy()
     dataset_label = _canonical_dataset_label(dataset)
-    dataset_df, all_regions, future_imputation_regions = _resolve_region_ordered_dataset(
+    dataset_df, all_regions, future_imputation_regions, matching_meta = _resolve_region_ordered_dataset(
         df,
         dataset=dataset_label,
         region_ordering=region_ordering,
@@ -604,7 +1305,7 @@ def build_sampled_tensor(
         and str(region_ordering).strip().lower() == REGION_ORDERING_MATCHED_SUPERSET
         else _default_region_axis_kind(dataset_label)
     )
-    return build_dataset_region_tensor(
+    view = build_dataset_region_tensor(
         dataset_df,
         dataset=dataset_label,
         subjects=selected_subjects,
@@ -613,6 +1314,12 @@ def build_sampled_tensor(
         region_axis_kind=region_axis_kind,
         future_imputation_regions=future_imputation_regions,
     )
+    view.matching = matching_meta
+    view.pipeline_stage = (
+        "native_tissue" if dataset_label == "GTEx" and region_axis_kind == "gtex_tissue"
+        else "native_parcel"
+    )
+    return view
 
 
 def summarize_tensor_selection(tensor_view: TensorView) -> pd.DataFrame:
@@ -685,23 +1392,33 @@ def _resolve_axis_assignment(axis_assignment: Sequence[str] | None) -> tuple[str
 def _axis_payload(
     tensor_view: TensorView,
     axis_assignment: Sequence[str] | None,
-) -> tuple[np.ndarray, np.ndarray, dict[str, list[str]], tuple[str, str, str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, list[str]], tuple[str, str, str]]:
     axis_assignment = _resolve_axis_assignment(axis_assignment)
     base_values = np.transpose(tensor_view.values, (2, 0, 1))
     base_observed = np.transpose(
         np.repeat(tensor_view.observed_mask[:, :, None], len(tensor_view.genes), axis=2),
         (2, 0, 1),
     )
+    fi_src = (
+        tensor_view.future_imputation_mask
+        if tensor_view.future_imputation_mask is not None
+        else np.zeros_like(tensor_view.observed_mask, dtype=bool)
+    )
+    base_future = np.transpose(
+        np.repeat(fi_src[:, :, None], len(tensor_view.genes), axis=2),
+        (2, 0, 1),
+    )
     semantic_to_base_axis = {"gene": 0, "subject": 1, "region": 2}
     perm = tuple(semantic_to_base_axis[name] for name in axis_assignment)
     values = np.transpose(base_values, perm)
     observed = np.transpose(base_observed, perm)
+    future = np.transpose(base_future, perm)
     labels = {
         "gene": list(tensor_view.genes),
         "subject": list(tensor_view.subjects),
         "region": list(tensor_view.regions),
     }
-    return values, observed, labels, axis_assignment
+    return values, observed, future, labels, axis_assignment
 
 
 def _resolve_tick_step(requested: int | str | None) -> int:
@@ -839,8 +1556,11 @@ def plot_gtex_tensor_voxels(
     *,
     cmap: str = "viridis",
     missing_rgba: tuple[float, float, float, float] = (0.78, 0.78, 0.78, 1.0),
+    future_imputation_rgba: tuple[float, float, float, float] = (0.78, 0.78, 0.78, 0.45),
     edgecolor: str = "white",
     linewidth: float = 0.18,
+    future_edgecolor: str | None = None,
+    future_linewidth: float | None = None,
     figsize: tuple[float, float] | str = (13.5, 9.5),
     dpi: int | float | None = None,
     axes_bbox: Sequence[float] | str = (0.03, 0.06, 0.78, 0.88),
@@ -869,9 +1589,12 @@ def plot_gtex_tensor_voxels(
     show_tick_lines: bool = True,
     show_grid: bool = False,
     show_legend: bool = False,
+    mask_render_mode: str = "two_pass",
     font_sizes: Mapping[str, int | float | str] | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
-    values, observed, labels_by_semantic, axis_assignment = _axis_payload(tensor_view, axis_assignment)
+    values, observed, future, labels_by_semantic, axis_assignment = _axis_payload(
+        tensor_view, axis_assignment
+    )
     filled = np.ones(values.shape, dtype=bool)
     fonts = _resolve_fonts(_VOXEL_TENSOR_FONTS, font_sizes)
     label_pads = _VOXEL_TENSOR_AXIS_LABEL_PADS
@@ -900,24 +1623,58 @@ def plot_gtex_tensor_voxels(
     norm = Normalize(vmin=vmin, vmax=vmax)
     scalar_map = plt.cm.ScalarMappable(norm=norm, cmap=plt.get_cmap(cmap))
     facecolors = np.empty(values.shape + (4,), dtype=np.float32)
+    fi_alpha = float(future_imputation_rgba[3])
 
     for i in range(values.shape[0]):
         for j in range(values.shape[1]):
             for k in range(values.shape[2]):
-                if not observed[i, j, k] or not np.isfinite(values[i, j, k]):
+                val = float(values[i, j, k]) if np.isfinite(values[i, j, k]) else None
+                if future[i, j, k]:
+                    if val is None:
+                        facecolors[i, j, k] = future_imputation_rgba
+                    else:
+                        c = scalar_map.to_rgba(val)
+                        facecolors[i, j, k] = (c[0], c[1], c[2], fi_alpha)
+                elif not observed[i, j, k] or val is None:
                     facecolors[i, j, k] = missing_rgba
                 else:
-                    facecolors[i, j, k] = scalar_map.to_rgba(float(values[i, j, k]))
+                    facecolors[i, j, k] = scalar_map.to_rgba(val)
 
     fig = plt.figure(figsize=figsize, dpi=dpi)
     ax = fig.add_axes(axes_bbox, projection="3d")
-    ax.voxels(
-        filled,
-        facecolors=facecolors,
-        edgecolors=edgecolor,
-        linewidth=linewidth,
-        shade=False,
-    )
+
+    mode = str(mask_render_mode).strip().lower()
+    if mode not in ("single_pass", "two_pass"):
+        raise ValueError(
+            f"mask_render_mode must be 'single_pass' or 'two_pass', got {mask_render_mode!r}"
+        )
+    if mode == "single_pass" or not bool(future.any()):
+        ax.voxels(
+            filled,
+            facecolors=facecolors,
+            edgecolors=edgecolor,
+            linewidth=linewidth,
+            shade=False,
+        )
+    else:
+        filled_opaque = filled & ~future
+        filled_future = filled & future
+        ax.voxels(
+            filled_opaque,
+            facecolors=facecolors,
+            edgecolors=edgecolor,
+            linewidth=linewidth,
+            shade=False,
+            zorder=1,
+        )
+        ax.voxels(
+            filled_future,
+            facecolors=facecolors,
+            edgecolors=(edgecolor if future_edgecolor is None else future_edgecolor),
+            linewidth=(linewidth if future_linewidth is None else future_linewidth),
+            shade=False,
+            zorder=2,
+        )
     resolved_box_aspect = _resolve_box_aspect(values, box_aspect, axis_assignment)
     try:
         ax.set_box_aspect(resolved_box_aspect, zoom=float(box_zoom))
@@ -1059,6 +1816,17 @@ def plot_gtex_tensor_voxels(
     return fig, ax
 
 
+def _shared_minmax_scale(
+    values: np.ndarray, *, lower: float = 2.0, upper: float = 98.0
+) -> tuple[np.ndarray, tuple[float, float]]:
+    vmin, vmax = _robust_vrange(values, lower=lower, upper=upper)
+    denom = max(vmax - vmin, 1e-12)
+    scaled = np.full_like(values, np.nan, dtype=np.float64)
+    finite = np.isfinite(values)
+    scaled[finite] = np.clip((values[finite] - vmin) / denom, 0.0, 1.0)
+    return scaled, (float(vmin), float(vmax))
+
+
 def _per_dataset_minmax_scale(
     values: np.ndarray,
     dataset_slices: Mapping[str, slice],
@@ -1137,6 +1905,8 @@ def plot_joint_tensor_voxels(
     future_imputation_rgba: tuple[float, float, float, float] = (0.78, 0.78, 0.78, 0.45),
     edgecolor: str = "white",
     linewidth: float = 0.18,
+    future_edgecolor: str | None = None,
+    future_linewidth: float | None = None,
     figsize: tuple[float, float] | str = "auto",
     dpi: int | float | None = None,
     axes_bbox: Sequence[float] | str = "auto",
@@ -1167,10 +1937,24 @@ def plot_joint_tensor_voxels(
     show_legend: bool = False,
     dataset_gap: int = 1,
     mask_render_mode: str = "two_pass",
-    cbar_label: str = "Normalized expression (per-dataset min-max)",
+    normalization: str = "per_dataset_minmax",
+    cbar_label: str | None = None,
     font_sizes: Mapping[str, int | float | str] | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
-    scaled_values, ranges = _per_dataset_minmax_scale(joint_view.values, joint_view.dataset_slices)
+    norm_mode = str(normalization).strip().lower()
+    if norm_mode not in ("per_dataset_minmax", "shared"):
+        raise ValueError(
+            f"normalization must be 'per_dataset_minmax' or 'shared', got {normalization!r}"
+        )
+    if norm_mode == "per_dataset_minmax":
+        scaled_values, ranges = _per_dataset_minmax_scale(
+            joint_view.values, joint_view.dataset_slices
+        )
+        resolved_cbar_label = cbar_label or "Normalized expression (per-dataset min-max)"
+    else:
+        scaled_values, shared_range = _shared_minmax_scale(joint_view.values)
+        ranges = {name: shared_range for name in joint_view.dataset_slices}
+        resolved_cbar_label = cbar_label or "Harmonized expression (shared min-max)"
 
     joint_for_payload = JointTensorView(
         values=scaled_values,
@@ -1219,15 +2003,25 @@ def plot_joint_tensor_voxels(
 
     facecolors = np.empty(values.shape + (4,), dtype=np.float32)
     filled = np.ones(values.shape, dtype=bool)
+    fi_alpha = float(future_imputation_rgba[3])
     for i in range(values.shape[0]):
         for j in range(values.shape[1]):
             for k in range(values.shape[2]):
+                val = float(values[i, j, k]) if np.isfinite(values[i, j, k]) else None
                 if future[i, j, k]:
-                    facecolors[i, j, k] = future_imputation_rgba
-                elif not observed[i, j, k] or not np.isfinite(values[i, j, k]):
+                    if val is None:
+                        # Padded with no data (Phase 3 raw superset). Solid gray.
+                        facecolors[i, j, k] = future_imputation_rgba
+                    else:
+                        # Extrapolation / non-anchored prediction (Phase 5 hybrid).
+                        # Render cmap value at reduced alpha so the prediction stays
+                        # visible while flagged as non-anchored.
+                        c = scalar_map.to_rgba(val)
+                        facecolors[i, j, k] = (c[0], c[1], c[2], fi_alpha)
+                elif not observed[i, j, k] or val is None:
                     facecolors[i, j, k] = missing_rgba
                 else:
-                    facecolors[i, j, k] = scalar_map.to_rgba(float(values[i, j, k]))
+                    facecolors[i, j, k] = scalar_map.to_rgba(val)
 
     if dataset_gap and dataset_gap > 0 and axis_assignment.count("subject") == 1:
         subject_axis = axis_assignment.index("subject")
@@ -1272,8 +2066,8 @@ def plot_joint_tensor_voxels(
             ax.voxels(
                 filled_future,
                 facecolors=facecolors,
-                edgecolors="none",
-                linewidth=0,
+                edgecolors=(edgecolor if future_edgecolor is None else future_edgecolor),
+                linewidth=(linewidth if future_linewidth is None else future_linewidth),
                 shade=False,
                 zorder=2,
             )
@@ -1411,7 +2205,7 @@ def plot_joint_tensor_voxels(
 
     cax = fig.add_axes(colorbar_bbox)
     cbar = fig.colorbar(scalar_map, cax=cax)
-    cbar.set_label(cbar_label, fontsize=fonts["cbar_label"])
+    cbar.set_label(resolved_cbar_label, fontsize=fonts["cbar_label"])
     cbar.ax.tick_params(labelsize=fonts["cbar_label"])
 
     if show_legend:
@@ -1488,7 +2282,7 @@ def plot_sampled_tensor(
     show_legend: bool = False,
     font_sizes: Mapping[str, int | float | str] | None = None,
 ) -> tuple[plt.Figure, plt.Axes, TensorView, pd.DataFrame]:
-    tensor_view = build_sampled_tensor(
+    tensor_view = build_native_tensor_view(
         samples,
         dataset=dataset,
         region_ordering=region_ordering,
@@ -1551,16 +2345,24 @@ __all__ = [
     "GTEX_TENSOR_REGION_GROUP",
     "GTEX_TENSOR_REGION_ORDER",
     "JointTensorView",
+    "MatchingContext",
+    "PIPELINE_STAGES",
     "REGION_ORDERING_DATASET",
     "REGION_ORDERING_MATCHED",
     "REGION_ORDERING_MATCHED_SUPERSET",
     "REGION_ORDERINGS",
     "TensorView",
+    "build_ahba_cube_from_prepost",
+    "build_combat_tensor_view",
     "build_dataset_region_tensor",
     "build_joint_tensor_view",
-    "build_sampled_tensor",
+    "build_native_tensor_view",
+    "build_prediction_tensor_view",
+    "build_tensor_view_from_cube",
+    "expand_to_ahba_superset",
     "load_gene_panel",
     "load_gxp_samples_table",
+    "matching_metadata_compatible",
     "plot_gtex_observation_mask",
     "plot_gtex_tensor_voxels",
     "plot_joint_tensor_voxels",
@@ -1570,6 +2372,7 @@ __all__ = [
     "sample_subjects",
     "sample_subjects_by_dataset_region_coverage",
     "sample_subjects_by_region_coverage",
+    "stack_subject_cubes",
     "summarize_joint_selection",
     "summarize_tensor_selection",
 ]

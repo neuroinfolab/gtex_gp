@@ -27,7 +27,19 @@ def _age_to_numeric(x: object) -> float:
         return np.nan
 
 
-def _build_covariates(df: pd.DataFrame, use_covariates: bool) -> np.ndarray:
+_MACRO_SYSTEM_REFERENCE = "cortical_association"
+_MACRO_SYSTEM_LEVELS = (
+    "cerebellar",
+    "subcortical",
+    "visual_somatomotor",
+)
+
+
+def _build_covariates(
+    df: pd.DataFrame,
+    use_covariates: bool,
+    drop_macro_system_covariate: bool = False,
+) -> np.ndarray:
     n = len(df)
     if not use_covariates:
         return np.zeros((n, 0), dtype=np.float64)
@@ -42,7 +54,17 @@ def _build_covariates(df: pd.DataFrame, use_covariates: bool) -> np.ndarray:
 
     sex_raw = df.get("sex", pd.Series([""] * n)).astype(str).str.upper().str.strip()
     sex_m = (sex_raw == "M").to_numpy(dtype=np.float64)
-    return np.c_[age, sex_m].astype(np.float64)
+    covariates = [age, sex_m]
+
+    if not drop_macro_system_covariate:
+        macro = df.get("macro_system", pd.Series([_MACRO_SYSTEM_REFERENCE] * n)).astype(str).str.lower().str.strip()
+        # Use cortical association as the reference level; one-hot encode the
+        # remaining broad systems to preserve spatial macro effects during
+        # dataset-batch correction without adding a saturated parcel design.
+        for level in _MACRO_SYSTEM_LEVELS:
+            covariates.append((macro == level).to_numpy(dtype=np.float64))
+
+    return np.column_stack(covariates).astype(np.float64)
 
 
 @dataclass
@@ -50,7 +72,7 @@ class CombatHarmonizer:
     """
     ComBat-style harmonizer with an additional GTEx->AHBA overlap affine.
     Forward fit / transform, gene by gene: Let x_{i,g} be expression for sample i and gene g, with batch b(i) in {AHBA, GTEx}.
-    Let c_i be the row covariates (currently age, sex).
+    Let c_i be the row covariates (currently age, sex, and optionally macro_system).
     
     1. Fit covariate effects on the pooled table:
         x_{i,g} ~= beta0_g + c_i^T beta_cov,g + residual_{i,g}
@@ -89,6 +111,7 @@ class CombatHarmonizer:
     """
     genes: List[str]
     use_covariates: bool
+    drop_macro_system_covariate: bool
     grand_mean: np.ndarray
     pooled_sd: np.ndarray
     gamma_hat: np.ndarray
@@ -106,6 +129,7 @@ class CombatHarmonizer:
         gtex_df: pd.DataFrame,
         gene_cols: List[str],
         use_covariates: bool = True,
+        drop_macro_system_covariate: bool = False,
     ) -> "CombatHarmonizer":
         a = ahba_df.copy()
         g = gtex_df.copy()
@@ -115,7 +139,11 @@ class CombatHarmonizer:
 
         X = comb[gene_cols].to_numpy(dtype=np.float64)
         batch = comb["_batch"].to_numpy(dtype=np.int32)
-        cov = _build_covariates(comb, use_covariates=use_covariates)
+        cov = _build_covariates(
+            comb,
+            use_covariates=use_covariates,
+            drop_macro_system_covariate=drop_macro_system_covariate,
+        )
 
         n, G = X.shape
         B = 2
@@ -196,6 +224,7 @@ class CombatHarmonizer:
         return cls(
             genes=list(gene_cols),
             use_covariates=bool(use_covariates),
+            drop_macro_system_covariate=bool(drop_macro_system_covariate),
             grand_mean=grand_mean,
             pooled_sd=pooled_sd,
             gamma_hat=gamma_hat,
@@ -208,7 +237,11 @@ class CombatHarmonizer:
         )
 
     def _cov_effect(self, df: pd.DataFrame) -> np.ndarray:
-        cov = _build_covariates(df, use_covariates=self.use_covariates)
+        cov = _build_covariates(
+            df,
+            use_covariates=self.use_covariates,
+            drop_macro_system_covariate=self.drop_macro_system_covariate,
+        )
         if cov.shape[1] == 0:
             return np.zeros((len(df), len(self.genes)), dtype=np.float64)
         return cov @ self.beta_cov

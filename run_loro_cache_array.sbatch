@@ -22,6 +22,7 @@ MODEL_NAME="${MODEL_NAME:-all}"
 GENE_SCOPE="${GENE_SCOPE:-hvg}"
 HVG_PATH="${HVG_PATH:-data/metadata/gene_lists/ahba_100hvg.txt}"
 USE_CACHE="${USE_CACHE:-true}"
+DROP_MACRO_SYSTEM_COVARIATE="${DROP_MACRO_SYSTEM_COVARIATE:-false}"
 OUT_ROOT="${OUT_ROOT:-out/loro_subject_cache_c}"  # convention: _c=centroids, _cv=centroids_and_volumes
 LATENT_DIM="${LATENT_DIM:-3}"
 DYNAMIC_RANK="${DYNAMIC_RANK:-false}"
@@ -40,7 +41,7 @@ COLLAPSE_CEREBELLUM="${COLLAPSE_CEREBELLUM:-false}"
 cd "${REPO_ROOT}"
 mkdir -p out/slurm
 
-echo "[array] repo=${REPO_ROOT} task=${SLURM_ARRAY_TASK_ID} model=${MODEL_NAME} scope=${GENE_SCOPE} matching_policy=${MATCHING_POLICY} matching_policy_hemi_mode=${MATCHING_POLICY_HEMI_MODE} collapse_cerebellum=${COLLAPSE_CEREBELLUM} out_root=${OUT_ROOT}"
+echo "[array] repo=${REPO_ROOT} task=${SLURM_ARRAY_TASK_ID} model=${MODEL_NAME} scope=${GENE_SCOPE} drop_macro_system_covariate=${DROP_MACRO_SYSTEM_COVARIATE} matching_policy=${MATCHING_POLICY} matching_policy_hemi_mode=${MATCHING_POLICY_HEMI_MODE} collapse_cerebellum=${COLLAPSE_CEREBELLUM} out_root=${OUT_ROOT}"
 
 SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py \
   --from-sbatch-array \
@@ -49,6 +50,7 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py 
   --hvg-path \"${HVG_PATH}\" \
   --out-root \"${OUT_ROOT}\" \
   --use-cache \"${USE_CACHE}\" \
+  --drop-macro-system-covariate \"${DROP_MACRO_SYSTEM_COVARIATE}\" \
   --latent-dim \"${LATENT_DIM}\" \
   --dynamic-rank \"${DYNAMIC_RANK}\" \
   --plam-latent-dim-max \"${PLAM_MAX_RANK}\" \

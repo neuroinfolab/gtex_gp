@@ -15,11 +15,13 @@ GTEx rows contain native GTEx tissue labels and atlas-derived coordinate lists. 
 Primary local resources:
 
 - `data/raw/gxp_samples.csv`: combined AHBA and GTEx expression table.
-- `data/raw/atlas_info/atlas-4S156Parcels_dseg_reformatted.csv`: 4S156 label table used for Schaefer, subcortical, thalamic, hippocampal/amygdala, and cerebellar target labels.
-- `data/raw/atlas_info/atlas-4S156Parcels_dseg.json`: atlas provenance and source-atlas metadata.
-- `data/raw/atlas_info/overlay_brodmann_2mm_MNI_reformatted.csv`: Brodmann label table used for cortical BA priors.
-- `data/raw/atlas_info/atlas-4S156Parcels_space-MNI152NLin6Asym_dseg.nii.gz`: 4S156 label volume.
-- `data/raw/atlas_info/overlay_brodmann_2mm_MNI.nii`: Brodmann label volume.
+- `data/metadata/atlas_info/atlas-4S156Parcels_dseg_reformatted.csv`: 4S156 label table used for Schaefer, subcortical, thalamic, hippocampal/amygdala, and cerebellar target labels.
+- `data/metadata/atlas_info/atlas-4S156Parcels_dseg.json`: atlas provenance and source-atlas metadata.
+- `data/metadata/atlas_info/overlay_brodmann_2mm_MNI_reformatted.csv`: Brodmann label table used for cortical BA priors.
+- `data/metadata/atlas_info/atlas-4S156Parcels_space-MNI152NLin6Asym_dseg.nii.gz`: 4S156 label volume.
+- `data/metadata/atlas_info/overlay_brodmann_2mm_MNI.nii`: Brodmann label volume.
+
+Legacy `data/raw/atlas_info/...` mirrors remain supported by code-level path resolvers when present.
 
 External anatomical references:
 
@@ -137,5 +139,11 @@ The active LORO cache pipeline exposes this as a matching policy choice:
 - `centroids_and_volumes`: coordinate/centroid matching followed by derived cortical BA/Schaefer voxel-overlap assignment and explicit cerebellar label assignments (`Cerebellar_Region4`, `Cerebellar_Region7`) by default.
 
 Set `collapse_cerebellum=True` to collapse cerebellar labels into one `Cerebellar_Region7` observation per subject.
+
+The current production cache convention uses force-left matching:
+
+- `out/loro_subject_cache_c`: `centroids`, `matching_policy_hemi_mode=force_left`, `collapse_cerebellum=False`.
+- `out/loro_subject_cache_cv`: `centroids_and_volumes`, `matching_policy_hemi_mode=force_left`, `collapse_cerebellum=False`.
+- `out/loro_subject_cache_cv_collapse`: `centroids_and_volumes`, `matching_policy_hemi_mode=force_left`, `collapse_cerebellum=True`.
 
 The exploratory notebook does not write diagnostic CSVs by default; set `SAVE_NOTEBOOK_TABLES = True` in [`parcel_assignment.ipynb`](../../parcel_assignment.ipynb) only when refreshing notebook-derived tables under `out/`.

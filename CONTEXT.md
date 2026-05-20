@@ -21,18 +21,23 @@ The corresponding source modules under `src/eval_utils/` (`eval_population.py`, 
 Refactor plan and status: `context_packages/results_eda_refactor_plan.md`.
 
 Sample/tensor visualizer plan: `context_packages/samples_visualizer.md`.
-Single-dataset raw views live in `eval_gtex_gxp_samples.ipynb` and
-`eval_ahba_gxp_samples.ipynb`, both driven by
-`src/eval_utils/eval_samples.py` (`TensorView`, `plot_sampled_tensor(...,
-dataset=...)`) over the active `data/raw/gxp_samples.csv`. The joint
-GTEx+AHBA ground-truth test surface lives in `eval_gxp_samples.ipynb`:
-`region_matched_superset` makes GTEx share the AHBA superset region axis (with
-`future_imputation_mask` on padded positions), `JointTensorView` +
-`build_joint_tensor_view(...)` validate the joined frame, and
-`plot_joint_tensor_voxels(...)` / `dataset="combined"` render it. The same
-surface later carries ComBat-harmonized, strict LORO, and full-brain GTEx
-imputation joint pairs, with UMAPs primarily for raw matched, harmonized, and
-full-brain imputed stages.
+`src/eval_utils/eval_samples.py` is the unified surface: one `TensorView`
+contract (with `pipeline_stage`, `future_imputation_mask`, `matching`), one
+cube adapter `build_tensor_view_from_cube(...)`, three source facades
+(`build_native_tensor_view` CSV, `build_combat_tensor_view` PREPOST,
+`build_prediction_tensor_view` npz cache), and two renderers
+(`plot_gtex_tensor_voxels` single, `plot_joint_tensor_voxels` joint, both with
+`mask_render_mode` two-pass and data-derived future-imputation rendering).
+Three live notebooks, one per pipeline layer:
+- `eval_gxp_samples.ipynb` — raw GTEx+AHBA, standalone then joint.
+- `eval_gxp_samples_combat.ipynb` — ComBat joint pre/post (PREPOST cubes).
+- `eval_gxp_samples_predictions.ipynb` — LORO + full-fit predictions
+  (`loro_truth`/`loro_fused`/`loro_hybrid`/`fullbrain`), standalone + joint-vs-AHBA.
+Native single-dataset reference renders are archived under `notebooks/arxiv/`.
+`region_ordering` (`target_parcel`/`region_matched`/`region_matched_superset`)
+is shared across cube facades; `region_matched_superset` makes GTEx share the
+AHBA superset axis with `future_imputation_mask` on padded/extrapolated cells.
+UMAPs (raw matched, harmonized, full-fit) remain the open next stage.
 
 ## Main Entrypoints
 
@@ -42,6 +47,7 @@ full-brain imputed stages.
 - `src/workflows/loro_cache.py` — per-subject cache builder
 - `scripts/run_loro_cache_batch.py` — batch/array subject driver
 - `src/eval_utils/eda_core.py` — dataset-level EDA, PREPOST reconstruction (cached via `prepare_pre_post_harmonization_cached`), path/gene-list resolution
+- `docs/manuscript/expression_harmonization.md` — formal AHBA-GTEx ComBat-style harmonization procedure, covariates, affine GTEx-to-AHBA calibration, and caveats
 - `src/eval_utils/eval_style.py` — shared model/region labels, colors, font-token system, metric-label formatter (incl. Kendall τ), tick-style enforcer
 - `src/eval_utils/eval_population.py` — population-level cached prediction evaluation (sample-wise + gene-wise + within-subject spatial Kendall)
 - `src/eval_utils/eval_single_subject.py` — subject-keyed analyses (perf summary, specificity, spatial specificity)
@@ -49,7 +55,7 @@ full-brain imputed stages.
 - `src/eval_utils/dlam_diagnostics.py` — DLAM diagnostics fit/cache/plot utilities
 - `src/viz/coord_viz.py` — GTEx/AHBA coordinate overlay utilities
 - `eval_data.ipynb` / `eval_population.ipynb` / `eval_singlesubject.ipynb` / `eval_population_genewise.ipynb` — active eval notebooks
-- `eval_gtex_gxp_samples.ipynb` / `eval_ahba_gxp_samples.ipynb` — split raw single-dataset tensor notebooks; `eval_gxp_samples.ipynb` is reserved for the joint `JointTensorView` view (Phase 3)
+- `eval_gxp_samples.ipynb` (raw) / `eval_gxp_samples_combat.ipynb` (ComBat pre/post) / `eval_gxp_samples_predictions.ipynb` (LORO + full-fit) — the three live tensor-visualizer notebooks; native single-dataset reference renders archived under `notebooks/arxiv/`
 - `notebooks/coordinate_overlay_3d_mni.ipynb` (a.k.a. `coordinate_assignment_3dmni.ipynb` at repo root) — parcel-assignment visualization notebook
 
 Legacy notebooks kept for reference: `results_cached_predictions.ipynb`, `results_single_subject_predictions.ipynb`, `pca_cached_predictions.ipynb`.
@@ -77,7 +83,7 @@ Legacy notebooks kept for reference: `results_cached_predictions.ipynb`, `result
 16. **Genewise surface** in `eval_population.py`: `compute_genewise_metrics(view, ..., stratify_by=None)` produces the per-(model, gene[, stratum]) table; `plot_genewise_ranked_overlay` (with `group_by='model'|'gtex_region'`, gene labels on the curve at every Nth percentile, n_samples in legend) and `plot_genewise_histogram` (overlapping per-group distributions with median rules) cover the visualizations. Tissue-stratified plots use the same shared region palette as the rest of the repo via `_tissue_palette` (region_group buckets + n_samples-weighted ordering matching `_global_scatter_color_spec`).
 17. **Gene-sublist scatters** in `plot_global_prediction_scatter`: `gene_selection='top'|'bottom'|'random'|'list_order'` with `gene_rank_lookup` precomputed once via `compute_gene_rank_lookup(view, model, metric)`, plus `highlight_genes=[…]` hand-pick override and `base_alpha_factor` for fading "Other" points. Stratum isolation (`isolate_stratum`, `isolate_color_subby`) for side-by-side panels with sub-gradient coloring.
 18. **Within-subject spatial Kendall-τ** in `eval_population.py`: `compute_within_subject_kendall(view, ..., min_regions=5, cache=True)` produces a long table `(subject, gene, model, kendall_tau, n_regions)` keyed for disk caching. `summarize_kendall_per_unit(unit_col='gene'|'subject')` aggregates with median/mean/std + n_valid; `plot_unitwise_kendall_ranked` is the generalized ranked plot for either axis. `filter_kendall_to_genes(kendall_long, genes)` lets sublist analyses reuse the cached all-genes table without recomputing.
-19. **Disk-cached PREPOST** via `prepare_pre_post_harmonization_cached(cfg)` in `eda_core.py`. Hash key covers `(csv_path, cache_root, gene_scope, min_observed_parcels, combat_use_covariates, gtex_rep_mode, gtex_hemi_mode, resolved_matching_policy, resolved_matching_policy_hemi_mode, resolved_collapse_cerebellum)` plus the CSV file's `(mtime_ns, size)` — `hvg_path` is no longer in EDAConfig (HVG gene panel for `gene_scope='hvg'` is sourced from the LORO cache's subject `gene_names` instead). First call computes (slow ComBat fit), subsequent calls load in seconds. Cache lives at `notebooks/cache/prepost/<hash>.pkl`. Same cache pattern at `notebooks/cache/genewise_kendall/<hash>.pkl` for the Kendall long table. **Out is reserved for true prediction artifacts; helper-level caches live under `notebooks/cache/`.**
+19. **Disk-cached PREPOST** via `prepare_pre_post_harmonization_cached(cfg)` in `eda_core.py`. Hash key covers `(csv_path, cache_root, gene_scope, min_observed_parcels, combat_use_covariates, drop_macro_system_covariate, gtex_rep_mode, gtex_hemi_mode, resolved_matching_policy, resolved_matching_policy_hemi_mode, resolved_collapse_cerebellum)` plus the CSV file's `(mtime_ns, size)` — `hvg_path` is no longer in EDAConfig (HVG gene panel for `gene_scope='hvg'` is sourced from the LORO cache's subject `gene_names` instead). First call computes (slow ComBat fit), subsequent calls load in seconds. Cache lives at `notebooks/cache/prepost/<hash>.pkl`. Same cache pattern at `notebooks/cache/genewise_kendall/<hash>.pkl` for the Kendall long table. **Out is reserved for true prediction artifacts; helper-level caches live under `notebooks/cache/`.**
 20. **ipywidgets-based interactive single-gene scatter** in Section 4 of `eval_population_genewise.ipynb` — explicit dropdowns + `observe` callbacks (no `%matplotlib widget` / `ipympl` dependency). Inline static figures, one render path, one Output widget. `'all'` model option renders all 3 panels in one figure; specific model renders single panel.
 21. Token-based font system in `eval_style.py`: `FONT_TOKENS = {xs, s, m, l, xl, xxl}`, `font_size("token±N")`, `set_font_scale(scale)`, `_resolve_fonts(defaults, override)`. Hero plotters declare `_DEFAULT_FONT_SIZES` and accept `font_sizes={...}` overrides. Single global rescale knob.
 22. Tick visibility forced via `_TICK_RC` injected into `sns.set_theme(rc=...)`, re-asserted at module import, and `apply_tick_style(ax)` available for per-axes safety.
@@ -95,6 +101,7 @@ Legacy notebooks kept for reference: `results_cached_predictions.ipynb`, `result
 34. **Atlas coordinate CSV resolution is schema-aware**: when building GTEx tissue coordinate lists, the builder requires `mni_x`, `mni_y`, `mni_z` for the Brodmann/S156 coordinate tables and skips incomplete local mirrors that only contain label metadata. This prevents late failures when `data/metadata/atlas_info` lacks full coordinate columns but the upstream `GeneEx2Conn_data/atlas_info` copy is complete.
 35. **Sample visualizer direction**: the visualizer should tell the pipeline story in five stages: original GTEx/AHBA inputs, raw region-matched data, ComBat-harmonized matched data, strict LORO imputed data, and full-brain GTEx imputed data. Keep raw input tensors separate from model-space tensors, and carry explicit dataset / expression-space / region-axis-kind / value-source / mask-source lineage on tensor views.
 36. **Joint tensor layering**: cross-dataset views go through three reusable layers in `eval_samples.py` — per-dataset `TensorView` from `build_sampled_tensor(..., region_ordering="region_matched_superset")`, then `JointTensorView` from `build_joint_tensor_view(gtex_view, ahba_view)` (validates identical genes/regions/axis-kind and records a `matched_region_count`), then `plot_joint_tensor_voxels(joint_view, ...)` for rendering. `dataset="combined"` is the convenience wrapper. GTEx's superset-padded AHBA-only cells carry `future_imputation_mask=True` and render translucent; AHBA's unobserved cells stay solid gray. Raw GTEx (`log1p(TPM)`) and AHBA (microarray intensity) are not on a shared scale — the raw combined plot uses per-dataset normalization or twin colorbars; harmonized/predicted joint pairs can collapse to one colorbar.
+37. **ComBat-style harmonization covariates**: active defaults use `combat_use_covariates=True` and `drop_macro_system_covariate=False`, so the design is age + sex + macro_system. Macro-system is encoded with `cortical_association` as reference and dummies for `cerebellar`, `subcortical`, and `visual_somatomotor`. Set `drop_macro_system_covariate=True` to reproduce the previous age+sex-only behavior.
 
 ## Core LORO Semantics
 
@@ -160,7 +167,7 @@ Top-level `/scratch/asr655` already has the inheritable OWNER@ ACE applied; new 
 
 1. Read `README.md` and this file.
 2. For active eval-refactor work, inspect `context_packages/results_eda_refactor_plan.md`, then `eval_data.ipynb` / `eval_population.ipynb` / `eval_singlesubject.ipynb` / `eval_population_genewise.ipynb`, and the focused `src/eval_utils/eval_*` modules.
-3. For sample/tensor visualizer work, inspect `context_packages/samples_visualizer.md`, then `eval_gtex_gxp_samples.ipynb` / `eval_ahba_gxp_samples.ipynb` (raw single-dataset views) and `eval_gxp_samples.ipynb` (joint view test surface), `src/eval_utils/eval_samples.py`, `src/eval_utils/eda_core.py`, and the LORO cache readers in `src/eval_utils/eval_population.py`.
+3. For sample/tensor visualizer work, inspect `context_packages/samples_visualizer.md`, then `src/eval_utils/eval_samples.py` (the unified surface) and the three notebooks `eval_gxp_samples.ipynb` (raw) / `eval_gxp_samples_combat.ipynb` (ComBat) / `eval_gxp_samples_predictions.ipynb` (predictions), plus `src/eval_utils/eda_core.py` (PREPOST) and the LORO cache readers in `src/eval_utils/eval_population.py`.
 4. Use `src/eval_utils/results_eda.py` as a legacy reference, not a default implementation target.
 5. Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
 6. Use `notebooks/coordinate_overlay_3d_mni.ipynb` (or repo-root `coordinate_assignment_3dmni.ipynb`) when working on spatial assignment or matching changes.
