@@ -31,3 +31,4 @@ env/
 # Brain viz local outputs
 brain-viz-python/__pycache__/
 brain-viz-python/HANDOFF.md
+brain-viz-python/2d_visualization/outputs/

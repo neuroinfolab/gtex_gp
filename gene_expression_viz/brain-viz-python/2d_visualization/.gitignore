@@ -1,0 +1,6 @@
+# Generated output images — regenerate with generate_all.py
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
