@@ -15,10 +15,12 @@ Active analysis notebooks (eval refactor):
 - `eval_population.ipynb` — population-level evaluation over cached LORO predictions: global scatters, sample-wise stratifications (Global / Sex / Age / Region), sex-bias forest, LORO fold-combo overlays + dist-colored gradients, fold-difficulty decomposition, distance-to-training.
 - `eval_singlesubject.ipynb` — subject-keyed analyses: per-subject performance distribution with percentile-anchored ranked plot (dynamic-shading at anchor>naive crossover), illustrative single-model scatters at p10/50/90, subject specificity (self vs other-subject truth at same region), spatial specificity (self vs mean of `k − 1` per-region metrics within subject).
 - `eval_population_genewise.ipynb` — per-gene analyses: gene-wise ranked + histogram overall and tissue-stratified; gene-sublist 3-model scatters with rank-based selection (`top` / `bottom` / `random` / `list_order`) or hand-picked highlights; ipywidgets dropdown for single-gene scatter (model + gene); within-subject spatial Kendall-τ with all-genes default + cached sublist filter.
+- `eval_embeddings.ipynb` — matrix-contract-backed GTEx embedding diagnostics: ground-truth PREPOST, post-ComBat PREPOST, then LORO reconstruction from prediction caches; region-wise PCA first, then UMAP after PCA pre-reduction, with `center|standardize|none` feature preprocessing and shared region/macro-system palettes.
 - Tensor visualizer notebooks (unified `TensorView` / `JointTensorView` surface in `src/eval_utils/eval_samples.py`; see `context_packages/samples_visualizer.md`):
   - `eval_gxp_samples.ipynb` — raw GTEx + AHBA, standalone then joint (CSV via `build_native_tensor_view`).
   - `eval_gxp_samples_combat.ipynb` — ComBat joint, pre (`raw_matched`) and post (`harmonized`), from PREPOST cubes via `build_combat_tensor_view`.
-  - `eval_gxp_samples_predictions.ipynb` — LORO + full-fit predictions (`loro_truth` / `loro_fused` / `loro_hybrid` / `fullbrain`), standalone and joint-vs-AHBA, from per-subject npz caches via `build_prediction_tensor_view`.
+  - `eval_gxp_samples_predictions_single.ipynb` — standalone held-out single tensors (`loro_truth` / `loro_recon`) on the matched native-GTEx-parcel axis (dense region ticks), from per-subject npz caches via `build_prediction_tensor_view`.
+  - `eval_gxp_samples_predictions_joint.ipynb` — LORO + full-fit predictions (`loro_truth` / `loro_recon` / `loro_fused` / `fullfit`) joint-vs-AHBA on the superset axis, plus dense `loro_fused` / `fullfit` standalones.
   - Archived native single-dataset reference renders: `notebooks/arxiv/eval_gtex_gxp_samples.ipynb`, `notebooks/arxiv/eval_ahba_gxp_samples.ipynb`.
 - `notebooks/coordinate_overlay_3d_mni.ipynb` — GTEx/AHBA spatial assignment inspection.
 
@@ -51,6 +53,7 @@ Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `
 - **Sample tensor notebooks and render sbatches** default to `data/raw/gxp_samples.csv`. The older `gxp_samples_arxiv.csv` is retained as the archived full/reference CSV, not the active default.
 - **Dynamic sbatch array sizing**: `run_loro_cache_array.sbatch` is fixed at `--array=1-385%64` (full GTEx subject pool ceiling). Tasks beyond the policy's eligible count exit cleanly with a `[skip-out-of-range]` log line via `scripts/run_loro_cache_batch.py`. The same submission line works across all `MATCHING_POLICY` × `MIN_OBSERVED_PARCELS` configurations.
 - **Sample visualizer plan**: `context_packages/samples_visualizer.md` is the live plan for explaining the full tensor pipeline: original GTEx/AHBA inputs, the raw joint ground-truth view on a shared AHBA superset region frame (`JointTensorView` + `plot_joint_tensor_voxels`, with translucent GTEx imputation-target cells driven by `future_imputation_mask`), ComBat-harmonized matched data, strict LORO imputed data, and full-brain GTEx imputed data. UMAPs are planned primarily for raw matched, ComBat harmonized, and full-brain imputed stages.
+- **Embedding diagnostics**: `src/eval_utils/eval_embeddings.py` emits a shared subject-region x gene matrix contract. PREPOST is the direct source for pre/post ComBat; `TensorView` is the adapter for LORO/fullfit and visualizer-derived views. PCA/UMAP helpers apply explicit feature preprocessing (`center`, `standardize`, `none`) and reuse the region-stratified eval palette from `eval_style`.
 
 ## Repository Layout
 
@@ -112,6 +115,7 @@ Core implementation modules:
 - `src/eval_utils/eda_core.py`
 - `src/eval_utils/eval_population.py`
 - `src/eval_utils/eval_single_subject.py`
+- `src/eval_utils/eval_embeddings.py`
 - `src/eval_utils/eval_style.py`
 - `src/eval_utils/results_eda.py` (compatibility/reference)
 - `src/eval_utils/dlam_diagnostics.py`
@@ -197,4 +201,4 @@ GENE_SCOPE=hvg sbatch run_loro_cache_array.sbatch
 - Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
 - See `CONTEXT.md` for a fast onboarding summary intended for parallel agents, `context_packages/results_eda_refactor_plan.md` for the live eval refactor plan, and `context_packages/samples_visualizer.md` for the sample/tensor visualizer plan.
 
-Last updated at: 2026-05-19
+Last updated at: 2026-05-21

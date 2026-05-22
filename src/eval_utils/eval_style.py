@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_hex
@@ -113,6 +113,25 @@ PARCEL_GROUP_COLORS = {
     "other": ["#6b6b6b", "#969696", "#bdbdbd"],
 }
 
+# Region-stratified evaluation colors. These are the manuscript-facing color
+# families used by population scatters and embedding diagnostics: cortical
+# orange/brown, subcortical blue/purple, cerebellar green, other gray.
+REGION_SCATTER_GROUP_ORDER = ["cortical", "subcortical", "cerebellar", "other"]
+REGION_SCATTER_GROUP_COLORS = {
+    "cortical": ["#b35806", "#e08214", "#f1a340", "#fdb863", "#7f3b08"],
+    "subcortical": ["#2166ac", "#4393c3", "#92c5de", "#762a83", "#9970ab", "#c2a5cf"],
+    "subcortical_basal_ganglia": ["#762a83", "#9970ab", "#c2a5cf", "#40004b", "#8e0152"],
+    "subcortical_other": ["#2166ac", "#4393c3", "#92c5de", "#053061", "#67a9cf"],
+    "cerebellar": ["#1b7837", "#5aae61", "#a6dba0", "#00441b", "#7fbf7b"],
+    "other": ["#6b6b6b", "#969696", "#bdbdbd", "#525252"],
+}
+REGION_SCATTER_GROUP_BASE = {
+    "cortical": "#e08214",
+    "subcortical": "#2166ac",
+    "cerebellar": "#1b7837",
+    "other": "#6b6b6b",
+}
+
 
 def strip_display_label_prefixes(name: str) -> str:
     s = str(name)
@@ -120,6 +139,90 @@ def strip_display_label_prefixes(name: str) -> str:
         if s.lower().startswith(prefix.lower()):
             return s[len(prefix) :]
     return s
+
+
+def collapse_macro_system_to_region_group(macro_system: object) -> str:
+    s = str(macro_system).strip().lower()
+    if s == "cerebellar":
+        return "cerebellar"
+    if s in {"subcortical", "basal_ganglia", "limbic_midbrain"}:
+        return "subcortical"
+    if s in {"unknown", "nan", "none", ""}:
+        return "other"
+    return "cortical"
+
+
+def scatter_subcortical_palette_key(region: str) -> str:
+    s = str(region).lower()
+    if any(k in s for k in ("caudate", "putamen", "accumbens", "pallid")):
+        return "subcortical_basal_ganglia"
+    return "subcortical_other"
+
+
+def region_scatter_palette(
+    regions: Sequence[str],
+    *,
+    region_group_lookup: Mapping[str, str] | None = None,
+    weights: Mapping[str, int] | None = None,
+) -> dict[str, object]:
+    """Palette for parcel/region labels matching region-stratified eval plots."""
+    rset = list({str(r) for r in regions})
+    if region_group_lookup is None:
+        group_lookup = {
+            r: collapse_macro_system_to_region_group(parcel_label_group(r))
+            for r in rset
+        }
+    else:
+        group_lookup = {r: str(region_group_lookup.get(r, "other")) for r in rset}
+
+    palette: dict[str, object] = {}
+    counters: dict[str, int] = {}
+    for group in REGION_SCATTER_GROUP_ORDER:
+        group_regions = [r for r in rset if group_lookup.get(r, "other") == group]
+        if weights is not None:
+            group_regions = sorted(group_regions, key=lambda r: (-int(weights.get(r, 0)), format_legend_label(r)))
+        else:
+            group_regions = sorted(group_regions, key=format_legend_label)
+        for region in group_regions:
+            palette_key = scatter_subcortical_palette_key(region) if group == "subcortical" else group
+            colors = REGION_SCATTER_GROUP_COLORS.get(palette_key, REGION_SCATTER_GROUP_COLORS["other"])
+            j = counters.get(palette_key, 0)
+            palette[region] = colors[j % len(colors)]
+            counters[palette_key] = j + 1
+
+    leftover = [r for r in rset if r not in palette]
+    for region in sorted(leftover, key=format_legend_label):
+        colors = REGION_SCATTER_GROUP_COLORS["other"]
+        j = counters.get("other", 0)
+        palette[region] = colors[j % len(colors)]
+        counters["other"] = j + 1
+    return palette
+
+
+def ordered_region_scatter_values(
+    regions: Sequence[str],
+    *,
+    region_group_lookup: Mapping[str, str] | None = None,
+    weights: Mapping[str, int] | None = None,
+) -> list[str]:
+    raw = list({str(r) for r in regions})
+    if region_group_lookup is None:
+        group_lookup = {
+            r: collapse_macro_system_to_region_group(parcel_label_group(r))
+            for r in raw
+        }
+    else:
+        group_lookup = {r: str(region_group_lookup.get(r, "other")) for r in raw}
+    out: list[str] = []
+    for group in REGION_SCATTER_GROUP_ORDER:
+        vals = [r for r in raw if group_lookup.get(r, "other") == group]
+        if weights is not None:
+            vals = sorted(vals, key=lambda r: (-int(weights.get(r, 0)), format_legend_label(r)))
+        else:
+            vals = sorted(vals, key=format_legend_label)
+        out.extend(vals)
+    out.extend(sorted([r for r in raw if r not in out], key=format_legend_label))
+    return out
 
 
 _TICK_RC = {

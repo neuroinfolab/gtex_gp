@@ -43,8 +43,12 @@ from .eval_style import (
     MODEL_COLORS,
     MODEL_LABELS,
     MODEL_ORDER,
+    REGION_SCATTER_GROUP_BASE,
+    REGION_SCATTER_GROUP_COLORS,
+    REGION_SCATTER_GROUP_ORDER,
     apply_tick_style,
     build_parcel_label_table,
+    collapse_macro_system_to_region_group,
     font_size,
     format_legend_label,
     model_label,
@@ -148,21 +152,9 @@ _META_COLS = {
 }
 
 
-_SCATTER_REGION_GROUP_ORDER = ["cortical", "subcortical", "cerebellar", "other"]
-_SCATTER_REGION_GROUP_COLORS = {
-    "cortical": ["#b35806", "#e08214", "#f1a340", "#fdb863", "#7f3b08"],
-    "subcortical": ["#2166ac", "#4393c3", "#92c5de", "#762a83", "#9970ab", "#c2a5cf"],
-    "subcortical_basal_ganglia": ["#762a83", "#9970ab", "#c2a5cf", "#40004b", "#8e0152"],
-    "subcortical_other": ["#2166ac", "#4393c3", "#92c5de", "#053061", "#67a9cf"],
-    "cerebellar": ["#1b7837", "#5aae61", "#a6dba0", "#00441b", "#7fbf7b"],
-    "other": ["#6b6b6b", "#969696", "#bdbdbd", "#525252"],
-}
-_SCATTER_REGION_GROUP_BASE = {
-    "cortical": "#e08214",
-    "subcortical": "#2166ac",
-    "cerebellar": "#1b7837",
-    "other": "#6b6b6b",
-}
+_SCATTER_REGION_GROUP_ORDER = REGION_SCATTER_GROUP_ORDER
+_SCATTER_REGION_GROUP_COLORS = REGION_SCATTER_GROUP_COLORS
+_SCATTER_REGION_GROUP_BASE = REGION_SCATTER_GROUP_BASE
 _SCATTER_SEX_COLORS = {
     "female": "#f4a261",
     "f": "#f4a261",
@@ -300,12 +292,7 @@ def _normalize_stratify_by(stratify_by: str | None, columns: Sequence[str]) -> s
 
 
 def _collapse_region_group(macro_system: object) -> str:
-    s = str(macro_system).strip().lower()
-    if s == "cerebellar":
-        return "cerebellar"
-    if s == "subcortical":
-        return "subcortical"
-    return "cortical"
+    return collapse_macro_system_to_region_group(macro_system)
 
 
 def _default_eval_table_cache_dir(cfg: EDAConfig, cache_dir: str | Path | None = None) -> Path:
@@ -316,6 +303,60 @@ def _default_eval_table_cache_dir(cfg: EDAConfig, cache_dir: str | Path | None =
     return (
         Path.cwd() / "out" / "eval_prediction_tables" / cache_root_name / str(cfg.gene_scope).lower()
     ).resolve()
+
+
+class _GlobalTableCacheMismatch(FileNotFoundError):
+    """Cached eval tables exist but were built under a different CFG."""
+
+
+def _global_table_manifest_expectation(
+    cfg: EDAConfig,
+    prepost: Dict[str, object],
+    models: Sequence[str],
+    cache_dir: Path,
+) -> dict[str, object]:
+    from .results_eda import (
+        resolve_collapse_cerebellum,
+        resolve_matching_policy,
+        resolve_matching_policy_hemi_mode,
+    )
+
+    return {
+        "cache_kind": "global_prediction_tables",
+        "schema_version": 2,
+        "cache_dir": str(cache_dir),
+        "source_cache_root": str(cfg.cache_root),
+        "gene_scope": str(cfg.gene_scope),
+        "models": [str(m).lower() for m in models],
+        "model_cache_dirnames": {
+            "naive": str(cfg.naive_cache_dirname),
+            "dlam": str(cfg.dlam_cache_dirname),
+            "plam": str(cfg.plam_cache_dirname),
+        },
+        "csv_path": str(cfg.csv_path),
+        "min_observed_parcels": int(cfg.min_observed_parcels),
+        "combat_use_covariates": bool(cfg.combat_use_covariates),
+        "drop_macro_system_covariate": bool(cfg.drop_macro_system_covariate),
+        "gtex_rep_mode": str(cfg.gtex_rep_mode),
+        "gtex_hemi_mode": str(cfg.gtex_hemi_mode),
+        "matching_policy": str(resolve_matching_policy(cfg)),
+        "matching_policy_hemi_mode": str(resolve_matching_policy_hemi_mode(cfg)),
+        "collapse_cerebellum": bool(resolve_collapse_cerebellum(cfg)),
+        "prepost_subject_count": int(len(prepost.get("subjects", []))),
+        "prepost_gene_count": int(len(prepost.get("genes", []))),
+    }
+
+
+def _manifest_mismatches(
+    manifest: Mapping[str, object],
+    expected: Mapping[str, object],
+) -> list[str]:
+    mismatches: list[str] = []
+    for key, expected_value in expected.items():
+        got = manifest.get(key, None)
+        if got != expected_value:
+            mismatches.append(f"{key}: cached={got!r}, current={expected_value!r}")
+    return mismatches
 
 
 def _parquet_paths(cache_dir: Path, models: Sequence[str]) -> tuple[Path, Dict[str, Path], Path]:
@@ -347,16 +388,29 @@ def _normalize_cache_permissions(cache_dir: Path) -> None:
         ) from e
 
 
-def _read_global_prediction_tables(cache_dir: Path, models: Sequence[str]) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame], dict[str, object]]:
+def _read_global_prediction_tables(
+    cache_dir: Path,
+    models: Sequence[str],
+    *,
+    expected_manifest: Mapping[str, object] | None = None,
+) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame], dict[str, object]]:
     _normalize_cache_permissions(cache_dir)
     truth_path, pred_paths, manifest_path = _parquet_paths(cache_dir, models)
     missing = [str(truth_path), str(manifest_path)] + [str(p) for p in pred_paths.values() if not p.exists()]
     missing = [p for p in missing if not Path(p).exists()]
     if missing:
         raise FileNotFoundError(f"Missing cached eval table files: {missing}")
+    manifest = json.loads(manifest_path.read_text())
+    if expected_manifest is not None:
+        mismatches = _manifest_mismatches(manifest, expected_manifest)
+        if mismatches:
+            details = "\n  - ".join(mismatches[:12])
+            raise _GlobalTableCacheMismatch(
+                f"Cached eval tables at {cache_dir} were built under a different CFG:\n"
+                f"  - {details}"
+            )
     truth_df = pd.read_parquet(truth_path)
     pred_dfs = {m: pd.read_parquet(path) for m, path in pred_paths.items()}
-    manifest = json.loads(manifest_path.read_text())
     return truth_df, pred_dfs, manifest
 
 
@@ -492,31 +546,62 @@ def _manifest_for_global_tables(
     cache_dir: Path,
 ) -> dict[str, object]:
     genes = _gene_cols(truth_df)
-    return {
+    out = _global_table_manifest_expectation(cfg, prepost, models, cache_dir)
+    out.update({
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "cache_kind": "global_prediction_tables",
-        "schema_version": 1,
-        "cache_dir": str(cache_dir),
-        "source_cache_root": str(cfg.cache_root),
-        "gene_scope": str(cfg.gene_scope),
-        "models": [str(m).lower() for m in models],
-        "model_cache_dirnames": {
-            "naive": str(cfg.naive_cache_dirname),
-            "dlam": str(cfg.dlam_cache_dirname),
-            "plam": str(cfg.plam_cache_dirname),
-        },
-        "csv_path": str(cfg.csv_path),
         "truth_expression_space": "harmonized",
         "prediction_expression_space": "harmonized",
-        "gtex_rep_mode": str(cfg.gtex_rep_mode),
-        "gtex_hemi_mode": str(cfg.gtex_hemi_mode),
         "n_rows": int(len(truth_df)),
         "n_genes": int(len(genes)),
         "n_subjects": int(truth_df["subject"].astype(str).nunique()),
         "n_parcels": int(truth_df["parcel_idx"].nunique()),
         "genes": genes,
-        "prepost_subject_count": int(len(prepost.get("subjects", []))),
-    }
+    })
+    return out
+
+
+def _model_npz_subjects(cfg: EDAConfig, model: str) -> set[str]:
+    model_l = str(model).lower()
+    if model_l == "naive":
+        model_dir = str(cfg.naive_cache_dirname)
+    elif model_l == "dlam":
+        model_dir = str(cfg.dlam_cache_dirname)
+    elif model_l == "plam":
+        model_dir = str(cfg.plam_cache_dirname)
+    else:
+        model_dir = model_l
+    root = Path(str(cfg.cache_root)) / str(cfg.gene_scope).lower() / model_dir
+    if not root.is_absolute():
+        root = (Path.cwd() / root).resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"Cache dir not found for model={model}: {root}")
+    return {p.stem for p in root.glob("*.npz")}
+
+
+def _validate_model_cache_subject_sets(cfg: EDAConfig, models: Sequence[str]) -> None:
+    subject_sets = {str(model).lower(): _model_npz_subjects(cfg, str(model).lower()) for model in models}
+    if not subject_sets:
+        return
+    union = set().union(*subject_sets.values())
+    common = set.intersection(*subject_sets.values())
+    if union == common:
+        return
+    lines = []
+    for model, subjects in subject_sets.items():
+        missing = sorted(union - subjects)
+        extra = sorted(subjects - common)
+        if missing:
+            lines.append(
+                f"{model}: missing {len(missing)} subject npz files "
+                f"(examples: {', '.join(missing[:8])})"
+            )
+        if extra and len(subjects) != len(common):
+            lines.append(f"{model}: has {len(extra)} subjects not present in every model")
+    counts = ", ".join(f"{m}={len(s)}" for m, s in subject_sets.items())
+    raise ValueError(
+        "Model subject-cache sets are not aligned before pooled eval-table construction. "
+        f"Counts: {counts}. Details: " + " | ".join(lines)
+    )
 
 
 def build_global_prediction_tables(
@@ -531,12 +616,18 @@ def build_global_prediction_tables(
     """Build/load all-gene wide truth and prediction tables for population eval."""
     model_list = ordered_models(models if models is not None else MODEL_ORDER)
     cdir = _default_eval_table_cache_dir(cfg, cache_dir=cache_dir)
+    expected_manifest = _global_table_manifest_expectation(cfg, prepost, model_list, cdir)
     if bool(cache) and not bool(force_rebuild):
         try:
-            return _read_global_prediction_tables(cdir, model_list)
+            return _read_global_prediction_tables(
+                cdir,
+                model_list,
+                expected_manifest=expected_manifest,
+            )
         except FileNotFoundError:
             pass
 
+    _validate_model_cache_subject_sets(cfg, model_list)
     meta = _subject_region_metadata(prepost)
     truth_ref: pd.DataFrame | None = None
     pred_dfs: Dict[str, pd.DataFrame] = {}

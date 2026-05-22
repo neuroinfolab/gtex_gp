@@ -15,6 +15,7 @@ Near-term work is centered on the eval refactor split across four active noteboo
 - `eval_population.ipynb` — population-level cached prediction evaluation (global scatters, sample-wise stratifications, sex-bias forest, LORO fold-combo overlays + dist-colored gradients, fold-difficulty decomposition, distance-to-training).
 - `eval_singlesubject.ipynb` — subject-keyed analyses (per-subject performance distribution, percentile-anchored illustrative scatters, subject specificity, spatial specificity).
 - `eval_population_genewise.ipynb` — per-gene analyses (gene-wise ranked + histogram overall and tissue-stratified, gene-sublist scatters with rank-based selection or hand-picked highlights, ipywidgets single-gene scatter, within-subject spatial Kendall-τ).
+- `eval_embeddings.ipynb` — matrix-contract-backed embedding diagnostics for GTEx ground truth, post-ComBat truth, and LORO reconstruction (region-wise PCA then UMAP, with explicit feature preprocessing and shared region/macro palettes).
 
 The corresponding source modules under `src/eval_utils/` (`eval_population.py`, `eval_single_subject.py`, `eval_style.py`, `eda_core.py`, `dlam_diagnostics.py`) are the canonical implementation surfaces. `results_eda.py` is now compatibility/reference only and houses the heavyweight single-subject visualizations (matrix panel, alignment scatter, performance triplet) that haven't yet migrated. `results_eda_arxiv.py` is a backup snapshot.
 
@@ -31,8 +32,10 @@ cube adapter `build_tensor_view_from_cube(...)`, three source facades
 Three live notebooks, one per pipeline layer:
 - `eval_gxp_samples.ipynb` — raw GTEx+AHBA, standalone then joint.
 - `eval_gxp_samples_combat.ipynb` — ComBat joint pre/post (PREPOST cubes).
-- `eval_gxp_samples_predictions.ipynb` — LORO + full-fit predictions
-  (`loro_truth`/`loro_fused`/`loro_hybrid`/`fullbrain`), standalone + joint-vs-AHBA.
+- `eval_gxp_samples_predictions_single.ipynb` — standalone `loro_truth`/`loro_recon`
+  single tensors, matched native-GTEx-parcel axis, dense region ticks.
+- `eval_gxp_samples_predictions_joint.ipynb` — `loro_truth`/`loro_recon`/`loro_fused`/`fullfit`
+  joint-vs-AHBA on the superset axis, plus dense `loro_fused`/`fullfit` standalones.
 Native single-dataset reference renders are archived under `notebooks/arxiv/`.
 `region_ordering` (`target_parcel`/`region_matched`/`region_matched_superset`)
 is shared across cube facades; `region_matched_superset` makes GTEx share the
@@ -51,11 +54,12 @@ UMAPs (raw matched, harmonized, full-fit) remain the open next stage.
 - `src/eval_utils/eval_style.py` — shared model/region labels, colors, font-token system, metric-label formatter (incl. Kendall τ), tick-style enforcer
 - `src/eval_utils/eval_population.py` — population-level cached prediction evaluation (sample-wise + gene-wise + within-subject spatial Kendall)
 - `src/eval_utils/eval_single_subject.py` — subject-keyed analyses (perf summary, specificity, spatial specificity)
+- `src/eval_utils/eval_embeddings.py` — embedding matrix contract plus PCA/UMAP plots; PREPOST is the direct pre/post source and `TensorView` is the LORO/fullfit adapter
 - `src/eval_utils/results_eda.py` — legacy/reference compatibility surface during migration
 - `src/eval_utils/dlam_diagnostics.py` — DLAM diagnostics fit/cache/plot utilities
 - `src/viz/coord_viz.py` — GTEx/AHBA coordinate overlay utilities
 - `eval_data.ipynb` / `eval_population.ipynb` / `eval_singlesubject.ipynb` / `eval_population_genewise.ipynb` — active eval notebooks
-- `eval_gxp_samples.ipynb` (raw) / `eval_gxp_samples_combat.ipynb` (ComBat pre/post) / `eval_gxp_samples_predictions.ipynb` (LORO + full-fit) — the three live tensor-visualizer notebooks; native single-dataset reference renders archived under `notebooks/arxiv/`
+- `eval_gxp_samples.ipynb` (raw) / `eval_gxp_samples_combat.ipynb` (ComBat pre/post) / `eval_gxp_samples_predictions_single.ipynb` + `eval_gxp_samples_predictions_joint.ipynb` (LORO + full-fit, split single vs joint) — the live tensor-visualizer notebooks; native single-dataset reference renders archived under `notebooks/arxiv/`
 - `notebooks/coordinate_overlay_3d_mni.ipynb` (a.k.a. `coordinate_assignment_3dmni.ipynb` at repo root) — parcel-assignment visualization notebook
 
 Legacy notebooks kept for reference: `results_cached_predictions.ipynb`, `results_single_subject_predictions.ipynb`, `pca_cached_predictions.ipynb`.
@@ -102,6 +106,7 @@ Legacy notebooks kept for reference: `results_cached_predictions.ipynb`, `result
 35. **Sample visualizer direction**: the visualizer should tell the pipeline story in five stages: original GTEx/AHBA inputs, raw region-matched data, ComBat-harmonized matched data, strict LORO imputed data, and full-brain GTEx imputed data. Keep raw input tensors separate from model-space tensors, and carry explicit dataset / expression-space / region-axis-kind / value-source / mask-source lineage on tensor views.
 36. **Joint tensor layering**: cross-dataset views go through three reusable layers in `eval_samples.py` — per-dataset `TensorView` from `build_sampled_tensor(..., region_ordering="region_matched_superset")`, then `JointTensorView` from `build_joint_tensor_view(gtex_view, ahba_view)` (validates identical genes/regions/axis-kind and records a `matched_region_count`), then `plot_joint_tensor_voxels(joint_view, ...)` for rendering. `dataset="combined"` is the convenience wrapper. GTEx's superset-padded AHBA-only cells carry `future_imputation_mask=True` and render translucent; AHBA's unobserved cells stay solid gray. Raw GTEx (`log1p(TPM)`) and AHBA (microarray intensity) are not on a shared scale — the raw combined plot uses per-dataset normalization or twin colorbars; harmonized/predicted joint pairs can collapse to one colorbar.
 37. **ComBat-style harmonization covariates**: active defaults use `combat_use_covariates=True` and `drop_macro_system_covariate=False`, so the design is age + sex + macro_system. Macro-system is encoded with `cortical_association` as reference and dummies for `cerebellar`, `subcortical`, and `visual_somatomotor`. Set `drop_macro_system_covariate=True` to reproduce the previous age+sex-only behavior.
+38. **Embedding diagnostics first pass**: `eval_embeddings.ipynb` builds GTEx ground-truth and post-ComBat matrices directly from PREPOST, then builds the LORO reconstruction matrix from `build_prediction_tensor_view(..., stage='loro_recon')`. All stages emit the same `RegionEmbeddingMatrix` contract before PCA/UMAP. Feature preprocessing defaults to `center`; region, macro-system, and region-group coloring all route through shared `eval_style` palette helpers.
 
 ## Core LORO Semantics
 
@@ -167,10 +172,10 @@ Top-level `/scratch/asr655` already has the inheritable OWNER@ ACE applied; new 
 
 1. Read `README.md` and this file.
 2. For active eval-refactor work, inspect `context_packages/results_eda_refactor_plan.md`, then `eval_data.ipynb` / `eval_population.ipynb` / `eval_singlesubject.ipynb` / `eval_population_genewise.ipynb`, and the focused `src/eval_utils/eval_*` modules.
-3. For sample/tensor visualizer work, inspect `context_packages/samples_visualizer.md`, then `src/eval_utils/eval_samples.py` (the unified surface) and the three notebooks `eval_gxp_samples.ipynb` (raw) / `eval_gxp_samples_combat.ipynb` (ComBat) / `eval_gxp_samples_predictions.ipynb` (predictions), plus `src/eval_utils/eda_core.py` (PREPOST) and the LORO cache readers in `src/eval_utils/eval_population.py`.
+3. For sample/tensor visualizer work, inspect `context_packages/samples_visualizer.md`, then `src/eval_utils/eval_samples.py` (the unified surface) and the notebooks `eval_gxp_samples.ipynb` (raw) / `eval_gxp_samples_combat.ipynb` (ComBat) / `eval_gxp_samples_predictions_single.ipynb` + `eval_gxp_samples_predictions_joint.ipynb` (predictions), plus `src/eval_utils/eda_core.py` (PREPOST) and the LORO cache readers in `src/eval_utils/eval_population.py`.
 4. Use `src/eval_utils/results_eda.py` as a legacy reference, not a default implementation target.
 5. Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
 6. Use `notebooks/coordinate_overlay_3d_mni.ipynb` (or repo-root `coordinate_assignment_3dmni.ipynb`) when working on spatial assignment or matching changes.
 7. Treat `notebooks/` and the `results_*.ipynb` notebooks at repo root as historical/legacy unless intentionally reviving one. `notebooks/cache/` is for active helper-level caches and is fine to populate.
 
-Last updated at: 2026-05-19
+Last updated at: 2026-05-21
