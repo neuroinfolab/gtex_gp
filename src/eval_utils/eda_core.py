@@ -384,23 +384,35 @@ def resolve_eval_gene_list_path(path_str: str) -> Path:
                 (root.parent / "out" / "raw" / "gene_lists" / p).resolve(),
                 (root / "out" / "raw" / "gene_lists" / p).resolve(),
                 (root / "data" / "metadata" / "gene_lists" / p).resolve(),
+                (root / "data" / "metadata" / "gene_lists" / "allgenes_stability_dk" / p).resolve(),
                 (root / "data" / "raw" / "gene_lists" / p).resolve(),
                 (root / "data" / "metadata" / p).resolve(),
                 (root / "data" / "raw" / p).resolve(),
             ]
         )
-        if p.suffix == "":
-            candidates.extend(
-                [
-                    (root / f"{raw}.txt").resolve(),
-                    (root.parent / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
-                    (root / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
-                    (root / "data" / "metadata" / "gene_lists" / f"{raw}.txt").resolve(),
-                    (root / "data" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
-                    (root / "data" / "metadata" / f"{raw}.txt").resolve(),
-                    (root / "data" / "raw" / f"{raw}.txt").resolve(),
-                ]
-            )
+        # Always try text/CSV suffix variants. Names such as
+        # `allgenes_stable_r0.8` have a decimal dot, so Path.suffix is ".8"
+        # even though the caller is passing a basename.
+        candidates.extend(
+            [
+                (root / f"{raw}.txt").resolve(),
+                (root / f"{raw}.csv").resolve(),
+                (root.parent / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
+                (root.parent / "out" / "raw" / "gene_lists" / f"{raw}.csv").resolve(),
+                (root / "out" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
+                (root / "out" / "raw" / "gene_lists" / f"{raw}.csv").resolve(),
+                (root / "data" / "metadata" / "gene_lists" / f"{raw}.txt").resolve(),
+                (root / "data" / "metadata" / "gene_lists" / f"{raw}.csv").resolve(),
+                (root / "data" / "metadata" / "gene_lists" / "allgenes_stability_dk" / f"{raw}.txt").resolve(),
+                (root / "data" / "metadata" / "gene_lists" / "allgenes_stability_dk" / f"{raw}.csv").resolve(),
+                (root / "data" / "raw" / "gene_lists" / f"{raw}.txt").resolve(),
+                (root / "data" / "raw" / "gene_lists" / f"{raw}.csv").resolve(),
+                (root / "data" / "metadata" / f"{raw}.txt").resolve(),
+                (root / "data" / "metadata" / f"{raw}.csv").resolve(),
+                (root / "data" / "raw" / f"{raw}.txt").resolve(),
+                (root / "data" / "raw" / f"{raw}.csv").resolve(),
+            ]
+        )
     seen: set[Path] = set()
     for c in candidates:
         if c in seen:
@@ -413,7 +425,18 @@ def resolve_eval_gene_list_path(path_str: str) -> Path:
 
 def load_eval_gene_list(eval_gene_list_path: str) -> List[str]:
     p = resolve_eval_gene_list_path(eval_gene_list_path)
-    genes = [line.strip() for line in p.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
+    if p.suffix.lower() == ".csv":
+        import csv as _csv
+        with p.open(newline="") as fh:
+            rows = list(_csv.reader(fh))
+        if not rows:
+            genes = []
+        elif rows[0] and rows[0][0].strip().lower() in {"label", "region", "parcel", "id"}:
+            genes = [g.strip() for g in rows[0][1:] if g.strip()]
+        else:
+            genes = [row[0].strip() for row in rows if row and row[0].strip() and not row[0].strip().startswith("#")]
+    else:
+        genes = [line.strip() for line in p.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
     if not genes:
         raise ValueError(f"No genes found in eval gene list: {p}")
     return genes

@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-observed-parcels", type=int, default=SubjectCacheConfig.min_observed_parcels)
     p.add_argument("--c-min", type=int, default=SubjectCacheConfig.c_min)
     p.add_argument("--n-comp-target", type=int, default=SubjectCacheConfig.n_comp_target)
+    p.add_argument("--dlam-strategy", default=SubjectCacheConfig.dlam_strategy)
+    p.add_argument("--dlam-spatial-method", choices=["rbf", "gp"], default=SubjectCacheConfig.dlam_spatial_method)
     p.add_argument("--ridge-alpha-bridge", type=float, default=SubjectCacheConfig.ridge_alpha_bridge)
     p.add_argument("--rbf-smoothing", type=float, default=SubjectCacheConfig.rbf_smoothing)
     p.add_argument("--gp-length-scale", type=float, default=SubjectCacheConfig.gp_length_scale)
@@ -82,6 +84,8 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         min_observed_parcels=int(a.min_observed_parcels),
         c_min=int(a.c_min),
         n_comp_target=int(a.n_comp_target),
+        dlam_strategy=str(a.dlam_strategy),
+        dlam_spatial_method=str(a.dlam_spatial_method).lower(),
         ridge_alpha_bridge=float(a.ridge_alpha_bridge),
         rbf_smoothing=float(a.rbf_smoothing),
         gp_length_scale=float(a.gp_length_scale),

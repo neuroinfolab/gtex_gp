@@ -56,6 +56,7 @@ from .eval_style import (
     parcel_color_map,
     parcel_group_sort_key,
     parcel_label_lookup,
+    pretty_gtex_label,
     set_academic_style,
     strip_display_label_prefixes,
 )
@@ -1701,6 +1702,8 @@ def _global_scatter_color_spec(
 def _scatter_legend_label(value: str, color_key: str | None) -> str:
     if color_key == "gene":
         return str(value).upper()
+    if color_key == "region":
+        return pretty_gtex_label(value)
     return format_legend_label(value)
 
 
@@ -3755,7 +3758,7 @@ def plot_stratified_distribution(
     ax.set_ylabel(format_legend_label(metric), fontsize=FONT["label"] + 1)
     if x_col == "gtex_region":
         ax.set_xticklabels(
-            [format_legend_label(t.get_text()) for t in ax.get_xticklabels()],
+            [pretty_gtex_label(t.get_text()) for t in ax.get_xticklabels()],
             ha="right", rotation=30,
         )
     if x_col == "model":
@@ -3822,7 +3825,8 @@ def format_stratified_metric_table(
                     row[(model_label(m), mn)] = _format_metric_value(mean, std)
         rows.append([row[c] for c in columns])
 
-    out = pd.DataFrame(rows, index=pd.Index(ordering, name=index_name), columns=col_index)
+    display_index = [pretty_gtex_label(s) for s in ordering] if index_name == "gtex_region" else ordering
+    out = pd.DataFrame(rows, index=pd.Index(display_index, name=index_name), columns=col_index)
     return out
 
 

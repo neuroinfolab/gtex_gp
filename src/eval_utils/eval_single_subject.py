@@ -657,6 +657,15 @@ def compute_spatial_specificity(
 # Split-violin plotting (shared between subject + spatial specificity)
 # ---------------------------------------------------------------------------
 
+_SPECIFICITY_FONTS = {
+    "title": "xl",
+    "xlabel": "l",
+    "ylabel": "l",
+    "tick": "m+1",
+    "legend": "m",
+    "legend_title": "m",
+}
+
 
 def _plot_specificity_split_violin(
     spec_df: pd.DataFrame,
@@ -668,6 +677,7 @@ def _plot_specificity_split_violin(
     figsize: Tuple[float, float],
     dpi: int,
     annotate_paired_test: bool,
+    font_sizes: Mapping[str, int | float | str] | None = None,
 ) -> Tuple[plt.Figure, plt.Axes]:
     if spec_df is None or len(spec_df) == 0:
         raise RuntimeError("spec_df is empty")
@@ -679,6 +689,7 @@ def _plot_specificity_split_violin(
     )
     higher_is_better = bool(_HIGHER_IS_BETTER.get(metric_norm, True))
     metric_label = format_legend_label(metric_norm)
+    fonts = _resolve_fonts(_SPECIFICITY_FONTS, font_sizes)
 
     long = spec_df.melt(
         id_vars=["model"],
@@ -721,12 +732,12 @@ def _plot_specificity_split_violin(
         poly_idx += 1
 
     ax.set_xticks(np.arange(len(plot_models)))
-    ax.set_xticklabels([model_label(m) for m in plot_models], fontsize=FONT["tick"] + 1)
-    ax.set_xlabel("Model", fontsize=FONT["label"] + 1)
-    ax.set_ylabel(metric_label, fontsize=FONT["label"] + 1)
-    ax.set_title(title, fontsize=FONT["title"] + 2)
+    ax.set_xticklabels([model_label(m) for m in plot_models], fontsize=fonts["tick"])
+    ax.set_xlabel("Model", fontsize=fonts["xlabel"])
+    ax.set_ylabel(metric_label, fontsize=fonts["ylabel"])
+    ax.set_title(title, fontsize=fonts["title"])
     ax.grid(True, axis="y", alpha=0.18)
-    apply_tick_style(ax, label_fontsize=FONT["tick"] + 1)
+    apply_tick_style(ax, label_fontsize=fonts["tick"])
 
     # Stats-augmented legend: per-model Self/Other patches followed by a
     # compact Wilcoxon line per model. Single legend at lower-left so the
@@ -771,7 +782,7 @@ def _plot_specificity_split_violin(
     ax.legend(
         handles, labels, title="Comparison (Wilcoxon Δ = self − other)",
         frameon=True, fancybox=False, loc="lower left",
-        fontsize=FONT["small"], title_fontsize=FONT["small"] + 1,
+        fontsize=fonts["legend"], title_fontsize=fonts["legend_title"],
         handlelength=1.4, borderaxespad=0.6, labelspacing=0.35,
     )
 
@@ -784,6 +795,7 @@ def plot_subject_specificity(
     figsize: Tuple[float, float] = (9.0, 5.0),
     dpi: int = 180,
     annotate_paired_test: bool = True,
+    font_sizes: Mapping[str, int | float | str] | None = None,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """Split-violin: per region, prediction vs that subject's truth (self) vs
     prediction vs the mean of every other subject's truth at the same region.
@@ -796,6 +808,7 @@ def plot_subject_specificity(
         title="Subject Specificity: LORO Prediction vs Truth — Prediction vs Mean",
         figsize=figsize, dpi=dpi,
         annotate_paired_test=annotate_paired_test,
+        font_sizes=font_sizes,
     )
 
 
@@ -804,6 +817,7 @@ def plot_spatial_specificity(
     figsize: Tuple[float, float] = (9.0, 5.0),
     dpi: int = 180,
     annotate_paired_test: bool = True,
+    font_sizes: Mapping[str, int | float | str] | None = None,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """Split-violin: per region, prediction vs that region's truth (self) vs
     the mean of `k − 1` per-region metrics comparing the same prediction to
@@ -817,4 +831,5 @@ def plot_spatial_specificity(
         title="Spatial Specificity: LORO Prediction vs Truth — Prediction vs Other Samples (within subject)",
         figsize=figsize, dpi=dpi,
         annotate_paired_test=annotate_paired_test,
+        font_sizes=font_sizes,
     )

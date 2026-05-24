@@ -1,0 +1,225 @@
+"""On-brain rendering of TensorView slices.
+
+nilearn glass-brain dot plots + yabplot cortical / subcortical surface renders for
+single ``(subject, gene)`` slices of the gtex_gp TensorViews. This is the helper
+home for ``eval_gxp_onbrain_views_copy.ipynb`` so that notebook stays config-first
+(toggles + one-line calls).
+
+Heavy deps (nilearn, pyvista, yabplot) are imported lazily inside the functions /
+renderer that use them, so importing this module is cheap.
+"""
+from __future__ import annotations
+
+import glob
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import Normalize
+
+from .eval_style import model_label
+
+__all__ = [
+    "subject_gene_values", "slice_value_dict", "shared_clim", "region_coords", "search",
+    "build_panels", "render_nilearn_row", "BrainSurfaceRenderer", "render_scope_row",
+]
+
+
+# --------------------------------------------------------------------- slicing
+def subject_gene_values(view, subject_id, gene):
+    """1-D ``(n_regions,)`` values for one subject & gene; unobserved parcels -> NaN."""
+    si = view.subjects.index(subject_id)
+    gi = view.genes.index(gene)
+    vals = view.values[si, :, gi].astype(float).copy()
+    vals[~view.observed_mask[si, :]] = np.nan
+    return vals
+
+
+def slice_value_dict(view, subject_id, gene):
+    """``{parcel_label: value}`` for one (subject, gene); observed parcels only."""
+    return {lab: float(x)
+            for lab, x in zip(view.regions, subject_gene_values(view, subject_id, gene))
+            if np.isfinite(x)}
+
+
+def shared_clim(value_arrays, pct=(2.0, 98.0)):
+    """Robust ``(vmin, vmax)`` over all finite values — one scale for every panel."""
+    allv = np.concatenate([v[np.isfinite(v)] for v in value_arrays]) if value_arrays else np.array([])
+    if allv.size == 0:
+        return (None, None)
+    lo, hi = np.nanpercentile(allv, pct)
+    if lo == hi:
+        lo, hi = float(allv.min()), float(allv.max())
+    return float(lo), float(hi)
+
+
+def region_coords(prepost, regions):
+    """``(n_regions, 3)`` MNI centroids (coord_x/y/z) reindexed to ``regions`` order."""
+    lut = (prepost["target_meta"]
+           .assign(_k=lambda d: d["tissue_or_parcel"].astype(str))
+           .set_index("_k")[["coord_x", "coord_y", "coord_z"]])
+    co = lut.reindex(list(regions)).to_numpy(float)
+    if np.isnan(co).any():
+        raise ValueError("some regions are missing MNI coords in target_meta")
+    return co
+
+
+def search(items, substr):
+    """Case-insensitive substring filter — handy for finding gene / subject ids."""
+    s = str(substr).lower()
+    return [x for x in items if s in str(x).lower()]
+
+
+# --------------------------------------------------------------------- panels
+def build_panels(model_name, truth, recon, fused, ahba, gtex_subject, ahba_subject):
+    """Standard 4-panel spec ``[(title, view, subject), ...]`` shared by both rows."""
+    ml = model_label(model_name)
+    return [
+        (f"{ml} — held-out truth\n{gtex_subject}", truth, gtex_subject),
+        (f"{ml} — LORO recon\n{gtex_subject}",     recon, gtex_subject),
+        (f"{ml} — LORO fused\n{gtex_subject}",     fused, gtex_subject),
+        (f"AHBA reference\n{ahba_subject}",        ahba,  ahba_subject),
+    ]
+
+
+def _shared_colorbar(fig, axes, vmin, vmax, cmap, label):
+    sm = cm.ScalarMappable(norm=Normalize(vmin, vmax), cmap=cmap)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=list(axes), fraction=0.012, pad=0.01)
+    cbar.set_label(label, fontsize=9)
+
+
+# --------------------------------------------------------------------- nilearn
+def render_nilearn_row(panels, gene, coords, *, vmin, vmax, cmap="viridis",
+                       display_mode="x", node_size=45, figsize=(16, 3.6)):
+    """One row of nilearn ``plot_markers`` glass-brain dots, shared scale + colorbar."""
+    from nilearn import plotting
+    fig, axes = plt.subplots(1, len(panels), figsize=figsize)
+    for ax, (title, view, subject) in zip(axes, panels):
+        vals = subject_gene_values(view, subject, gene)
+        finite = np.isfinite(vals)
+        if finite.sum() == 0:
+            ax.set_title(f"{title}\n(no sampled parcels)", fontsize=9)
+            ax.axis("off")
+            continue
+        plotting.plot_markers(vals[finite], coords[finite], node_size=node_size, node_cmap=cmap,
+                              node_vmin=vmin, node_vmax=vmax, display_mode=display_mode, axes=ax,
+                              colorbar=False, annotate=False, title=None)
+        ax.set_title(title, fontsize=9)
+    _shared_colorbar(fig, axes, vmin, vmax, cmap, f"{gene} — harmonized expression")
+    fig.suptitle(f"{gene}: nilearn dots — truth / recon / fused vs AHBA (shared scale)",
+                 fontsize=11, y=1.06)
+    plt.show()
+    return fig
+
+
+# --------------------------------------------------------------- yabplot surfaces
+class BrainSurfaceRenderer:
+    """Single-PyVista-scene cortex+subcortex renderer over the vendored 4S156 atlas.
+
+    yabplot's ``plot_cortical`` / ``plot_subcortical`` each build their own figure and
+    cannot overlay cortex-data with subcortex-data, so this ports the collaborator's
+    ``BrainRenderer`` pattern: one ``pv.Plotter`` with the LH cortical surface
+    (per-vertex parcel values) plus each subcortical VTK as a uniform-colored mesh.
+    """
+
+    # scope -> (camera, cortex_alpha, cortex_carries_data, show_subcortex)
+    SCOPE_CFG = {
+        "cortical":               ("left_lateral", 1.00, True,  False),
+        "subcortical_cerebellar": ("left_lateral", 0.12, False, True),   # cortex = translucent shell
+        "joint":                  ("left_medial",  0.60, True,  True),    # in progress
+    }
+
+    def __init__(self, atlas_cache="data/brain_atlas_4s",
+                 nan_color=(0.55, 0.55, 0.55), sub_alpha=1.0):
+        import os
+        os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
+        import pyvista as pv
+        from yabplot.data import get_surface_paths
+        from yabplot.utils import load_gii, parse_lut
+        from yabplot.mesh import map_values_to_surface
+        pv.OFF_SCREEN = True
+        self._pv = pv
+        self._map = map_values_to_surface
+        self.nan_color = nan_color
+        self.sub_alpha = sub_alpha
+
+        cache = Path(atlas_cache)
+        lh_path, _ = get_surface_paths("midthickness", "bmesh")   # fsLR32k; downloads once
+        self.lh_v, lh_f = load_gii(lh_path)
+        self.lh_faces = self._faces(lh_f)
+        self.tar_labels = np.loadtxt(str(cache / "cortical" / "atlas.csv"), dtype=int)
+        self.lut_ids, _, self.lut_names, _ = parse_lut(str(cache / "cortical" / "atlas.txt"))
+        # LH + cerebellar subcortical meshes (clean left view; RH would occlude).
+        self.sub_meshes = {Path(p).stem: pv.read(p)
+                           for p in sorted(glob.glob(str(cache / "subcortical" / "*.vtk")))
+                           if Path(p).stem.startswith("LH") or Path(p).stem.startswith("Cerebellar")}
+
+    @staticmethod
+    def _faces(f):
+        f = np.asarray(f)
+        n = f.shape[0]
+        return np.hstack([np.full((n, 1), 3, np.int64), f]).ravel()
+
+    def _camera(self, p, view, zoom):
+        p.reset_camera()
+        b = p.bounds
+        cx, cy, cz = 0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), 0.5 * (b[4] + b[5])
+        d = max(b[1] - b[0], b[3] - b[2], b[5] - b[4]) * 2.2
+        pos = {"left_lateral": (cx - d, cy, cz),   # LH lateral surface (camera at -x)
+               "left_medial":  (cx + d, cy, cz),   # LH medial wall (camera at +x)
+               "superior":     (cx, cy, cz + d),
+               "anterior":     (cx, cy + d, cz)}[view]
+        up = (0, 1, 0) if view == "superior" else (0, 0, 1)
+        p.camera_position = [pos, (cx, cy, cz), up]
+        p.camera.zoom(zoom)
+
+    def render(self, value_by_label, scope, *, vmin, vmax, cmap="viridis",
+               window=(800, 800), zoom=1.6, camera=None):
+        """Render one scope to an RGB screenshot (for ``imshow``)."""
+        view0, cortex_alpha, cortex_data, show_sub = self.SCOPE_CFG[scope]
+        view = camera or view0
+        pv = self._pv
+        p = pv.Plotter(off_screen=True, window_size=list(window))
+        p.set_background("white")
+        kw = dict(cmap=cmap, clim=(vmin, vmax), nan_color=self.nan_color, show_scalar_bar=False,
+                  smooth_shading=True, lighting=True, ambient=0.55, diffuse=0.45, specular=0.05)
+        lh = pv.PolyData(self.lh_v.astype(np.float32), self.lh_faces)
+        if cortex_data:
+            lh["Data"] = self._map(value_by_label, self.tar_labels, self.lut_ids,
+                                   self.lut_names)[:len(self.lh_v)].astype(np.float32)
+            p.add_mesh(lh, scalars="Data", opacity=cortex_alpha, **kw)
+        else:
+            p.add_mesh(lh, color=self.nan_color, opacity=cortex_alpha,
+                       smooth_shading=True, lighting=True)   # translucent context shell
+        if show_sub:
+            for name, raw in self.sub_meshes.items():
+                m = raw.copy()
+                m["Data"] = np.full(m.n_points, float(value_by_label.get(name, np.nan)), np.float32)
+                p.add_mesh(m, scalars="Data", opacity=self.sub_alpha, **kw)
+        self._camera(p, view, zoom)
+        return p.screenshot(return_img=True, transparent_background=False)
+
+
+def render_scope_row(renderer, scope, panels, gene, *, vmin, vmax, cmap="viridis",
+                     zoom=1.6, camera=None, export_dir=None, figsize=(16, 4)):
+    """One row of yabplot surface renders for ``scope``; optionally save the PNG."""
+    fig, axes = plt.subplots(1, len(panels), figsize=figsize)
+    for ax, (title, view, subject) in zip(axes, panels):
+        vbl = slice_value_dict(view, subject, gene)
+        ax.imshow(renderer.render(vbl, scope, vmin=vmin, vmax=vmax, cmap=cmap, zoom=zoom, camera=camera))
+        ax.set_title(title, fontsize=9)
+        ax.axis("off")
+    _shared_colorbar(fig, axes, vmin, vmax, cmap, f"{gene} — harmonized expression")
+    side = "medial" if scope == "joint" else "lateral"
+    fig.suptitle(f"{gene}: yabplot [{scope}] (left {side}) — shared scale", fontsize=11, y=1.06)
+    if export_dir:
+        out = Path(export_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        gtex_subject = panels[0][2]
+        fp = out / f"{scope}__{gene}__{gtex_subject}.png"
+        fig.savefig(fp, dpi=150, bbox_inches="tight")
+        print("saved", fp)
+    plt.show()
+    return fig

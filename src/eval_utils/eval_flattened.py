@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import ListedColormap, Normalize
 import numpy as np
 import pandas as pd
 
@@ -23,7 +23,7 @@ from .eval_samples import (
     _format_axis_labels,
     _resolve_tick_step,
 )
-from .eval_style import apply_tick_style, pretty_gtex_label
+from .eval_style import apply_tick_style, font_size, pretty_gtex_label
 
 
 GTEX_LORO_FLATTENED_GROUP_ORDER = [
@@ -301,6 +301,87 @@ def build_flattened_tensor_matrix(
     )
 
 
+def _soften_cmap(cmap, amount: float = 0.35):
+    """Lower-contrast version of `cmap`: blend its colors toward neutral grey by
+    `amount` (0 = unchanged, 1 = flat grey). Easier on the eye for dense heatmaps."""
+    amount = float(np.clip(amount, 0.0, 1.0))
+    base = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    cols = base(np.linspace(0.0, 1.0, 256))
+    grey = np.array([0.5, 0.5, 0.5, 1.0])
+    cols = (1.0 - amount) * cols + amount * grey
+    return ListedColormap(cols, name=f"{getattr(base, 'name', 'cmap')}_soft")
+
+
+def build_donor_median_flattened_matrix(
+    view: TensorView,
+    *,
+    groupby: str = "tissue",
+    title: str = "Donor median",
+    value_label: str = "Median expression",
+) -> FlattenedTensorMatrix:
+    """Collapse a view's subject axis to one (region x gene) median matrix.
+
+    Rows are regions in the view's own axis order (e.g. region_matched_superset),
+    one row per region; values are the across-donor median per region/gene
+    (observed cells only). No group reordering — the view region order is kept.
+    """
+    vals = np.asarray(view.values, dtype=np.float64)            # (S, R, G)
+    obs = np.asarray(view.observed_mask, dtype=bool)            # (S, R)
+    masked = np.where(obs[:, :, None], vals, np.nan)
+    with np.errstate(all="ignore"):
+        med = np.nanmedian(masked, axis=0)                     # (R, G)
+
+    regions = [str(r) for r in view.regions]
+    native_lookup = _native_gtex_region_lookup(view)
+    gb = str(groupby).strip().lower()
+    rows = []
+    for r_i, region in enumerate(regions):
+        native = native_lookup[region]
+        if gb in ("tissue", "gtex_region", "gtex_native_region", "native_region"):
+            group = native
+        elif gb in ("region", "parcel", "target_parcel"):
+            group = region
+        else:
+            raise ValueError("groupby must be 'tissue', 'gtex_native_region', 'region', or 'parcel'.")
+        rows.append(
+            {
+                "row": r_i,
+                "dataset": str(view.dataset),
+                "subject": "donor_median",
+                "subject_label": "donor median",
+                "subject_index": 0,
+                "region": region,
+                "gtex_native_region": native,
+                "region_label": pretty_gtex_label(native),
+                "region_index": r_i,
+                "group": str(group),
+                "group_label": pretty_gtex_label(group),
+            }
+        )
+    meta = pd.DataFrame(rows)
+
+    # Contiguous group slices preserving region order (no reordering).
+    group_slices: dict[str, slice] = {}
+    seq = meta["group"].tolist()
+    start = 0
+    for i in range(1, len(seq) + 1):
+        if i == len(seq) or seq[i] != seq[start]:
+            group_slices[str(seq[start])] = slice(start, i)
+            start = i
+
+    return FlattenedTensorMatrix(
+        X=med,
+        row_metadata=meta,
+        genes=[str(g) for g in view.genes],
+        title=str(title),
+        dataset=str(view.dataset),
+        stage=str(view.pipeline_stage or "median"),
+        groupby=str(groupby),
+        group_slices=group_slices,
+        value_label=str(value_label),
+    )
+
+
 def _robust_vrange(mats: Sequence[np.ndarray], q: tuple[float, float] = (2.0, 98.0)) -> tuple[float, float]:
     values = np.concatenate([np.asarray(m, dtype=np.float64).ravel() for m in mats])
     values = values[np.isfinite(values)]
@@ -353,9 +434,23 @@ def _draw_group_blocks(
     *,
     show_group_labels: bool,
     show_group_separators: bool,
+    show_region_separators: bool,
+    region_separator_linewidth: float,
+    region_separator_color: str,
+    region_separator_alpha: float,
     group_label_x: float,
     group_label_fontsize: int | float,
 ) -> None:
+    if show_region_separators and "region" in matrix.row_metadata.columns:
+        regions = matrix.row_metadata["region"].tolist()
+        for row in range(1, len(regions)):
+            if regions[row] != regions[row - 1]:
+                ax.axhline(
+                    row - 0.5,
+                    color=region_separator_color,
+                    linewidth=region_separator_linewidth,
+                    alpha=region_separator_alpha,
+                )
     for group, slc in matrix.group_slices.items():
         if show_group_separators and slc.start > 0:
             ax.axhline(slc.start - 0.5, color="white", linewidth=1.2)
@@ -390,9 +485,17 @@ def plot_flattened_tensor_matrix(
     show_sample_ticklabels: bool = True,
     show_group_labels: bool = True,
     show_group_separators: bool = True,
+    show_region_separators: bool = False,
+    region_separator_linewidth: float = 0.3,
+    region_separator_color: str = "#808080",
+    region_separator_alpha: float = 0.45,
     show_ylabel: bool = False,
     group_label_x: float = -0.08,
     group_label_fontsize: int | float = 8,
+    font_scale: float = 1.0,
+    cbar_font_scale: float = 1.0,
+    border_linewidth: float | None = None,
+    border_color: str = "black",
     colorbar: bool = True,
 ) -> tuple[plt.Figure, plt.Axes]:
     """Plot one flattened subject-region x gene matrix."""
@@ -400,6 +503,11 @@ def plot_flattened_tensor_matrix(
         fig, ax = plt.subplots(figsize=(10.0, 7.0), constrained_layout=True)
     else:
         fig = ax.figure
+    title_fs = font_size("l") * font_scale
+    label_fs = font_size("m") * font_scale
+    tick_fs = font_size("s") * font_scale
+    cbar_label_fs = label_fs * cbar_font_scale
+    cbar_tick_fs = tick_fs * cbar_font_scale
     if vmin is None or vmax is None:
         rvmin, rvmax = _robust_vrange([matrix.X])
         vmin = rvmin if vmin is None else vmin
@@ -411,9 +519,9 @@ def plot_flattened_tensor_matrix(
         cmap=cmap,
         norm=Normalize(vmin=float(vmin), vmax=float(vmax)),
     )
-    ax.set_title(matrix.title if title is None else title)
-    ax.set_xlabel(matrix.x_label)
-    ax.set_ylabel(matrix.y_label if show_ylabel else "")
+    ax.set_title(matrix.title if title is None else title, fontsize=title_fs)
+    ax.set_xlabel(matrix.x_label, fontsize=label_fs)
+    ax.set_ylabel(matrix.y_label if show_ylabel else "", fontsize=label_fs)
     _apply_matrix_ticks(
         ax,
         matrix,
@@ -428,14 +536,24 @@ def plot_flattened_tensor_matrix(
         matrix,
         show_group_labels=show_group_labels,
         show_group_separators=show_group_separators,
+        show_region_separators=show_region_separators,
+        region_separator_linewidth=region_separator_linewidth,
+        region_separator_color=region_separator_color,
+        region_separator_alpha=region_separator_alpha,
         group_label_x=group_label_x,
-        group_label_fontsize=group_label_fontsize,
+        group_label_fontsize=group_label_fontsize * font_scale,
     )
-    apply_tick_style(ax)
+    apply_tick_style(ax, label_fontsize=tick_fs)
     ax.grid(False)  # imshow heatmap — suppress any style-inherited gridlines
+    if border_linewidth is not None:
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color(border_color)
+            spine.set_linewidth(border_linewidth)
     if colorbar:
         cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-        cbar.set_label(matrix.value_label)
+        cbar.set_label(matrix.value_label, fontsize=cbar_label_fs)
+        cbar.ax.tick_params(labelsize=cbar_tick_fs)
     return fig, ax
 
 
@@ -456,9 +574,11 @@ def plot_flattened_tensor_pair(
     show_sample_ticklabels: bool = True,
     show_group_labels: bool = True,
     show_group_separators: bool = True,
+    show_region_separators: bool = False,
     show_ylabel: bool = False,
     group_label_x: float = -0.08,
     group_label_fontsize: int | float = 8,
+    font_scale: float = 1.0,
     dpi: float | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot aligned truth/reconstruction flattened matrices side by side."""
@@ -485,24 +605,29 @@ def plot_flattened_tensor_pair(
             show_sample_ticklabels=show_sample_ticklabels,
             show_group_labels=show_group_labels,
             show_group_separators=show_group_separators,
+            show_region_separators=show_region_separators,
             show_ylabel=show_ylabel and col == 0,
             group_label_x=group_label_x,
             group_label_fontsize=group_label_fontsize,
+            font_scale=font_scale,
             colorbar=False,
         )
     if vmin is None or vmax is None:
         vmin, vmax = _robust_vrange([truth.X, recon.X])
     sm = plt.cm.ScalarMappable(norm=Normalize(vmin=float(vmin), vmax=float(vmax)), cmap=cmap)
     cbar = fig.colorbar(sm, ax=axes, fraction=0.025, pad=0.02)
-    cbar.set_label(truth.value_label)
+    cbar.set_label(truth.value_label, fontsize=font_size("m") * font_scale)
+    cbar.ax.tick_params(labelsize=font_size("s") * font_scale)
     if suptitle:
-        fig.suptitle(suptitle, y=1.02)
+        fig.suptitle(suptitle, y=1.02, fontsize=font_size("l") * font_scale)
     return fig, axes
 
 
 def plot_flattened_tensor_matrices(
     matrices: Sequence[FlattenedTensorMatrix],
     *,
+    standalone_matrices: Sequence[FlattenedTensorMatrix] = (),
+    standalone_first: bool = False,
     ncols: int = 4,
     figsize: tuple[float, float] = (18.0, 7.5),
     cmap: str = "viridis",
@@ -517,66 +642,104 @@ def plot_flattened_tensor_matrices(
     show_sample_ticklabels: bool = True,
     show_group_labels: bool = True,
     show_group_separators: bool = True,
+    show_region_separators: bool = False,
+    region_separator_linewidth: float = 0.3,
+    region_separator_color: str = "#808080",
+    region_separator_alpha: float = 0.45,
+    soften: bool = False,
+    soften_amount: float = 0.35,
     show_ylabel: bool = False,
     group_label_x: float = -0.08,
     group_label_fontsize: int | float = 8,
+    font_scale: float = 1.0,
+    cbar_font_scale: float = 1.0,
+    border_linewidth: float | None = None,
+    border_color: str = "black",
     dpi: float | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
-    """Plot multiple aligned flattened matrices with one optional shared scale."""
+    """Plot aligned flattened matrices sharing one color scale, plus optional
+    `standalone_matrices` appended as extra panels — each on its own scale with
+    its own colorbar (use for views whose rows/scale don't align, e.g. raw
+    pre-ComBat GTEx alongside harmonized truth/recon).
+    """
     matrices = list(matrices)
+    standalone = list(standalone_matrices)
     if not matrices:
         raise ValueError("matrices must contain at least one FlattenedTensorMatrix.")
     ref = matrices[0]
     for matrix in matrices[1:]:
         if matrix.X.shape != ref.X.shape or matrix.genes != ref.genes:
-            raise ValueError("all matrices must be aligned and share the same gene axis.")
+            raise ValueError("all aligned matrices must share shape and gene axis.")
     if shared_color_scale:
         rvmin, rvmax = _robust_vrange([m.X for m in matrices])
         vmin = rvmin if vmin is None else vmin
         vmax = rvmax if vmax is None else vmax
 
+    cmap = _soften_cmap(cmap, soften_amount) if soften else cmap
+
+    # (matrix, is_standalone) in render order; standalone panels can lead or trail.
+    aligned_panels = [(m, False) for m in matrices]
+    standalone_panels = [(m, True) for m in standalone]
+    ordered = standalone_panels + aligned_panels if standalone_first else aligned_panels + standalone_panels
     ncols = max(1, int(ncols))
-    nrows = int(np.ceil(len(matrices) / ncols))
+    nrows = int(np.ceil(len(ordered) / ncols))
+    # Standalone panels carry their own row count / scale, so don't share axes.
+    share = not standalone
     fig, axes = plt.subplots(
         nrows,
         ncols,
         figsize=figsize,
         constrained_layout=True,
-        sharex=True,
-        sharey=True,
+        sharex=share,
+        sharey=share,
     )
     if dpi is not None:
         fig.set_dpi(float(dpi))
     axes_arr = np.atleast_1d(axes).ravel()
-    for col, (ax, matrix) in enumerate(zip(axes_arr, matrices)):
+    common = dict(
+        cmap=cmap,
+        gene_tick_step=gene_tick_step,
+        sample_tick_step=sample_tick_step,
+        gene_label_mode=gene_label_mode,
+        show_gene_ticklabels=show_gene_ticklabels,
+        show_sample_ticklabels=show_sample_ticklabels,
+        show_group_labels=show_group_labels,
+        show_group_separators=show_group_separators,
+        show_region_separators=show_region_separators,
+        region_separator_linewidth=region_separator_linewidth,
+        region_separator_color=region_separator_color,
+        region_separator_alpha=region_separator_alpha,
+        group_label_x=group_label_x,
+        group_label_fontsize=group_label_fontsize,
+        font_scale=font_scale,
+        cbar_font_scale=cbar_font_scale,
+        border_linewidth=border_linewidth,
+        border_color=border_color,
+    )
+    aligned_axes = []
+    for col, (ax, (matrix, is_standalone)) in enumerate(zip(axes_arr, ordered)):
+        if not is_standalone:
+            aligned_axes.append(ax)
         plot_flattened_tensor_matrix(
             matrix,
             ax=ax,
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            gene_tick_step=gene_tick_step,
-            sample_tick_step=sample_tick_step,
-            gene_label_mode=gene_label_mode,
-            show_gene_ticklabels=show_gene_ticklabels,
-            show_sample_ticklabels=show_sample_ticklabels,
-            show_group_labels=show_group_labels,
-            show_group_separators=show_group_separators,
+            vmin=None if is_standalone else vmin,
+            vmax=None if is_standalone else vmax,
             show_ylabel=show_ylabel and (col % ncols == 0),
-            group_label_x=group_label_x,
-            group_label_fontsize=group_label_fontsize,
-            colorbar=False,
+            colorbar=is_standalone,  # standalone gets its own cbar; aligned share one
+            **common,
         )
-    for ax in axes_arr[len(matrices):]:
+    for ax in axes_arr[len(ordered):]:
         ax.set_visible(False)
     if vmin is None or vmax is None:
         vmin, vmax = _robust_vrange([m.X for m in matrices])
     sm = plt.cm.ScalarMappable(norm=Normalize(vmin=float(vmin), vmax=float(vmax)), cmap=cmap)
-    cbar = fig.colorbar(sm, ax=axes_arr[: len(matrices)], fraction=0.025, pad=0.02)
-    cbar.set_label(ref.value_label)
+    cbar = fig.colorbar(sm, ax=aligned_axes, fraction=0.025, pad=0.02)
+    cbar.set_label(ref.value_label, fontsize=font_size("m") * font_scale * cbar_font_scale)
+    cbar.ax.tick_params(labelsize=font_size("s") * font_scale * cbar_font_scale)
     if suptitle:
-        fig.suptitle(suptitle, y=1.02)
-    return fig, axes_arr[: len(matrices)]
+        fig.suptitle(suptitle, y=1.02, fontsize=font_size("l") * font_scale)
+    return fig, axes_arr[: len(ordered)]
 
 
 def _pearson_1d(a: np.ndarray, b: np.ndarray) -> float:

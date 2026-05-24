@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(/usr/bin/python3:*)",
+      "Bash(python:*)",
+      "Bash(cd:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(sed:*)",
+      "Bash(echo:*)",
+      "Bash(diff:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": []
+  }
+}
