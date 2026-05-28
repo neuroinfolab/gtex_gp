@@ -32,10 +32,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-comp-target", type=int, default=SubjectCacheConfig.n_comp_target)
     p.add_argument("--dlam-strategy", default=SubjectCacheConfig.dlam_strategy)
     p.add_argument("--dlam-spatial-method", choices=["rbf", "gp"], default=SubjectCacheConfig.dlam_spatial_method)
+    p.add_argument("--anchor-distance-shrink", default=str(SubjectCacheConfig.anchor_distance_shrink).lower())
+    p.add_argument("--anchor-distance-d0", type=float, default=SubjectCacheConfig.anchor_distance_d0)
+    p.add_argument("--anchor-distance-tau", type=float, default=SubjectCacheConfig.anchor_distance_tau)
     p.add_argument("--ridge-alpha-bridge", type=float, default=SubjectCacheConfig.ridge_alpha_bridge)
     p.add_argument("--rbf-smoothing", type=float, default=SubjectCacheConfig.rbf_smoothing)
     p.add_argument("--gp-length-scale", type=float, default=SubjectCacheConfig.gp_length_scale)
     p.add_argument("--gp-noise", type=float, default=SubjectCacheConfig.gp_noise)
+    p.add_argument("--gp-optimize", default=str(SubjectCacheConfig.gp_optimize).lower())
+    p.add_argument("--gp-n-restarts", type=int, default=SubjectCacheConfig.gp_n_restarts)
+    # t_prior_residual interpolator knobs (gp-vs-rbf sweeps). The atlas-scale floor
+    # is intentionally NOT exposed: it stays a code-level default (True).
+    p.add_argument("--t-prior-interp", choices=["imq", "gaussian", "tps", "gp"], default=SubjectCacheConfig.t_prior_interp)
+    p.add_argument("--t-prior-length-scale", type=float, default=SubjectCacheConfig.t_prior_length_scale)
+    p.add_argument("--t-prior-gp-noise", type=float, default=SubjectCacheConfig.t_prior_gp_noise)
+    p.add_argument("--t-prior-gp-optimize", default=str(SubjectCacheConfig.t_prior_gp_optimize).lower())
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
     p.add_argument("--drop-macro-system-covariate", default=str(SubjectCacheConfig.drop_macro_system_covariate).lower())
@@ -86,10 +97,20 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         n_comp_target=int(a.n_comp_target),
         dlam_strategy=str(a.dlam_strategy),
         dlam_spatial_method=str(a.dlam_spatial_method).lower(),
+        anchor_distance_shrink=_parse_bool(a.anchor_distance_shrink),
+        anchor_distance_d0=float(a.anchor_distance_d0),
+        anchor_distance_tau=float(a.anchor_distance_tau),
         ridge_alpha_bridge=float(a.ridge_alpha_bridge),
         rbf_smoothing=float(a.rbf_smoothing),
         gp_length_scale=float(a.gp_length_scale),
         gp_noise=float(a.gp_noise),
+        gp_optimize=_parse_bool(a.gp_optimize),
+        gp_n_restarts=int(a.gp_n_restarts),
+        t_prior_interp=str(a.t_prior_interp).lower(),
+        t_prior_length_scale=float(a.t_prior_length_scale),
+        t_prior_gp_noise=float(a.t_prior_gp_noise),
+        t_prior_gp_optimize=_parse_bool(a.t_prior_gp_optimize),
+        # t_prior_atlas_scale_floor deliberately omitted: default True, code-only.
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
         drop_macro_system_covariate=_parse_bool(a.drop_macro_system_covariate),

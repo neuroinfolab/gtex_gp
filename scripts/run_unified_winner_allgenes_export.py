@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from src import io as io_utils
 from src.harmonize import fit_harmonizer
 from src.models.unified_generative import UnifiedGenerativeConfig, fit_global_atlas_unified, infer_subject_unified
+from src.spatial.model_coords import model_spatial_coords
 from src.preprocess import (
     add_sample_groups,
     add_target_meta,
@@ -122,6 +123,7 @@ def main() -> None:
     gtex_h = harmonizer.transform(gtex_raw, "GTEX")
 
     coords_full = target_meta[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)
+    coords_model_full = model_spatial_coords(coords_full, fold_hemispheres=True)
     ahba_h_full, _ = build_region_matrix(ahba_h, genes_all, target_meta, agg="mean")
 
     ucfg = UnifiedGenerativeConfig(
@@ -133,6 +135,8 @@ def main() -> None:
         lambda_cal_b=10.0,
         gp_length_scale=25.0,
         gp_noise=1e-3,
+        gp_optimize=True,
+        gp_n_restarts=0,
         robust_loss=str(winner_cfg.get("robust", "student_t")),
         heteroscedastic=str(winner_cfg.get("hetero", "none")).lower() != "none",
         calibration_mode=str(winner_cfg.get("cal", "hier_affine_map")),
@@ -143,7 +147,7 @@ def main() -> None:
         unc_tau=0.2,
         random_state=int(args.seed),
     )
-    atlas = fit_global_atlas_unified(ahba_h_full, coords_full, ucfg)
+    atlas = fit_global_atlas_unified(ahba_h_full, coords_model_full, ucfg)
 
     # Build observed parcel mask per subject from source GTEx rows.
     observed_map = gtex_raw.groupby("subject")["parcel_idx"].apply(lambda s: set(int(x) for x in s.unique())).to_dict()

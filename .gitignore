@@ -33,3 +33,6 @@ context_packages/*
 # Notebook caches
 notebooks/cache/
 notebooks/results_*
+# LaTeX build artifacts
+*.log
+*.synctex.gz

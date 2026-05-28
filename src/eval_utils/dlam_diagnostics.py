@@ -22,8 +22,8 @@ from src.eval_utils.results_eda import EDAConfig, select_subject_by_model, set_a
 from src.workflows.loro_cache import SubjectCacheConfig, load_dataset
 from src.harmonize import fit_harmonizer
 from src.latent.basis_maps import apply_linear, apply_scores, fit_basis_map
-from src.latent.pls import fit_subject_pls
-from src.models.baseline_pipeline import run_subject
+from src.latent.pls import fit_subject_pls, project_pls_y_scores
+from src.models.baseline_pipeline import _fit_spatial, _pls_spatial_coords, constrained_nearest_index, fit_u_to_t_bridge, run_subject
 from src.preprocess import build_region_matrix, build_subject_observed_matrices
 from src import io as io_utils
 
@@ -40,6 +40,13 @@ class DlamDiagnosticsConfig:
     gene_scope: str = "allgenes"
     min_observed_parcels: int = 5
     combat_use_covariates: bool = True
+    drop_macro_system_covariate: bool = False
+    atlas_agg: str = "mean"
+    gtex_rep_mode: str = "centroid"
+    gtex_hemi_mode: str = "mirror_left"
+    matching_policy: str = "centroids_and_volumes"
+    matching_policy_hemi_mode: str = "force_left"
+    collapse_cerebellum: bool = False
 
     # Subject ranking cache dir mapping (for median/best/worst subject selection).
     dlam_cache_dirname: str = "dlam"
@@ -49,11 +56,22 @@ class DlamDiagnosticsConfig:
     ridge_alpha_bridge: float = 1e-2
     rbf_smoothing: float = 0.10
     gp_length_scale: float = 25.0
+    gp_noise: float = 1e-3
+    gp_jitter: float = 1e-6
+    gp_optimize: bool = True
+    gp_n_restarts: int = 0
     seed: int = 123
     c_min: int = 4
     basis_model: str = "affine_gl3"
     strategy: str = "constrained_anchor"
     spatial_method: str = "rbf"
+    anchor_distance_shrink: bool = False
+    anchor_distance_d0: float = 30.0
+    anchor_distance_tau: float = 8.0
+    t_prior_interp: str = "imq"
+    t_prior_length_scale: float = 25.0
+    t_prior_gp_noise: float = 1e-2
+    t_prior_gp_optimize: bool = False
     diagnostics_cache_root: str = "out/dlam_diagnostics"
     use_diagnostics_cache: bool = True
     write_diagnostics_cache: bool = True
@@ -86,6 +104,7 @@ class DlamSubjectDiagnostics:
     t_ref_obs: np.ndarray
     t_prime_obs: np.ndarray
     u_prime_obs: np.ndarray
+    t_full_prime: np.ndarray
 
     basis_model: str
     basis_m: np.ndarray
@@ -122,6 +141,7 @@ class _FoldFitPayload:
     t_ref_obs: np.ndarray
     t_prime_obs: np.ndarray
     u_prime_obs: np.ndarray
+    t_full_prime: np.ndarray
 
     basis_model: str
     basis_m: np.ndarray
@@ -164,10 +184,23 @@ def _subject_cache_cfg(cfg: DlamDiagnosticsConfig) -> SubjectCacheConfig:
         gene_scope=cfg.gene_scope,
         min_observed_parcels=cfg.min_observed_parcels,
         combat_use_covariates=cfg.combat_use_covariates,
+        drop_macro_system_covariate=cfg.drop_macro_system_covariate,
+        atlas_agg=cfg.atlas_agg,
+        gtex_rep_mode=cfg.gtex_rep_mode,
+        gtex_hemi_mode=cfg.gtex_hemi_mode,
+        matching_policy=cfg.matching_policy,
+        matching_policy_hemi_mode=cfg.matching_policy_hemi_mode,
+        collapse_cerebellum=cfg.collapse_cerebellum,
         n_comp_target=cfg.n_comp_target,
         ridge_alpha_bridge=cfg.ridge_alpha_bridge,
         rbf_smoothing=cfg.rbf_smoothing,
         gp_length_scale=cfg.gp_length_scale,
+        gp_noise=cfg.gp_noise,
+        gp_optimize=cfg.gp_optimize,
+        gp_n_restarts=cfg.gp_n_restarts,
+        anchor_distance_shrink=cfg.anchor_distance_shrink,
+        anchor_distance_d0=cfg.anchor_distance_d0,
+        anchor_distance_tau=cfg.anchor_distance_tau,
         seed=cfg.seed,
         c_min=cfg.c_min,
         use_cache=True,
@@ -190,15 +223,29 @@ def _cfg_fingerprint(cfg: DlamDiagnosticsConfig) -> Dict[str, object]:
         "gene_scope": str(cfg.gene_scope),
         "min_observed_parcels": int(cfg.min_observed_parcels),
         "combat_use_covariates": bool(cfg.combat_use_covariates),
+        "drop_macro_system_covariate": bool(cfg.drop_macro_system_covariate),
+        "atlas_agg": str(cfg.atlas_agg),
+        "gtex_rep_mode": str(cfg.gtex_rep_mode),
+        "gtex_hemi_mode": str(cfg.gtex_hemi_mode),
+        "matching_policy": str(cfg.matching_policy),
+        "matching_policy_hemi_mode": str(cfg.matching_policy_hemi_mode),
+        "collapse_cerebellum": bool(cfg.collapse_cerebellum),
         "n_comp_target": int(cfg.n_comp_target),
         "ridge_alpha_bridge": float(cfg.ridge_alpha_bridge),
         "rbf_smoothing": float(cfg.rbf_smoothing),
         "gp_length_scale": float(cfg.gp_length_scale),
+        "gp_noise": float(cfg.gp_noise),
+        "gp_jitter": float(cfg.gp_jitter),
+        "gp_optimize": bool(cfg.gp_optimize),
+        "gp_n_restarts": int(cfg.gp_n_restarts),
         "seed": int(cfg.seed),
         "c_min": int(cfg.c_min),
         "basis_model": str(cfg.basis_model),
         "strategy": str(cfg.strategy),
         "spatial_method": str(cfg.spatial_method),
+        "anchor_distance_shrink": bool(cfg.anchor_distance_shrink),
+        "anchor_distance_d0": float(cfg.anchor_distance_d0),
+        "anchor_distance_tau": float(cfg.anchor_distance_tau),
     }
 
 
@@ -277,6 +324,12 @@ def _resolve_subject(cfg: DlamDiagnosticsConfig, subject_id: Optional[str], subj
         gene_scope=cfg.gene_scope,
         min_observed_parcels=cfg.min_observed_parcels,
         combat_use_covariates=cfg.combat_use_covariates,
+        drop_macro_system_covariate=cfg.drop_macro_system_covariate,
+        gtex_rep_mode=cfg.gtex_rep_mode,
+        gtex_hemi_mode=cfg.gtex_hemi_mode,
+        matching_policy=cfg.matching_policy,
+        matching_policy_hemi_mode=cfg.matching_policy_hemi_mode,
+        collapse_cerebellum=cfg.collapse_cerebellum,
         dlam_cache_dirname=cfg.dlam_cache_dirname,
     )
     return str(select_subject_by_model(eda_cfg, mode=str(subject_mode), metric="pearson_r", model="dlam"))
@@ -319,19 +372,23 @@ def _fit_dlam_fold_payload(
         train_mask = ~((gtex_raw["subject"].astype(str) == sid) & (gtex_raw["parcel_idx"].astype(np.int32) == int(hold_parcel)))
     gtex_train = gtex_raw[train_mask].copy()
 
-    hcfg = SimpleNamespace(combat_use_covariates=bool(cfg.combat_use_covariates))
+    atlas_agg = str(cfg.atlas_agg).lower()
+    hcfg = SimpleNamespace(
+        combat_use_covariates=bool(cfg.combat_use_covariates),
+        drop_macro_system_covariate=bool(cfg.drop_macro_system_covariate),
+    )
     harm = fit_harmonizer(ahba_raw, gtex_train, genes, method="combat", cfg=hcfg)
     ahba_h = harm.transform(ahba_raw, "AHBA")
     gtex_h = harm.transform(gtex_train, "GTEX")
-    ahba_h_full, _ = build_region_matrix(ahba_h, genes, target_meta, agg="mean")
+    ahba_h_full, _ = build_region_matrix(ahba_h, genes, target_meta, agg=atlas_agg)
 
     subj_h = gtex_h[gtex_h["subject"].astype(str) == sid].copy()
     subj_raw = gtex_train[gtex_train["subject"].astype(str) == sid].copy()
-    train_idx, xh, xr = build_subject_observed_matrices(subj_h, subj_raw, genes)
+    train_idx, xh, xr = build_subject_observed_matrices(subj_h, subj_raw, genes, agg=atlas_agg)
     if int(len(train_idx)) < 2:
         raise RuntimeError(f"Insufficient training parcels for subject {sid}, hold={hold_parcel}")
 
-    y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
+    y_full = _pls_spatial_coords(coords_full)
     y_obs = y_full[train_idx, :]
 
     ahba_pls = fit_subject_pls(ahba_h_full, y_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
@@ -347,7 +404,6 @@ def _fit_dlam_fold_payload(
     t_prime_obs = apply_scores(t_obs, bmap)
     u_prime_obs = apply_linear(u_obs, bmap)
 
-    atlas_bundle = {"ahba_h_full": ahba_h_full, "ahba_ref_T": np.asarray(ahba_pls["T"], dtype=np.float64)}
     method_bundle = {
         "harmonizer": harm,
         "basis_model": str(cfg.basis_model),
@@ -357,11 +413,63 @@ def _fit_dlam_fold_payload(
         "ridge_alpha_bridge": float(cfg.ridge_alpha_bridge),
         "rbf_smoothing": float(cfg.rbf_smoothing),
         "gp_rbf_length": float(cfg.gp_length_scale),
+        "gp_noise": float(cfg.gp_noise),
+        "gp_jitter": float(cfg.gp_jitter),
+        "gp_optimize": bool(cfg.gp_optimize),
+        "gp_n_restarts": int(cfg.gp_n_restarts),
+        "t_prior_interp": str(getattr(cfg, "t_prior_interp", "imq")),
+        "t_prior_length_scale": float(getattr(cfg, "t_prior_length_scale", 25.0)),
+        "t_prior_gp_noise": float(getattr(cfg, "t_prior_gp_noise", 1e-2)),
+        "t_prior_gp_optimize": bool(getattr(cfg, "t_prior_gp_optimize", False)),
+        "t_prior_atlas_scale_floor": bool(getattr(cfg, "t_prior_atlas_scale_floor", True)),
         "seed": int(cfg.seed),
         "c_min": int(cfg.c_min),
         "distance_d0": 45.0,
         "distance_tau": 10.0,
+        "anchor_distance_shrink": bool(cfg.anchor_distance_shrink),
+        "anchor_distance_d0": float(cfg.anchor_distance_d0),
+        "anchor_distance_tau": float(cfg.anchor_distance_tau),
         "uncertainty_shrink": False,
+    }
+
+    strategy = str(cfg.strategy)
+    if strategy == "pls_linear_projection":
+        u_full = project_pls_y_scores(subj_pls, y_full)
+        u_full_prime = apply_linear(u_full, bmap)
+        u_std_full = None
+    elif strategy == "constrained_anchor":
+        u_full_prime = np.zeros((coords_full.shape[0], u_prime_obs.shape[1]), dtype=np.float64)
+        pos_map = {int(p): i for i, p in enumerate(train_idx.tolist())}
+        for r in range(coords_full.shape[0]):
+            j = constrained_nearest_index(r, train_idx, coords_full, target_meta)
+            u_full_prime[r, :] = u_prime_obs[pos_map[j], :]
+        u_std_full = None
+    else:
+        mb = dict(method_bundle)
+        mb["coords_full"] = y_full
+        if strategy == "gp_uncertainty":
+            mb["spatial_method"] = "gp"
+        u_full_prime, u_std_full = _fit_spatial(u_prime_obs, y_obs, mb)
+
+    if strategy == "gp_uncertainty" and u_std_full is not None:
+        mb2 = dict(method_bundle)
+        mb2["coords_full"] = y_obs
+        u_obs_pred, u_obs_std = _fit_spatial(u_prime_obs, y_obs, {**mb2, "spatial_method": "gp"})
+        sw = 1.0 / (1.0 + np.mean(u_obs_std**2, axis=1))
+        bridge = fit_u_to_t_bridge(u_obs_pred, t_prime_obs, alpha=float(cfg.ridge_alpha_bridge), sample_weight=sw)
+        t_pred = u_full_prime @ bridge["M"] + bridge["b"]
+        u = np.mean(u_std_full, axis=1)
+        u0 = float(np.median(u[train_idx])) + 1e-6
+        w = u / (u + u0)
+        t_full_prime = (1.0 - w[:, None]) * t_pred + w[:, None] * t_ref_full
+    else:
+        bridge = fit_u_to_t_bridge(u_prime_obs, t_prime_obs, alpha=float(cfg.ridge_alpha_bridge))
+        t_full_prime = u_full_prime @ bridge["M"] + bridge["b"]
+
+    atlas_bundle = {
+        "ahba_h_full": ahba_h_full,
+        "ahba_ref_T": np.asarray(ahba_pls["T"], dtype=np.float64),
+        "ahba_ref_U": np.asarray(ahba_pls["U"], dtype=np.float64),
     }
     pred_out, _ = run_subject(
         {
@@ -393,7 +501,11 @@ def _fit_dlam_fold_payload(
         hold_rows = gtex_raw[(gtex_raw["subject"].astype(str) == sid) & (gtex_raw["parcel_idx"].astype(np.int32) == int(hold_parcel))].copy()
         if len(hold_rows):
             hold_h = harm.transform(hold_rows, "GTEX")
-            hold_truth_h = hold_h[genes].to_numpy(dtype=np.float64).mean(axis=0)
+            hold_truth_h = hold_h[genes].to_numpy(dtype=np.float64)
+            if atlas_agg == "median":
+                hold_truth_h = np.nanmedian(hold_truth_h, axis=0)
+            else:
+                hold_truth_h = np.nanmean(hold_truth_h, axis=0)
             hold_pred_h = np.asarray(pred_full_h[int(hold_parcel), :], dtype=np.float64)
             m = np.isfinite(hold_truth_h) & np.isfinite(hold_pred_h)
             hold_metrics = {
@@ -429,6 +541,7 @@ def _fit_dlam_fold_payload(
         t_ref_obs=np.asarray(t_ref_obs, dtype=np.float64),
         t_prime_obs=np.asarray(t_prime_obs, dtype=np.float64),
         u_prime_obs=np.asarray(u_prime_obs, dtype=np.float64),
+        t_full_prime=np.asarray(t_full_prime, dtype=np.float64),
         basis_model=str(bmap.model),
         basis_m=np.asarray(bmap.M, dtype=np.float64),
         basis_b=np.asarray(bmap.b, dtype=np.float64),
@@ -568,7 +681,7 @@ def fit_dlam_subject_diagnostics(
     if bool(cfg.use_diagnostics_cache) and pkl_cache.exists() and _cache_valid(meta_cache, key_payload):
         with open(pkl_cache, "rb") as f:
             obj = pickle.load(f)
-        if isinstance(obj, DlamSubjectDiagnostics) and hasattr(obj, "t_ref_full"):
+        if isinstance(obj, DlamSubjectDiagnostics) and hasattr(obj, "t_ref_full") and hasattr(obj, "t_full_prime"):
             # preserve freshly computed fold table when selector path was used
             if obj.fold_table is None and fold_table is not None:
                 obj.fold_table = fold_table
@@ -599,6 +712,7 @@ def fit_dlam_subject_diagnostics(
         t_ref_obs=payload.t_ref_obs,
         t_prime_obs=payload.t_prime_obs,
         u_prime_obs=payload.u_prime_obs,
+        t_full_prime=payload.t_full_prime,
         basis_model=payload.basis_model,
         basis_m=payload.basis_m,
         basis_b=payload.basis_b,

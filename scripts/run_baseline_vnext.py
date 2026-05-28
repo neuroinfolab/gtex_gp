@@ -34,6 +34,7 @@ from src.eval.loro import run_loro
 from src.harmonize import fit_harmonizer
 from src.latent.pls import fit_subject_pls
 from src.models.baseline_pipeline import run_subject
+from src.spatial.model_coords import model_spatial_coords, should_fold_hemispheres
 from src.preprocess import (
     add_sample_groups,
     add_target_meta,
@@ -57,11 +58,15 @@ class Config:
     ridge_alpha_bridge: float = 1e-2
     rbf_smoothing: float = 0.10
     gp_rbf_length: float = 25.0
+    gp_noise: float = 1e-3
+    gp_jitter: float = 1e-6
+    gp_optimize: bool = True
+    gp_n_restarts: int = 0
     seed: int = 123
     n_jobs: int = 1
     harmonization_models: str = "zscore_affine,robustz_affine,whiten_zca_affine,combat,hier_affine"
     basis_models: str = "o3,affine_gl3,o3_diagscale"
-    mitigation_strategies: str = "baseline,distance_shrink,constrained_anchor,piecewise_harmonization,gp_uncertainty,moe_basis"
+    mitigation_strategies: str = "baseline,reference_residual,distance_shrink,constrained_anchor,piecewise_harmonization,gp_uncertainty,moe_basis"
     spatial_methods: str = "rbf,gp"
     smoke_subjects: int = 0
     parity_tolerance: float = 0.01
@@ -96,6 +101,10 @@ def parse_args() -> Config:
     p.add_argument("--ridge-alpha-bridge", type=float, default=Config.ridge_alpha_bridge)
     p.add_argument("--rbf-smoothing", type=float, default=Config.rbf_smoothing)
     p.add_argument("--gp-rbf-length", type=float, default=Config.gp_rbf_length)
+    p.add_argument("--gp-noise", type=float, default=Config.gp_noise)
+    p.add_argument("--gp-jitter", type=float, default=Config.gp_jitter)
+    p.add_argument("--gp-optimize", type=lambda s: str(s).lower() in {"1", "true", "yes", "y"}, default=Config.gp_optimize)
+    p.add_argument("--gp-n-restarts", type=int, default=Config.gp_n_restarts)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--n-jobs", type=int, default=Config.n_jobs)
     p.add_argument("--harmonization-models", default=Config.harmonization_models)
@@ -286,7 +295,8 @@ def main() -> None:
     gtex_raw = add_sample_groups(gtex_raw, target_meta)
 
     coords_full = target_meta[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)
-    y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
+    fold_hemispheres = should_fold_hemispheres(cfg.gtex_hemi_mode, "default")
+    y_full = model_spatial_coords(coords_full, fold_hemispheres=fold_hemispheres)
 
     eligibility_df = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
     if cfg.smoke_subjects > 0:
@@ -340,6 +350,7 @@ def main() -> None:
                     ahba_h_full, _ = build_region_matrix(ahba_h, genes_hvg, target_meta, agg="mean")
                     ahba_pls = fit_subject_pls(ahba_h_full, y_full, n_comp_target=cfg.n_comp_target, adaptive=True)
                     ahba_ref_T = ahba_pls["T"]
+                    ahba_ref_U = ahba_pls["U"]
 
                     stack_h = []
                     calib_true = []
@@ -363,6 +374,7 @@ def main() -> None:
                         atlas_bundle = {
                             "ahba_h_full": ahba_h_full,
                             "ahba_ref_T": ahba_ref_T,
+                            "ahba_ref_U": ahba_ref_U,
                         }
                         method_bundle = {
                             "harmonizer": harmonizer,
@@ -373,8 +385,11 @@ def main() -> None:
                             "ridge_alpha_bridge": cfg.ridge_alpha_bridge,
                             "rbf_smoothing": cfg.rbf_smoothing,
                             "gp_rbf_length": cfg.gp_rbf_length,
+                            "gp_noise": getattr(cfg, "gp_noise", 1e-3),
+                            "gp_jitter": getattr(cfg, "gp_jitter", 1e-6),
                             "seed": cfg.seed,
                             "c_min": cfg.c_min,
+                            "fold_hemispheres": bool(fold_hemispheres),
                             "distance_d0": cfg.distance_d0,
                             "distance_tau": cfg.distance_tau,
                             "uncertainty_shrink": bool(st == "gp_uncertainty"),
@@ -410,6 +425,7 @@ def main() -> None:
                             ahba_h_full_fold, _ = build_region_matrix(ahba_h_fold, genes_hvg, target_meta, agg="mean")
                             ahba_pls_fold = fit_subject_pls(ahba_h_full_fold, y_full, n_comp_target=cfg.n_comp_target, adaptive=True)
                             ahba_ref_T_fold = ahba_pls_fold["T"]
+                            ahba_ref_U_fold = ahba_pls_fold["U"]
 
                             subj_h_fold = gtex_h_fold[gtex_h_fold["subject"] == sid].copy()
                             subj_raw_fold = gtex_train_fold[gtex_train_fold["subject"] == sid].copy()
@@ -427,7 +443,7 @@ def main() -> None:
                                 "coords_full": coords_full,
                                 "target_meta": target_meta,
                             }
-                            ab_fold = {"ahba_h_full": ahba_h_full_fold, "ahba_ref_T": ahba_ref_T_fold}
+                            ab_fold = {"ahba_h_full": ahba_h_full_fold, "ahba_ref_T": ahba_ref_T_fold, "ahba_ref_U": ahba_ref_U_fold}
                             mb_fold = dict(method_bundle)
                             mb_fold["harmonizer"] = fold_harm
 

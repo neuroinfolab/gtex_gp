@@ -30,6 +30,7 @@ from src.eval.diagnostics import compute_uncertainty_calibration, plot_uncertain
 from src.eval.metrics import aggregate_subject_metrics, metrics_from_vectors
 from src.harmonize import fit_harmonizer
 from src.models.unified_generative import UnifiedGenerativeConfig, fit_global_atlas_unified, infer_subject_unified
+from src.spatial.model_coords import model_spatial_coords
 from src.preprocess import (
     add_sample_groups,
     add_target_meta,
@@ -137,6 +138,7 @@ def run_allgenes_loro(subjects: list[str], genes: list[str], data_bundle: dict, 
     gtex_raw = data_bundle["gtex_raw"]
     target_meta = data_bundle["target_meta"]
     coords_full = data_bundle["coords_full"]
+    coords_model_full = model_spatial_coords(coords_full, fold_hemispheres=True)
 
     fold_rows = []
     summary_rows = []
@@ -161,6 +163,8 @@ def run_allgenes_loro(subjects: list[str], genes: list[str], data_bundle: dict, 
             lambda_cal_b=10.0,
             gp_length_scale=25.0,
             gp_noise=1e-3,
+            gp_optimize=True,
+            gp_n_restarts=0,
             robust_loss=str(winner_cfg.get("robust", "student_t")),
             heteroscedastic=str(winner_cfg.get("hetero", "none")).lower() != "none",
             calibration_mode=str(winner_cfg.get("cal", "hier_affine_map")),
@@ -171,7 +175,7 @@ def run_allgenes_loro(subjects: list[str], genes: list[str], data_bundle: dict, 
             unc_tau=0.2,
             random_state=cfg.seed,
         )
-        global_atlas = fit_global_atlas_unified(global_ahba_h_full, coords_full, ucfg)
+        global_atlas = fit_global_atlas_unified(global_ahba_h_full, coords_model_full, ucfg)
 
     for sid in subjects:
         sub_all = gtex_raw[gtex_raw["subject"] == sid].copy()
@@ -210,6 +214,8 @@ def run_allgenes_loro(subjects: list[str], genes: list[str], data_bundle: dict, 
                     lambda_cal_b=10.0,
                     gp_length_scale=25.0,
                     gp_noise=1e-3,
+                    gp_optimize=True,
+                    gp_n_restarts=0,
                     robust_loss=str(winner_cfg.get("robust", "student_t")),
                     heteroscedastic=str(winner_cfg.get("hetero", "none")).lower() != "none",
                     calibration_mode=str(winner_cfg.get("cal", "hier_affine_map")),
@@ -220,7 +226,7 @@ def run_allgenes_loro(subjects: list[str], genes: list[str], data_bundle: dict, 
                     unc_tau=0.2,
                     random_state=cfg.seed,
                 )
-                atlas = fit_global_atlas_unified(ahba_h_full, coords_full, ucfg)
+                atlas = fit_global_atlas_unified(ahba_h_full, coords_model_full, ucfg)
             else:
                 harm = global_harm
                 gtex_h = global_gtex_h
@@ -235,6 +241,8 @@ def run_allgenes_loro(subjects: list[str], genes: list[str], data_bundle: dict, 
                     lambda_cal_b=10.0,
                     gp_length_scale=25.0,
                     gp_noise=1e-3,
+                    gp_optimize=True,
+                    gp_n_restarts=0,
                     robust_loss=str(winner_cfg.get("robust", "student_t")),
                     heteroscedastic=str(winner_cfg.get("hetero", "none")).lower() != "none",
                     calibration_mode=str(winner_cfg.get("cal", "hier_affine_map")),

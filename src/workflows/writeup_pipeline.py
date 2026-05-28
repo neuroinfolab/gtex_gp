@@ -25,6 +25,7 @@ from src.preprocess import (
     build_target_parcels,
     map_gtex_to_target,
 )
+from src.spatial.model_coords import model_spatial_coords, should_fold_hemispheres
 
 META_COLS = ["subject", "age", "sex", "dataset", "tissue_or_parcel", "coordinates"]
 DLAM_COMBO = "combat__affine_gl3__constrained_anchor__rbf"
@@ -246,7 +247,13 @@ def _shared_harmonized(bundle: DatasetBundle, cfg: Mapping[str, Any]) -> Dict[st
         gtex_sparse_h[p, :] = grp_h.loc[idx, bundle.genes_hvg].to_numpy(dtype=np.float64)
     gtex_sparse_raw[~bundle.global_obs_mask, :] = np.nan
     gtex_sparse_h[~bundle.global_obs_mask, :] = np.nan
-    y_full = np.c_[bundle.coords_full[:, 1], bundle.coords_full[:, 2], np.abs(bundle.coords_full[:, 0])]
+    y_full = model_spatial_coords(
+        bundle.coords_full,
+        fold_hemispheres=should_fold_hemispheres(
+            cfg.get("gtex_hemi_mode", "native"),
+            cfg.get("matching_policy_hemi_mode", "default"),
+        ),
+    )
     return {
         "harmonizer": harmonizer,
         "ahba_h": ahba_h,
@@ -449,7 +456,7 @@ def run_dlam(bundle: DatasetBundle, cfg: Mapping[str, Any]) -> ModelRunResult:
     shared = _shared_harmonized(bundle, cfg)
     ahba_h_full = shared["ahba_h_mat"]
     ahba_pls = fit_subject_pls(ahba_h_full, shared["y_full"], n_comp_target=int(cfg.get("n_comp_target", 3)), adaptive=True)
-    atlas_bundle = {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"]}
+    atlas_bundle = {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"], "ahba_ref_U": ahba_pls["U"]}
     method_bundle = {
         "harmonizer": shared["harmonizer"],
         "basis_model": str(cfg.get("dlam_basis_model", "affine_gl3")),
@@ -459,8 +466,16 @@ def run_dlam(bundle: DatasetBundle, cfg: Mapping[str, Any]) -> ModelRunResult:
         "ridge_alpha_bridge": float(cfg.get("ridge_alpha_bridge", 1e-2)),
         "rbf_smoothing": float(cfg.get("rbf_smoothing", 0.10)),
         "gp_rbf_length": float(cfg.get("gp_length_scale", 25.0)),
+        "gp_noise": float(cfg.get("gp_noise", 1e-3)),
+        "gp_jitter": float(cfg.get("gp_jitter", 1e-6)),
+        "gp_optimize": bool(cfg.get("gp_optimize", True)),
+        "gp_n_restarts": int(cfg.get("gp_n_restarts", 0)),
         "seed": int(cfg.get("seed", 123)),
         "c_min": int(cfg.get("c_min", 8)),
+        "fold_hemispheres": should_fold_hemispheres(
+            cfg.get("gtex_hemi_mode", "native"),
+            cfg.get("matching_policy_hemi_mode", "default"),
+        ),
         "distance_d0": 45.0,
         "distance_tau": 10.0,
         "uncertainty_shrink": False,
@@ -560,6 +575,9 @@ def run_plam(bundle: DatasetBundle, cfg: Mapping[str, Any]) -> ModelRunResult:
         lambda_cal_b=float(cfg.get("lambda_cal_b", 10.0)),
         gp_length_scale=float(cfg.get("gp_length_scale", 25.0)),
         gp_noise=float(cfg.get("gp_noise", 1e-3)),
+        gp_jitter=float(cfg.get("gp_jitter", 1e-6)),
+        gp_optimize=bool(cfg.get("gp_optimize", True)),
+        gp_n_restarts=int(cfg.get("gp_n_restarts", 0)),
         robust_loss=str(cfg.get("robust_loss", "student_t")),
         heteroscedastic=bool(cfg.get("heteroscedastic", True)),
         calibration_mode=str(cfg.get("calibration_mode", "hier_affine_map")),
@@ -570,7 +588,14 @@ def run_plam(bundle: DatasetBundle, cfg: Mapping[str, Any]) -> ModelRunResult:
         unc_tau=float(cfg.get("unc_tau", 0.2)),
         random_state=int(cfg.get("seed", 123)),
     )
-    atlas_model = fit_global_atlas_unified(shared["ahba_h_mat"], bundle.coords_full, ucfg)
+    coords_model_full = model_spatial_coords(
+        bundle.coords_full,
+        fold_hemispheres=should_fold_hemispheres(
+            cfg.get("gtex_hemi_mode", "native"),
+            cfg.get("matching_policy_hemi_mode", "default"),
+        ),
+    )
+    atlas_model = fit_global_atlas_unified(shared["ahba_h_mat"], coords_model_full, ucfg)
     subject_ids = bundle.eligible_subjects
     n_subj = len(subject_ids)
     n_parcels = len(bundle.target_meta)

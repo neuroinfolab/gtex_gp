@@ -30,6 +30,7 @@ from src.harmonize import fit_harmonizer
 from src.latent.pls import fit_subject_pls
 from src.models.baseline_pipeline import run_subject
 from src.models.unified_generative import UnifiedGenerativeConfig, fit_global_atlas_unified, infer_subject_unified
+from src.spatial.model_coords import model_spatial_coords
 from src.preprocess import (
     add_sample_groups,
     add_target_meta,
@@ -72,6 +73,8 @@ class Config:
     rbf_smoothing: float = 0.10
     gp_length_scale: float = 25.0
     gp_noise: float = 1e-3
+    gp_optimize: bool = True
+    gp_n_restarts: int = 0
     seed: int = 123
     smoke_subjects: int = 0
 
@@ -97,11 +100,14 @@ def parse_args() -> Config:
     p.add_argument("--rbf-smoothing", type=float, default=Config.rbf_smoothing)
     p.add_argument("--gp-length-scale", type=float, default=Config.gp_length_scale)
     p.add_argument("--gp-noise", type=float, default=Config.gp_noise)
+    p.add_argument("--gp-optimize", default=str(Config.gp_optimize).lower())
+    p.add_argument("--gp-n-restarts", type=int, default=Config.gp_n_restarts)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--smoke-subjects", type=int, default=Config.smoke_subjects)
     a = p.parse_args()
     d = vars(a)
     d["combat_use_covariates"] = _parse_bool(d["combat_use_covariates"])
+    d["gp_optimize"] = _parse_bool(d["gp_optimize"])
     return Config(**d)
 
 
@@ -554,7 +560,7 @@ def main() -> None:
     ahba_raw = add_sample_groups(ahba_raw, target_meta)
     gtex_raw = add_sample_groups(gtex_raw, target_meta)
     coords_full = target_meta[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)
-    y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
+    y_full = model_spatial_coords(coords_full, fold_hemispheres=True)
 
     elig = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
     subjects = elig[elig["eligible"]]["subject"].astype(str).tolist()
@@ -612,7 +618,7 @@ def main() -> None:
                         "coords_full": coords_full,
                         "target_meta": target_meta,
                     },
-                    {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"]},
+                    {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"], "ahba_ref_U": ahba_pls["U"]},
                     {
                         "harmonizer": harm,
                         "basis_model": "affine_gl3",
@@ -622,8 +628,12 @@ def main() -> None:
                         "ridge_alpha_bridge": cfg.ridge_alpha_bridge,
                         "rbf_smoothing": cfg.rbf_smoothing,
                         "gp_rbf_length": cfg.gp_length_scale,
+                        "gp_noise": cfg.gp_noise,
+                        "gp_optimize": bool(cfg.gp_optimize),
+                        "gp_n_restarts": int(cfg.gp_n_restarts),
                         "seed": cfg.seed,
                         "c_min": cfg.c_min,
+                        "fold_hemispheres": True,
                         "distance_d0": 45.0,
                         "distance_tau": 10.0,
                         "uncertainty_shrink": False,
@@ -646,13 +656,15 @@ def main() -> None:
                     lambda_cal_b=10.0,
                     gp_length_scale=cfg.gp_length_scale,
                     gp_noise=cfg.gp_noise,
+                    gp_optimize=bool(cfg.gp_optimize),
+                    gp_n_restarts=int(cfg.gp_n_restarts),
                     robust_loss="student_t",
                     heteroscedastic=True,
                     calibration_mode="hier_affine_map",
                     uncertainty_shrink=False,
                     random_state=cfg.seed,
                 )
-                atlas = fit_global_atlas_unified(ahba_h_full, coords_full, ucfg)
+                atlas = fit_global_atlas_unified(ahba_h_full, y_full, ucfg)
                 uni_res = infer_subject_unified(
                     {"subject": sid, "obs_idx": obs_idx_fold, "X_obs_h": xh_fold},
                     atlas,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from src.preprocess import (
     build_target_parcels,
     map_gtex_to_target,
 )
+from src.spatial.model_coords import model_spatial_coords, should_fold_hemispheres
 from src.spatial.parcel_matching import apply_gtex_ahba_matching_policy
 from src.workflows.writeup_pipeline import _resolve_optional_path, _source_signature
 
@@ -49,10 +51,21 @@ class SubjectCacheConfig:
     n_comp_target: int = 3
     dlam_strategy: str = "constrained_anchor"
     dlam_spatial_method: str = "rbf"
+    anchor_distance_shrink: bool = False
+    anchor_distance_d0: float = 30.0
+    anchor_distance_tau: float = 8.0
+    # t_prior_residual: residual interpolator over the subject-aligned atlas prior.
+    t_prior_interp: str = "imq"  # imq | gaussian | tps | gp
+    t_prior_length_scale: float = 25.0
+    t_prior_gp_noise: float = 1e-2
+    t_prior_gp_optimize: bool = False
+    t_prior_atlas_scale_floor: bool = True
     ridge_alpha_bridge: float = 1e-2
     rbf_smoothing: float = 0.10
     gp_length_scale: float = 25.0
     gp_noise: float = 1e-3
+    gp_optimize: bool = True
+    gp_n_restarts: int = 0
     seed: int = 123
     combat_use_covariates: bool = True
     drop_macro_system_covariate: bool = False
@@ -167,6 +180,17 @@ def _meta_path(npz_path: Path) -> Path:
 
 def _cfg_hash(cfg: SubjectCacheConfig, subject: str, model_name: str) -> str:
     payload = asdict(cfg).copy()
+    # t_prior_* knobs only influence the t_prior_residual strategy; drop them from
+    # the key otherwise so pre-existing (naive/plam/anchor) caches stay valid.
+    if str(cfg.dlam_strategy) != "t_prior_residual":
+        for key in (
+            "t_prior_interp",
+            "t_prior_length_scale",
+            "t_prior_gp_noise",
+            "t_prior_gp_optimize",
+            "t_prior_atlas_scale_floor",
+        ):
+            payload.pop(key, None)
     payload["subject"] = str(subject)
     payload["model_name"] = str(model_name)
     return io_utils.hash_config(payload)
@@ -215,6 +239,13 @@ def _agg_vector(df: pd.DataFrame, genes: List[str], agg: str) -> np.ndarray:
     raise ValueError(f"agg must be 'mean' or 'median', got {agg!r}")
 
 
+def _format_hms(elapsed_sec: float) -> str:
+    total = int(round(max(float(elapsed_sec), 0.0)))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def _full_model_fallback(
     model_name: str,
     cfg: SubjectCacheConfig,
@@ -230,6 +261,8 @@ def _full_model_fallback(
     obs_idx, xh, _ = _subject_full_obs_mats(gtex_h, gtex_raw, subject, genes, str(cfg.atlas_agg).lower())
     n_parcels = int(len(target_meta))
     n_genes = int(len(genes))
+    fold_hemispheres = should_fold_hemispheres(cfg.gtex_hemi_mode, cfg.matching_policy_hemi_mode)
+    coords_model_full = model_spatial_coords(coords_full, fold_hemispheres=fold_hemispheres)
     if model_name == "naive":
         sub_mat = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
         pos = {int(p): i for i, p in enumerate(obs_idx.tolist())}
@@ -238,8 +271,7 @@ def _full_model_fallback(
         out = np.where(np.isfinite(sub_mat), sub_mat, ahba_h_full).astype(np.float64)
         return out, {}
     if model_name == "dlam":
-        y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
-        ahba_pls = fit_subject_pls(ahba_h_full, y_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
+        ahba_pls = fit_subject_pls(ahba_h_full, coords_model_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
         pred, _ = run_subject(
                 {
                     "subject": str(subject),
@@ -248,7 +280,7 @@ def _full_model_fallback(
                     "coords_full": coords_full,
                     "target_meta": target_meta,
                 },
-            {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"]},
+            {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"], "ahba_ref_U": ahba_pls["U"]},
                 {
                 "harmonizer": harmonizer,
                 "basis_model": "affine_gl3",
@@ -258,10 +290,22 @@ def _full_model_fallback(
                 "ridge_alpha_bridge": float(cfg.ridge_alpha_bridge),
                 "rbf_smoothing": float(cfg.rbf_smoothing),
                 "gp_rbf_length": float(cfg.gp_length_scale),
+                "gp_noise": float(cfg.gp_noise),
+                "gp_optimize": bool(cfg.gp_optimize),
+                "gp_n_restarts": int(cfg.gp_n_restarts),
+                "t_prior_interp": str(cfg.t_prior_interp),
+                "t_prior_length_scale": float(cfg.t_prior_length_scale),
+                "t_prior_gp_noise": float(cfg.t_prior_gp_noise),
+                "t_prior_gp_optimize": bool(cfg.t_prior_gp_optimize),
+                "t_prior_atlas_scale_floor": bool(cfg.t_prior_atlas_scale_floor),
                 "seed": int(cfg.seed),
                 "c_min": int(cfg.c_min),
+                "fold_hemispheres": bool(fold_hemispheres),
                 "distance_d0": 45.0,
                 "distance_tau": 10.0,
+                "anchor_distance_shrink": bool(cfg.anchor_distance_shrink),
+                "anchor_distance_d0": float(cfg.anchor_distance_d0),
+                "anchor_distance_tau": float(cfg.anchor_distance_tau),
                 "uncertainty_shrink": False,
             },
             asdict(cfg),
@@ -281,13 +325,15 @@ def _full_model_fallback(
             lambda_cal_b=float(cfg.lambda_cal_b),
             gp_length_scale=float(cfg.gp_length_scale),
             gp_noise=float(cfg.gp_noise),
+            gp_optimize=bool(cfg.gp_optimize),
+            gp_n_restarts=int(cfg.gp_n_restarts),
             robust_loss=str(cfg.robust_loss),
             heteroscedastic=bool(cfg.heteroscedastic),
             calibration_mode=str(cfg.calibration_mode),
             uncertainty_shrink=bool(cfg.uncertainty_shrink),
             random_state=int(cfg.seed),
         )
-        atlas_model = fit_global_atlas_unified(ahba_h_full, coords_full, ucfg)
+        atlas_model = fit_global_atlas_unified(ahba_h_full, coords_model_full, ucfg)
         res = infer_subject_unified({"obs_idx": obs_idx, "X_obs_h": xh}, atlas_model, ucfg)
         xhat_h = np.asarray(res["x_hat_h_full"], dtype=np.float64)
         xhat_h[obs_idx, :] = xh
@@ -299,6 +345,7 @@ def _full_model_fallback(
 
 
 def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str) -> Path:
+    t_total0 = time.perf_counter()
     if model_name not in MODEL_NAMES:
         raise ValueError(f"Unsupported model={model_name}; expected one of {MODEL_NAMES}")
     bundle = load_dataset(cfg)
@@ -320,6 +367,8 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     genes = bundle["genes"]
     target_meta = bundle["target_meta"]
     coords_full = bundle["coords_full"]
+    fold_hemispheres = should_fold_hemispheres(cfg.gtex_hemi_mode, cfg.matching_policy_hemi_mode)
+    coords_model_full = model_spatial_coords(coords_full, fold_hemispheres=fold_hemispheres)
     atlas_agg = str(cfg.atlas_agg).lower()
     n_parcels = int(len(target_meta))
     n_genes = int(len(genes))
@@ -333,6 +382,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
     gtex_mask[global_obs_idx] = True
     coverage_tier = "ge_cmin" if int(len(obs_idx_all)) >= int(cfg.c_min) else "lt_cmin"
 
+    t_fullfit0 = time.perf_counter()
     fullfit_subject_h, fullfit_diag = _full_model_fallback(
         model_name=model_name,
         cfg=cfg,
@@ -345,6 +395,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         genes=genes,
         subject=subject,
     )
+    runtime_hms_fullfit = _format_hms(time.perf_counter() - t_fullfit0)
 
     pred_loro = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
     truth_loro = np.full((n_parcels, n_genes), np.nan, dtype=np.float64)
@@ -364,6 +415,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                 plam_fullfit_uvar_latent[:, :kk] = uvar_fullfit[:, :kk]
         plam_fullfit_latent_dim = int(fullfit_diag.get("plam_fullfit_latent_dim", -1))
 
+    t_loro0 = time.perf_counter()
     for fold_id, hold in enumerate(obs_idx_all.tolist()):
         hold = int(hold)
         train_mask = ~((gtex_raw["subject"].astype(str) == subject) & (gtex_raw["parcel_idx"] == hold))
@@ -388,8 +440,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         if model_name == "naive":
             pred = ahba_h_mat[hold, :]
         elif model_name == "dlam":
-            y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
-            ahba_pls = fit_subject_pls(ahba_h_mat, y_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
+            ahba_pls = fit_subject_pls(ahba_h_mat, coords_model_full, n_comp_target=int(cfg.n_comp_target), adaptive=True)
             subj_h = gtex_h[gtex_h["subject"].astype(str) == subject].copy()
             subj_raw = gtex_train[gtex_train["subject"].astype(str) == subject].copy()
             obs_idx, xh, xr = build_subject_observed_matrices(subj_h, subj_raw, genes, agg=atlas_agg)
@@ -404,7 +455,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                     "coords_full": coords_full,
                     "target_meta": target_meta,
                 },
-                {"ahba_h_full": ahba_h_mat, "ahba_ref_T": ahba_pls["T"]},
+                {"ahba_h_full": ahba_h_mat, "ahba_ref_T": ahba_pls["T"], "ahba_ref_U": ahba_pls["U"]},
                 {
                     "harmonizer": harm,
                     "basis_model": "affine_gl3",
@@ -414,10 +465,17 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                     "ridge_alpha_bridge": float(cfg.ridge_alpha_bridge),
                     "rbf_smoothing": float(cfg.rbf_smoothing),
                     "gp_rbf_length": float(cfg.gp_length_scale),
+                    "gp_noise": float(cfg.gp_noise),
+                    "gp_optimize": bool(cfg.gp_optimize),
+                    "gp_n_restarts": int(cfg.gp_n_restarts),
                     "seed": int(cfg.seed),
                     "c_min": int(cfg.c_min),
+                    "fold_hemispheres": bool(fold_hemispheres),
                     "distance_d0": 45.0,
                     "distance_tau": 10.0,
+                    "anchor_distance_shrink": bool(cfg.anchor_distance_shrink),
+                    "anchor_distance_d0": float(cfg.anchor_distance_d0),
+                    "anchor_distance_tau": float(cfg.anchor_distance_tau),
                     "uncertainty_shrink": False,
                 },
                 asdict(cfg),
@@ -444,13 +502,15 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                 lambda_cal_b=float(cfg.lambda_cal_b),
                 gp_length_scale=float(cfg.gp_length_scale),
                 gp_noise=float(cfg.gp_noise),
+                gp_optimize=bool(cfg.gp_optimize),
+                gp_n_restarts=int(cfg.gp_n_restarts),
                 robust_loss=str(cfg.robust_loss),
                 heteroscedastic=bool(cfg.heteroscedastic),
                 calibration_mode=str(cfg.calibration_mode),
                 uncertainty_shrink=bool(cfg.uncertainty_shrink),
                 random_state=int(cfg.seed),
             )
-            atlas_model = fit_global_atlas_unified(ahba_h_mat, coords_full, ucfg)
+            atlas_model = fit_global_atlas_unified(ahba_h_mat, coords_model_full, ucfg)
             res = infer_subject_unified(
                 {"subject": subject, "obs_idx": obs_idx, "X_obs_h": xh},
                 atlas_model,
@@ -473,6 +533,8 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
             print(f"[{model_name} fold] {subject} fold={fold_id} hold={hold} k={int(plam_fold_latent_dim[hold])}")
         else:
             print(f"[{model_name} fold] {subject} fold={fold_id} hold={hold}")
+    runtime_hms_loro = _format_hms(time.perf_counter() - t_loro0)
+    runtime_hms_total = _format_hms(time.perf_counter() - t_total0)
 
     loro_fused_subject_h = fullfit_subject_h.copy()
     loro_fused_subject_h[loro_eval_mask, :] = pred_loro[loro_eval_mask, :]
@@ -514,10 +576,17 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         "coverage_tier": coverage_tier,
         "dynamic_rank": bool(cfg.dynamic_rank),
         "plam_latent_dim_max": int(cfg.plam_latent_dim_max),
+        "runtime_hms_total": runtime_hms_total,
+        "runtime_hms_fullfit": runtime_hms_fullfit,
+        "runtime_hms_loro": runtime_hms_loro,
         "timestamp": io_utils.utc_timestamp(),
         "config": asdict(cfg),
     }
     _meta_path(npz_path).write_text(json.dumps(meta, indent=2, sort_keys=True))
+    print(
+        f"[timing] {model_name} {subject} total={runtime_hms_total} "
+        f"fullfit={runtime_hms_fullfit} loro={runtime_hms_loro}"
+    )
     print(f"[cache-write] {model_name} {subject} -> {npz_path}")
     return npz_path
 
@@ -536,10 +605,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-comp-target", type=int, default=SubjectCacheConfig.n_comp_target)
     p.add_argument("--dlam-strategy", default=SubjectCacheConfig.dlam_strategy)
     p.add_argument("--dlam-spatial-method", choices=["rbf", "gp"], default=SubjectCacheConfig.dlam_spatial_method)
+    p.add_argument("--anchor-distance-shrink", default=str(SubjectCacheConfig.anchor_distance_shrink).lower())
+    p.add_argument("--anchor-distance-d0", type=float, default=SubjectCacheConfig.anchor_distance_d0)
+    p.add_argument("--anchor-distance-tau", type=float, default=SubjectCacheConfig.anchor_distance_tau)
     p.add_argument("--ridge-alpha-bridge", type=float, default=SubjectCacheConfig.ridge_alpha_bridge)
     p.add_argument("--rbf-smoothing", type=float, default=SubjectCacheConfig.rbf_smoothing)
     p.add_argument("--gp-length-scale", type=float, default=SubjectCacheConfig.gp_length_scale)
     p.add_argument("--gp-noise", type=float, default=SubjectCacheConfig.gp_noise)
+    p.add_argument("--gp-optimize", default=str(SubjectCacheConfig.gp_optimize).lower())
+    p.add_argument("--gp-n-restarts", type=int, default=SubjectCacheConfig.gp_n_restarts)
+    # t_prior_residual interpolator knobs (gp-vs-rbf sweeps). The atlas-scale floor
+    # is intentionally NOT exposed here: it stays a code-level default (True).
+    p.add_argument("--t-prior-interp", choices=["imq", "gaussian", "tps", "gp"], default=SubjectCacheConfig.t_prior_interp)
+    p.add_argument("--t-prior-length-scale", type=float, default=SubjectCacheConfig.t_prior_length_scale)
+    p.add_argument("--t-prior-gp-noise", type=float, default=SubjectCacheConfig.t_prior_gp_noise)
+    p.add_argument("--t-prior-gp-optimize", default=str(SubjectCacheConfig.t_prior_gp_optimize).lower())
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
     p.add_argument("--drop-macro-system-covariate", default=str(SubjectCacheConfig.drop_macro_system_covariate).lower())
@@ -590,10 +670,21 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         n_comp_target=int(a.n_comp_target),
         dlam_strategy=str(a.dlam_strategy),
         dlam_spatial_method=str(a.dlam_spatial_method).lower(),
+        anchor_distance_shrink=_parse_bool(a.anchor_distance_shrink),
+        anchor_distance_d0=float(a.anchor_distance_d0),
+        anchor_distance_tau=float(a.anchor_distance_tau),
         ridge_alpha_bridge=float(a.ridge_alpha_bridge),
         rbf_smoothing=float(a.rbf_smoothing),
         gp_length_scale=float(a.gp_length_scale),
         gp_noise=float(a.gp_noise),
+        gp_optimize=_parse_bool(a.gp_optimize),
+        gp_n_restarts=int(a.gp_n_restarts),
+        t_prior_interp=str(a.t_prior_interp).lower(),
+        t_prior_length_scale=float(a.t_prior_length_scale),
+        t_prior_gp_noise=float(a.t_prior_gp_noise),
+        t_prior_gp_optimize=_parse_bool(a.t_prior_gp_optimize),
+        # t_prior_atlas_scale_floor deliberately omitted: keep its default (True);
+        # flip it in code for ablations, not via the CLI/sbatch surface.
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
         drop_macro_system_covariate=_parse_bool(a.drop_macro_system_covariate),

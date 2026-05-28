@@ -31,6 +31,7 @@ from src import io as io_utils
 from src.harmonize import fit_harmonizer
 from src.latent.pls import fit_subject_pls
 from src.models.baseline_pipeline import run_subject
+from src.spatial.model_coords import model_spatial_coords
 from src.preprocess import (
     add_sample_groups,
     add_target_meta,
@@ -63,6 +64,10 @@ class Config:
     ridge_alpha_bridge: float = 1e-2
     rbf_smoothing: float = 0.10
     gp_rbf_length: float = 25.0
+    gp_noise: float = 1e-3
+    gp_jitter: float = 1e-6
+    gp_optimize: bool = True
+    gp_n_restarts: int = 0
     c_min: int = 8
     top_n_parcels: int = 10
     top_n_genes: int = 12
@@ -98,6 +103,10 @@ def parse_args() -> Config:
     p.add_argument("--ridge-alpha-bridge", type=float, default=Config.ridge_alpha_bridge)
     p.add_argument("--rbf-smoothing", type=float, default=Config.rbf_smoothing)
     p.add_argument("--gp-rbf-length", type=float, default=Config.gp_rbf_length)
+    p.add_argument("--gp-noise", type=float, default=Config.gp_noise)
+    p.add_argument("--gp-jitter", type=float, default=Config.gp_jitter)
+    p.add_argument("--gp-optimize", type=lambda s: str(s).lower() in {"1", "true", "yes", "y"}, default=Config.gp_optimize)
+    p.add_argument("--gp-n-restarts", type=int, default=Config.gp_n_restarts)
     p.add_argument("--c-min", type=int, default=Config.c_min)
     p.add_argument("--top-n-parcels", type=int, default=Config.top_n_parcels)
     p.add_argument("--top-n-genes", type=int, default=Config.top_n_genes)
@@ -669,7 +678,7 @@ def main() -> None:
     gtex_raw = add_sample_groups(gtex_raw, target_meta)
     n_parcels = int(len(target_meta))
     coords_full = target_meta[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)
-    y_full = np.c_[coords_full[:, 1], coords_full[:, 2], np.abs(coords_full[:, 0])]
+    y_full = model_spatial_coords(coords_full, fold_hemispheres=True)
 
     unified_summary = pd.read_csv(Path(cfg.unified_phase2_root) / "tables" / "allgenes_subject_loro_summary.csv")
     rep = _select_representative_subject(unified_summary, cfg.c_min)
@@ -732,7 +741,7 @@ def main() -> None:
             "coords_full": coords_full,
             "target_meta": target_meta,
         },
-        {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"]},
+        {"ahba_h_full": ahba_h_full, "ahba_ref_T": ahba_pls["T"], "ahba_ref_U": ahba_pls["U"]},
         {
             "harmonizer": combat,
             "basis_model": "affine_gl3",
@@ -742,8 +751,13 @@ def main() -> None:
             "ridge_alpha_bridge": cfg.ridge_alpha_bridge,
             "rbf_smoothing": cfg.rbf_smoothing,
             "gp_rbf_length": cfg.gp_rbf_length,
+            "gp_noise": getattr(cfg, "gp_noise", 1e-3),
+            "gp_jitter": getattr(cfg, "gp_jitter", 1e-6),
+            "gp_optimize": getattr(cfg, "gp_optimize", True),
+            "gp_n_restarts": getattr(cfg, "gp_n_restarts", 0),
             "seed": cfg.seed,
             "c_min": cfg.c_min,
+            "fold_hemispheres": True,
             "distance_d0": 45.0,
             "distance_tau": 10.0,
             "uncertainty_shrink": False,

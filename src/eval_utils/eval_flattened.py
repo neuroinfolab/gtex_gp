@@ -438,6 +438,8 @@ def _draw_group_blocks(
     region_separator_linewidth: float,
     region_separator_color: str,
     region_separator_alpha: float,
+    group_separator_linewidth: float | None,
+    group_separator_color: str,
     group_label_x: float,
     group_label_fontsize: int | float,
 ) -> None:
@@ -453,8 +455,13 @@ def _draw_group_blocks(
                 )
     for group, slc in matrix.group_slices.items():
         if show_group_separators and slc.start > 0:
-            ax.axhline(slc.start - 0.5, color="white", linewidth=1.2)
-            ax.axhline(slc.start - 0.5, color="#404040", linewidth=0.35, alpha=0.55)
+            if group_separator_linewidth is None:
+                # default subtle double line (white halo + thin grey)
+                ax.axhline(slc.start - 0.5, color="white", linewidth=1.2)
+                ax.axhline(slc.start - 0.5, color="#404040", linewidth=0.35, alpha=0.55)
+            else:
+                ax.axhline(slc.start - 0.5, color=group_separator_color,
+                           linewidth=group_separator_linewidth)
         if show_group_labels:
             center = (slc.start + slc.stop - 1) / 2.0
             label = pretty_gtex_label(group)
@@ -489,20 +496,31 @@ def plot_flattened_tensor_matrix(
     region_separator_linewidth: float = 0.3,
     region_separator_color: str = "#808080",
     region_separator_alpha: float = 0.45,
+    group_separator_linewidth: float | None = None,
+    group_separator_color: str = "black",
     show_ylabel: bool = False,
     group_label_x: float = -0.08,
     group_label_fontsize: int | float = 8,
     font_scale: float = 1.0,
     cbar_font_scale: float = 1.0,
+    soften: bool = False,
+    soften_amount: float = 0.35,
     border_linewidth: float | None = None,
     border_color: str = "black",
     colorbar: bool = True,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Plot one flattened subject-region x gene matrix."""
+    """Plot one flattened subject-region x gene matrix.
+
+    Self-contained building block: accepts an external `ax`, every styling knob,
+    and its own `soften` toggle, so it can be composed into custom figure layouts
+    without going through `plot_flattened_tensor_matrices`.
+    """
     if ax is None:
         fig, ax = plt.subplots(figsize=(10.0, 7.0), constrained_layout=True)
     else:
         fig = ax.figure
+    if soften:
+        cmap = _soften_cmap(cmap, soften_amount)
     title_fs = font_size("l") * font_scale
     label_fs = font_size("m") * font_scale
     tick_fs = font_size("s") * font_scale
@@ -540,6 +558,8 @@ def plot_flattened_tensor_matrix(
         region_separator_linewidth=region_separator_linewidth,
         region_separator_color=region_separator_color,
         region_separator_alpha=region_separator_alpha,
+        group_separator_linewidth=group_separator_linewidth,
+        group_separator_color=group_separator_color,
         group_label_x=group_label_x,
         group_label_fontsize=group_label_fontsize * font_scale,
     )
@@ -575,10 +595,20 @@ def plot_flattened_tensor_pair(
     show_group_labels: bool = True,
     show_group_separators: bool = True,
     show_region_separators: bool = False,
+    region_separator_linewidth: float = 0.3,
+    region_separator_color: str = "#808080",
+    region_separator_alpha: float = 0.45,
+    group_separator_linewidth: float | None = None,
+    group_separator_color: str = "black",
+    soften: bool = False,
+    soften_amount: float = 0.35,
     show_ylabel: bool = False,
     group_label_x: float = -0.08,
     group_label_fontsize: int | float = 8,
     font_scale: float = 1.0,
+    cbar_font_scale: float = 1.0,
+    border_linewidth: float | None = None,
+    border_color: str = "black",
     dpi: float | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot aligned truth/reconstruction flattened matrices side by side."""
@@ -588,6 +618,7 @@ def plot_flattened_tensor_pair(
         rvmin, rvmax = _robust_vrange([truth.X, recon.X])
         vmin = rvmin if vmin is None else vmin
         vmax = rvmax if vmax is None else vmax
+    cmap = _soften_cmap(cmap, soften_amount) if soften else cmap
     fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True, sharey=True)
     if dpi is not None:
         fig.set_dpi(float(dpi))
@@ -606,18 +637,26 @@ def plot_flattened_tensor_pair(
             show_group_labels=show_group_labels,
             show_group_separators=show_group_separators,
             show_region_separators=show_region_separators,
+            region_separator_linewidth=region_separator_linewidth,
+            region_separator_color=region_separator_color,
+            region_separator_alpha=region_separator_alpha,
+            group_separator_linewidth=group_separator_linewidth,
+            group_separator_color=group_separator_color,
             show_ylabel=show_ylabel and col == 0,
             group_label_x=group_label_x,
             group_label_fontsize=group_label_fontsize,
             font_scale=font_scale,
+            cbar_font_scale=cbar_font_scale,
+            border_linewidth=border_linewidth,
+            border_color=border_color,
             colorbar=False,
         )
     if vmin is None or vmax is None:
         vmin, vmax = _robust_vrange([truth.X, recon.X])
     sm = plt.cm.ScalarMappable(norm=Normalize(vmin=float(vmin), vmax=float(vmax)), cmap=cmap)
     cbar = fig.colorbar(sm, ax=axes, fraction=0.025, pad=0.02)
-    cbar.set_label(truth.value_label, fontsize=font_size("m") * font_scale)
-    cbar.ax.tick_params(labelsize=font_size("s") * font_scale)
+    cbar.set_label(truth.value_label, fontsize=font_size("m") * font_scale * cbar_font_scale)
+    cbar.ax.tick_params(labelsize=font_size("s") * font_scale * cbar_font_scale)
     if suptitle:
         fig.suptitle(suptitle, y=1.02, fontsize=font_size("l") * font_scale)
     return fig, axes
@@ -646,6 +685,8 @@ def plot_flattened_tensor_matrices(
     region_separator_linewidth: float = 0.3,
     region_separator_color: str = "#808080",
     region_separator_alpha: float = 0.45,
+    group_separator_linewidth: float | None = None,
+    group_separator_color: str = "black",
     soften: bool = False,
     soften_amount: float = 0.35,
     show_ylabel: bool = False,
@@ -709,6 +750,8 @@ def plot_flattened_tensor_matrices(
         region_separator_linewidth=region_separator_linewidth,
         region_separator_color=region_separator_color,
         region_separator_alpha=region_separator_alpha,
+        group_separator_linewidth=group_separator_linewidth,
+        group_separator_color=group_separator_color,
         group_label_x=group_label_x,
         group_label_fontsize=group_label_fontsize,
         font_scale=font_scale,
@@ -787,3 +830,26 @@ def sample_correlation_table(
         _pearson_1d(truth.X[i, :], recon.X[i, :]) for i in range(truth.X.shape[0])
     ]
     return meta
+
+
+def reconstruction_summary(
+    truth: FlattenedTensorMatrix,
+    recon: FlattenedTensorMatrix,
+) -> dict:
+    """Mean truth/recon correlation in both directions, for figure annotation.
+
+    - `across_gene_mean_r`   : mean per-sample r (each row correlated across genes;
+      the schematic's horizontal "across gene recon" r̄).
+    - `across_sample_mean_r` : mean per-gene r (each column correlated across
+      samples; the "across sample recon" r̄).
+
+    Also returns the underlying tables so callers can draw distributions/violins.
+    """
+    gene_tbl = gene_correlation_table(truth, recon)
+    sample_tbl = sample_correlation_table(truth, recon)
+    return {
+        "across_gene_mean_r": float(np.nanmean(sample_tbl["pearson_r"].to_numpy())),
+        "across_sample_mean_r": float(np.nanmean(gene_tbl["pearson_r"].to_numpy())),
+        "gene_table": gene_tbl,
+        "sample_table": sample_tbl,
+    }

@@ -32,6 +32,7 @@ from src.eval.diagnostics import (
 from src.eval.loro import run_loro
 from src.harmonize import fit_harmonizer
 from src.models.unified_generative import UnifiedGenerativeConfig, fit_global_atlas_unified, infer_subject_unified
+from src.spatial.model_coords import model_spatial_coords, should_fold_hemispheres
 from src.preprocess import (
     add_sample_groups,
     add_target_meta,
@@ -67,6 +68,8 @@ class Config:
     heteroscedastic: bool = False
     gp_length_scale: float = 25.0
     gp_noise: float = 1e-3
+    gp_optimize: bool = True
+    gp_n_restarts: int = 0
     lambda_w: float = 1.0
     lambda_z: float = 1.0
     lambda_cal_a: float = 10.0
@@ -114,6 +117,8 @@ def parse_args() -> Config:
     p.add_argument("--heteroscedastic", default=str(Config.heteroscedastic).lower())
     p.add_argument("--gp-length-scale", type=float, default=Config.gp_length_scale)
     p.add_argument("--gp-noise", type=float, default=Config.gp_noise)
+    p.add_argument("--gp-optimize", default=str(Config.gp_optimize).lower())
+    p.add_argument("--gp-n-restarts", type=int, default=Config.gp_n_restarts)
     p.add_argument("--lambda-w", type=float, default=Config.lambda_w)
     p.add_argument("--lambda-z", type=float, default=Config.lambda_z)
     p.add_argument("--lambda-cal-a", type=float, default=Config.lambda_cal_a)
@@ -133,6 +138,7 @@ def parse_args() -> Config:
     d["uncertainty_shrink"] = _parse_bool(d["uncertainty_shrink"])
     d["run_all_genes_winner"] = _parse_bool(d["run_all_genes_winner"])
     d["heteroscedastic"] = _parse_bool(d["heteroscedastic"])
+    d["gp_optimize"] = _parse_bool(d["gp_optimize"])
     d["combat_use_covariates"] = _parse_bool(d["combat_use_covariates"])
     return Config(**d)
 
@@ -314,6 +320,10 @@ def main() -> None:
     ahba_raw = add_sample_groups(ahba_raw, target_meta)
     gtex_raw = add_sample_groups(gtex_raw, target_meta)
     coords_full = target_meta[["coord_x", "coord_y", "coord_z"]].to_numpy(dtype=np.float64)
+    coords_model_full = model_spatial_coords(
+        coords_full,
+        fold_hemispheres=should_fold_hemispheres(cfg.gtex_hemi_mode, "default"),
+    )
 
     eligibility_df = build_subject_eligibility(gtex_raw, cfg.min_observed_parcels)
     if cfg.smoke_subjects > 0:
@@ -355,6 +365,8 @@ def main() -> None:
             lambda_cal_b=cfg.lambda_cal_b,
             gp_length_scale=cfg.gp_length_scale,
             gp_noise=cfg.gp_noise,
+            gp_optimize=bool(cfg.gp_optimize),
+            gp_n_restarts=int(cfg.gp_n_restarts),
             robust_loss=v["robust_loss"],
             heteroscedastic=bool(v["heteroscedastic"]),
             calibration_mode=v["calibration_mode"],
@@ -366,7 +378,7 @@ def main() -> None:
             random_state=cfg.seed,
         )
 
-        atlas = fit_global_atlas_unified(ahba_h_full, coords_full, ucfg)
+        atlas = fit_global_atlas_unified(ahba_h_full, coords_model_full, ucfg)
         model_hash = io_utils.hash_config({"base": config_hash_base, **v})
 
         fold_rows = []
@@ -435,7 +447,7 @@ def main() -> None:
                 ahba_h_fold = harm_fold.transform(ahba_raw, "AHBA")
                 gtex_h_fold = harm_fold.transform(gtex_train, "GTEX")
                 ahba_h_full_fold, _ = build_region_matrix(ahba_h_fold, genes_hvg, target_meta, agg="mean")
-                atlas_fold = fit_global_atlas_unified(ahba_h_full_fold, coords_full, ucfg)
+                atlas_fold = fit_global_atlas_unified(ahba_h_full_fold, coords_model_full, ucfg)
 
                 subj_h_fold = gtex_h_fold[gtex_h_fold["subject"] == sid].copy()
                 subj_raw_fold = gtex_train[gtex_train["subject"] == sid].copy()

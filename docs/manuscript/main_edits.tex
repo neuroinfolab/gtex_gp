@@ -116,46 +116,105 @@ ultimately produce a completed harmonized subject atlas
 
 In the default pipeline, Eq.~\eqref{eq:shared-harmonization} is implemented by a
 ComBat-style batch harmonizer fit jointly to AHBA and eligible GTEx rows
-\cite{johnson2007combat}.  For each gene, the pooled expression table is first
-regressed on row-level covariates.  By default these covariates include age, sex,
-and broad anatomical macro-system; the macro-system term can be omitted in ablation
-runs.  The fitted covariate contribution is removed before estimating platform
-effects, so that biological and anatomical structure is not treated as batch
-variation.
+\cite{johnson2007combat}.  We follow the notation of Johnson et~al. and write
+$y_{ijg}$ for the observed expression of gene $g$ in sample $j$ from batch $i$.
+In our setting, the two batches are $i=A$ for AHBA and $i=G$ for GTEx.  ComBat
+models each gene as
+\begin{equation}
+  \label{eq:combat-model}
+  y_{ijg}
+  =
+  \alpha_g
+  +
+  \mathbf{x}_{ij}^{\top}\boldsymbol{\beta}_g
+  +
+  \gamma_{ig}
+  +
+  \delta_{ig}\varepsilon_{ijg},
+\end{equation}
+where $\alpha_g$ is the gene-specific intercept, $\mathbf{x}_{ij}$ is a vector of
+row-level covariates, $\boldsymbol{\beta}_g$ gives the gene-specific covariate
+effects, $\gamma_{ig}$ is the additive batch effect, and $\delta_{ig}$ is the
+multiplicative batch scale.  In the default analysis, $\mathbf{x}_{ij}$ contains
+normalized age, a sex indicator, and broad anatomical macro-system indicators, with
+cortical association cortex used as the reference macro-system.
 
-After covariate removal, each gene is standardized using pooled mean and variance.
-Within this standardized space, the AHBA and GTEx batches receive gene-wise additive
-and multiplicative corrections.  The batch mean and variance estimates are shrunk
-toward batch-wide averages across genes to stabilize estimates:
+Operationally, the pooled AHBA--GTEx expression table is first adjusted for the
+fitted covariate contribution $\mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g$.
+For each gene, the covariate-adjusted values are centered and scaled using pooled
+statistics across both platforms:
 \[
-  s_{ig} = \frac{x_{ig} - c_i^\top \hat{\beta}_g - \hat{\mu}_g}{\hat{\sigma}_g},
+  s_{ijg}
+  =
+  \frac{
+    y_{ijg}
+    -
+    \mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g
+    -
+    \hat{\alpha}_g
+  }{\hat{\sigma}_g}.
+\]
+Within this standardized space, platform effects are estimated separately for AHBA
+and GTEx.  The raw ComBat estimates are the batch-specific mean and variance of
+$s_{ijg}$,
+\[
+  \hat{\gamma}_{ig}
+  =
+  \frac{1}{n_i}\sum_{j=1}^{n_i} s_{ijg},
   \qquad
-  s^{adj}_{ig}
+  \hat{\delta}_{ig}
   =
-  \frac{s_{ig} - \hat{\gamma}^{*}_{b(i),g}}
-       {\sqrt{\hat{\delta}^{*}_{b(i),g}}}.
+  \operatorname{Var}_{j=1,\ldots,n_i}(s_{ijg}),
 \]
-The corrected expression is then reconstructed by restoring the pooled gene scale
-and the fitted covariate contribution:
+where $n_i$ is the number of rows in batch $i$.  Following the empirical-Bayes
+motivation of ComBat, these gene-wise batch estimates are stabilized by shrinkage
+across genes, yielding posterior batch adjustments $\hat{\gamma}^{*}_{ig}$ and
+$\hat{\delta}^{*}_{ig}$.  In our implementation, this shrinkage is a sample-size
+weighted average between the gene-specific batch estimate and the corresponding
+batch-wide average across genes, with variance shrinkage performed on the
+log-variance scale.  The standardized expression is then corrected by removing the
+estimated additive shift and multiplicative scale,
 \[
-  x^{corr}_{ig}
+  s^{adj}_{ijg}
   =
-  s^{adj}_{ig}\hat{\sigma}_g + \hat{\mu}_g + c_i^\top \hat{\beta}_g .
+  \frac{s_{ijg}-\hat{\gamma}^{*}_{ig}}
+       {\sqrt{\hat{\delta}^{*}_{ig}}}.
+\]
+The corrected expression is reconstructed on the original gene scale while restoring
+the fitted covariate contribution:
+\[
+  y^{corr}_{ijg}
+  =
+  s^{adj}_{ijg}\hat{\sigma}_g
+  +
+  \hat{\alpha}_g
+  +
+  \mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g .
 \]
 
-Finally, the implementation applies a post-ComBat calibration from corrected GTEx
-to corrected AHBA on the shared parcel support.  For each gene, parcel-level AHBA
-means are regressed on parcel-level GTEx means over overlapping parcels,
+Because AHBA and GTEx do not sample the same biological object, the implementation
+adds a final overlap-based calibration after ComBat correction.  For each gene,
+corrected AHBA and GTEx values are aggregated to parcels observed in both datasets,
+and a gene-wise affine map is fit from corrected GTEx parcel means to corrected AHBA
+parcel means:
 \[
-  \bar{x}^{corr}_{A,rg}
+  \bar{y}^{corr}_{A rg}
   \approx
-  a_g \bar{x}^{corr}_{G,rg} + d_g ,
+  a_g \bar{y}^{corr}_{G rg} + d_g ,
 \]
-and the fitted gene-wise affine map is applied to GTEx rows.  Thus AHBA harmonized
-values are the corrected AHBA values, while GTEx harmonized values are the corrected
-GTEx values after this overlap-based affine calibration.  PLAM adds a further
-subject-level calibration layer after this shared preprocessing step
-(Section~\ref{sec:calibration}).
+where $r$ indexes shared parcels.  The final harmonized values are therefore
+\[
+  y^{(h)}_{ijg}
+  =
+  \begin{cases}
+    y^{corr}_{ijg}, & i=A,\\
+    a_g y^{corr}_{ijg} + d_g, & i=G.
+  \end{cases}
+\]
+Thus AHBA defines the reference harmonized atlas scale, while GTEx observations are
+first ComBat-corrected and then calibrated onto that reference scale.  The resulting
+$X_A^{(h)}$ and $X_{s,h}^{obs}$ are the shared inputs used by the naive atlas-fill
+baseline, DLAM, and PLAM.
 
 \subsection{Naive Atlas-Fill Baseline}
 \label{sec:naive-fill}

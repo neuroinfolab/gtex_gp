@@ -5,8 +5,8 @@ from typing import Dict, Tuple
 
 import numpy as np
 from scipy.linalg import orthogonal_procrustes
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import ConstantKernel, RBF, WhiteKernel
+
+from src.spatial import gp as gp_spatial
 
 
 @dataclass
@@ -19,7 +19,9 @@ class UnifiedGenerativeConfig:
     lambda_cal_b: float = 10.0
     gp_length_scale: float = 25.0
     gp_noise: float = 1e-3
-    gp_jitter: float = 1e-8
+    gp_jitter: float = 1e-6
+    gp_optimize: bool = True
+    gp_n_restarts: int = 0
     robust_loss: str = "none"  # none|huber|student_t
     huber_delta: float = 1.5
     student_df: float = 4.0
@@ -69,20 +71,17 @@ def _robust_weights(resid: np.ndarray, mode: str, huber_delta: float, student_df
 
 
 def _fit_gp_component(x_obs: np.ndarray, y_obs: np.ndarray, cfg: UnifiedGenerativeConfig):
-    kernel = ConstantKernel(1.0, (1e-3, 1e3)) * RBF(
+    model = gp_spatial.fit_spatial(
+        x_obs,
+        np.asarray(y_obs, dtype=np.float64)[:, None],
         length_scale=float(cfg.gp_length_scale),
-        length_scale_bounds=(1e-2, 1e3),
-    )
-    kernel += WhiteKernel(noise_level=float(cfg.gp_noise), noise_level_bounds=(1e-8, 1e1))
-    gp = GaussianProcessRegressor(
-        kernel=kernel,
+        noise_level=float(cfg.gp_noise),
         alpha=float(cfg.gp_jitter),
-        normalize_y=True,
+        optimize=bool(cfg.gp_optimize),
+        n_restarts_optimizer=int(cfg.gp_n_restarts),
         random_state=int(cfg.random_state),
-        optimizer=None,
     )
-    gp.fit(x_obs, y_obs)
-    return gp
+    return model.models[0]
 
 
 def fit_global_atlas_unified(ahba_h_full: np.ndarray, coords_full: np.ndarray, cfg: UnifiedGenerativeConfig) -> Dict[str, np.ndarray]:
@@ -119,6 +118,8 @@ def fit_global_atlas_unified(ahba_h_full: np.ndarray, coords_full: np.ndarray, c
             "length_scale": float(cfg.gp_length_scale),
             "noise": float(cfg.gp_noise),
             "jitter": float(cfg.gp_jitter),
+            "optimize": bool(cfg.gp_optimize),
+            "n_restarts": int(cfg.gp_n_restarts),
         },
         "diagnostics": {"atlas_recon_rmse": rmse},
     }

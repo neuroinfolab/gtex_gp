@@ -107,18 +107,25 @@ _SCORE_METRIC_KEYS = {
 # Token-based font defaults (see eval_style.font_size). Each plotter merges an
 # optional `font_sizes={...}` override over these.
 _RECOVERY_FONTS = {
-    "title": "l", "xlabel": "m", "ylabel": "m",
-    "tick": "s", "legend": "s", "annotation": "xs",
+    "title": "xxl", "xlabel": "xl", "ylabel": "xl",
+    "tick": "l", "legend": "l", "annotation": "m",
 }
 _SPECTRA_FONTS = dict(_RECOVERY_FONTS)
 _VARIANCE_FONTS = dict(_RECOVERY_FONTS)
 _HEATMAP_FONTS = {
-    "title": "l", "xlabel": "m", "ylabel": "m",
-    "tick": "xs", "cbar_label": "s",
+    "title": "xxl", "xlabel": "xl", "ylabel": "xl",
+    "tick": "m", "cbar_label": "l",
 }
 
 _RECOVERY_CACHE_DIR = "notebooks/cache/pca_recovery"
 _SPECTRA_CACHE_DIR = "notebooks/cache/pca_spectra"
+
+
+def _format_demean_mode_label(demean_mode: str) -> str:
+    mode = str(demean_mode).strip().lower()
+    if mode == "within_parcel":
+        return "within-parcel demeaned"
+    return mode.replace("_", " ")
 
 
 # ---------------------------------------------------------------------------
@@ -692,10 +699,10 @@ def plot_pca_recovery(
     ax.set_ylabel(f"PC-score recovery — {metric_lbl}", fontsize=fonts["ylabel"])
     title = f"Ground-truth PCA recovery — {panel_label}"
     if demean_mode not in {"", "none"}:
-        title += f"  [{demean_mode.replace('_', ' ')}]"
+        title += f"  [{_format_demean_mode_label(demean_mode)}]"
     ax.set_title(title, fontsize=fonts["title"])
     ax.grid(alpha=0.25)
-    ax.legend(frameon=False, fontsize=fonts["legend"], loc="best")
+    ax.legend(frameon=False, fontsize=fonts["legend"], loc="upper right")
     ax.text(
         0.99, 0.02, f"n_samples = {n_samples:,}    n_genes = {n_genes:,}",
         transform=ax.transAxes, ha="right", va="bottom",
@@ -782,20 +789,20 @@ def plot_pca_variance_spectra(
 
     ax_ev.set_ylabel("Explained variance ratio", fontsize=fonts["ylabel"])
     ax_ev.set_title("Per-component variance", fontsize=fonts["title"])
-    ax_ev.legend(frameon=False, fontsize=fonts["legend"], loc="best")
+    ax_ev.legend(frameon=False, fontsize=fonts["legend"], loc="upper right")
     if ax_cum is not None:
         ax_cum.set_ylabel("Cumulative variance", fontsize=fonts["ylabel"])
         ax_cum.set_title("Cumulative variance", fontsize=fonts["title"])
         ax_cum.set_ylim(-0.02, 1.02)
         ax_cum.axhline(0.95, color="#999999", ls=":", lw=1.0, alpha=0.7)
-        ax_cum.legend(frameon=False, fontsize=fonts["legend"], loc="best")
+        ax_cum.legend(frameon=False, fontsize=fonts["legend"], loc="upper right")
 
     sup = (
         f"PCA variance spectra — {panel_label}  "
         f"(n_samples = {n_samples:,}; n_genes = {n_genes:,})"
     )
     if demean_mode not in {"", "none"}:
-        sup += f"  [{demean_mode.replace('_', ' ')}]"
+        sup += f"  [{_format_demean_mode_label(demean_mode)}]"
     fig.suptitle(sup, fontsize=fonts["title"], y=1.05)
     return fig, axes, d
 
@@ -859,7 +866,7 @@ def plot_within_parcel_variance(
     if panel_label:
         title += f" — {panel_label}"
     ax.set_title(title, fontsize=fonts["title"])
-    ax.legend(frameon=False, fontsize=fonts["legend"], ncol=n_src, loc="best")
+    ax.legend(frameon=False, fontsize=fonts["legend"], ncol=n_src, loc="upper right")
     ax.grid(alpha=0.22, axis="y")
     apply_tick_style(ax, label_fontsize=fonts["tick"])
     return fig, ax, d

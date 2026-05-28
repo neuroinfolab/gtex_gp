@@ -19,8 +19,14 @@ HVG_PATH="${HVG_PATH:-data/raw/gene_lists/ahba_100hvg.txt}"
 USE_CACHE="${USE_CACHE:-true}"
 DROP_MACRO_SYSTEM_COVARIATE="${DROP_MACRO_SYSTEM_COVARIATE:-false}"
 OUT_ROOT="${OUT_ROOT:-out/loro_subject_cache_smoke}"
-DLAM_STRATEGY="${DLAM_STRATEGY:-baseline}"
+DLAM_STRATEGY="${DLAM_STRATEGY:-baseline}" # baseline, reference_residual, constrained_anchor, pls_linear_projection, distance_shrink, gp_uncertainty, moe_basis
 DLAM_SPATIAL_METHOD="${DLAM_SPATIAL_METHOD:-rbf}"
+ANCHOR_DISTANCE_SHRINK="${ANCHOR_DISTANCE_SHRINK:-false}"
+ANCHOR_DISTANCE_D0="${ANCHOR_DISTANCE_D0:-30.0}"
+ANCHOR_DISTANCE_TAU="${ANCHOR_DISTANCE_TAU:-8.0}"
+GP_OPTIMIZE="${GP_OPTIMIZE:-true}"
+GP_N_RESTARTS="${GP_N_RESTARTS:-0}"
+# More aggressive constrained-anchor shrinkage: ANCHOR_DISTANCE_D0=25.0 ANCHOR_DISTANCE_TAU=6.0
 LATENT_DIM="${LATENT_DIM:-3}"
 DYNAMIC_RANK="${DYNAMIC_RANK:-false}"
 PLAM_MAX_RANK="${PLAM_MAX_RANK:-10}"
@@ -38,7 +44,7 @@ COLLAPSE_CEREBELLUM="${COLLAPSE_CEREBELLUM:-false}"
 cd "${REPO_ROOT}"
 mkdir -p out/slurm
 
-echo "[single-subject] repo=${REPO_ROOT} subject=${SUBJECT_ID} model=${MODEL_NAME} scope=${GENE_SCOPE} dlam_strategy=${DLAM_STRATEGY} dlam_spatial_method=${DLAM_SPATIAL_METHOD} drop_macro_system_covariate=${DROP_MACRO_SYSTEM_COVARIATE} matching_policy=${MATCHING_POLICY} matching_policy_hemi_mode=${MATCHING_POLICY_HEMI_MODE} collapse_cerebellum=${COLLAPSE_CEREBELLUM} out_root=${OUT_ROOT}"
+echo "[single-subject] repo=${REPO_ROOT} subject=${SUBJECT_ID} model=${MODEL_NAME} scope=${GENE_SCOPE} dlam_strategy=${DLAM_STRATEGY} dlam_spatial_method=${DLAM_SPATIAL_METHOD} anchor_distance_shrink=${ANCHOR_DISTANCE_SHRINK} anchor_distance_d0=${ANCHOR_DISTANCE_D0} anchor_distance_tau=${ANCHOR_DISTANCE_TAU} gp_optimize=${GP_OPTIMIZE} gp_n_restarts=${GP_N_RESTARTS} drop_macro_system_covariate=${DROP_MACRO_SYSTEM_COVARIATE} matching_policy=${MATCHING_POLICY} matching_policy_hemi_mode=${MATCHING_POLICY_HEMI_MODE} collapse_cerebellum=${COLLAPSE_CEREBELLUM} out_root=${OUT_ROOT}"
 
 SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py \
   --subject \"${SUBJECT_ID}\" \
@@ -49,6 +55,11 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py 
   --use-cache \"${USE_CACHE}\" \
   --dlam-strategy \"${DLAM_STRATEGY}\" \
   --dlam-spatial-method \"${DLAM_SPATIAL_METHOD}\" \
+  --anchor-distance-shrink \"${ANCHOR_DISTANCE_SHRINK}\" \
+  --anchor-distance-d0 \"${ANCHOR_DISTANCE_D0}\" \
+  --anchor-distance-tau \"${ANCHOR_DISTANCE_TAU}\" \
+  --gp-optimize \"${GP_OPTIMIZE}\" \
+  --gp-n-restarts \"${GP_N_RESTARTS}\" \
   --drop-macro-system-covariate \"${DROP_MACRO_SYSTEM_COVARIATE}\" \
   --latent-dim \"${LATENT_DIM}\" \
   --dynamic-rank \"${DYNAMIC_RANK}\" \

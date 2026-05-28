@@ -13,16 +13,31 @@ class RBFSpatialModel:
     models: list
 
 
-def fit_spatial(coords_obs: np.ndarray, U_obs: np.ndarray, smoothing: float = 0.10) -> RBFSpatialModel:
+def fit_spatial(
+    coords_obs: np.ndarray,
+    U_obs: np.ndarray,
+    smoothing: float = 0.10,
+    kernel: str = "thin_plate_spline",
+    epsilon: float | None = None,
+    degree: int | None = None,
+) -> RBFSpatialModel:
+    """Fit per-component scattered-data RBF interpolators.
+
+    Defaults reproduce the original thin-plate-spline behavior (a polyharmonic
+    kernel with a polynomial tail that *extrapolates* off-support). Pass a
+    decaying ``kernel`` ("gaussian" / "inverse_multiquadric") with ``epsilon``
+    (inverse length scale) and ``degree=-1`` (drop the polynomial tail) to get a
+    field that reverts to 0 away from the anchors — used by the t-prior residual.
+    """
     models = []
     for k in range(U_obs.shape[1]):
         try:
-            rbf = RBFInterpolator(
-                coords_obs,
-                U_obs[:, k],
-                kernel="thin_plate_spline",
-                smoothing=float(smoothing),
-            )
+            kw: dict = {"kernel": str(kernel), "smoothing": float(smoothing)}
+            if epsilon is not None:
+                kw["epsilon"] = float(epsilon)
+            if degree is not None:
+                kw["degree"] = int(degree)
+            rbf = RBFInterpolator(coords_obs, U_obs[:, k], **kw)
             models.append(rbf)
         except Exception:
             models.append(None)
