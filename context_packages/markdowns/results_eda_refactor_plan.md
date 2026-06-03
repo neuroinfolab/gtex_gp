@@ -1,22 +1,31 @@
 # eval refactor plan
 
-Last touched: 2026-05-06 (genewise + Kendall-τ + cached PREPOST + cache layout shift)
+Last touched: 2026-05-28 (latent migration landed, kendall/regional/distributional split out, notebooks moved to `notebooks/eval/results/`, subjectwise renamed + illustrative views A–D)
 
 ## Current status
 
-Four active eval notebooks are wired through focused source modules:
-- `eval_data.ipynb` ← `src/eval_utils/eda_core.py` (dataset-level EDA, PREPOST).
+Seven active eval notebooks live under **`notebooks/eval/results/`** and are wired through focused source modules:
 - `eval_population.ipynb` ← `src/eval_utils/eval_population.py` (population-level cached prediction evaluation).
-- `eval_singlesubject.ipynb` ← `src/eval_utils/eval_single_subject.py` (subject-keyed analyses).
-- `eval_population_genewise.ipynb` ← `src/eval_utils/eval_population.py` (per-gene + within-subject spatial Kendall-τ).
+- `eval_population_genewise.ipynb` ← `src/eval_utils/eval_population.py` (per-gene genewise surfaces; Kendall split out below).
+- `eval_population_kendall.ipynb` ← `src/eval_utils/eval_population.py` (within-subject spatial Kendall-τ; gene-wise and subject-wise ranked).
+- `eval_population_subjectwise.ipynb` ← `src/eval_utils/eval_single_subject.py` (per-subject performance + illustrative views A/B/C/D + subject & spatial specificity). *Renamed from `eval_singlesubject.ipynb`.*
+- `eval_regional.ipynb` ← `src/eval_utils/eval_population.py` (region-stratified performance + DLAM gene-highlighted region fan).
+- `eval_distributional.ipynb` ← `src/eval_utils/eval_distributional.py` (distributional eval on matched held-out parcels and fullfit-imputed parcels). *New module.*
+- `eval_pca.ipynb` ← `src/eval_utils/eval_latent.py` (pooled PCA recovery: standard, within-parcel demeaned, variance effects, sample×gene heatmaps, parcel scatters). *Implements the previously-pending `eval_latent.py` migration.*
 
-Shared style + global infrastructure lives in `src/eval_utils/eval_style.py`. `results_eda.py` is now compatibility/reference only (legacy fold-combo computation, unmigrated single-subject visualizations). `results_eda_arxiv.py` is read-only.
+Dataset-level EDA (`eval_data.ipynb`) continues to ride on `src/eval_utils/eda_core.py` (PREPOST etc.) — kept outside `/results` since it's not a model-eval notebook.
 
-**Cache layout convention** (since 2026-05-06): `out/` holds true prediction artifacts only. Helper-level caches (PREPOST, genewise Kendall) live under `notebooks/cache/<name>/<hash>.pkl`.
+Shared style + global infrastructure lives in `src/eval_utils/eval_style.py`. `results_eda.py` is still compatibility/reference (legacy fold-combo computation + the unmigrated heavyweight single-subject visualizations). `results_eda_arxiv.py` is read-only.
+
+**Adjacent eval families** (outside `/results`, but part of the broader buildout): `notebooks/eval/{embeddings, gradients, tensors}/` and `notebooks/eval/eval_gxp_onbrain_views.ipynb`, backed by new modules `eval_embeddings.py`, `eval_flattened.py`, `eval_onbrain.py`, `eval_pls_gradients.py`, `eval_pls_gradient_progression.py`, `eval_samples.py`, `eval_dlam_alignment.py`, `dlam_diagnostics.py`.
+
+**Cache layout convention** (since 2026-05-06, still authoritative): `out/` holds true prediction artifacts only. Helper-level caches (PREPOST, genewise Kendall) live under `notebooks/cache/<name>/<hash>.pkl`.
 
 Pending refactor targets (in priority order):
-- Migrate the remaining heavyweight single-subject visualizations from `results_eda.py` into `eval_single_subject.py` (`plot_subject_model_matrix_panel`, `plot_subject_alignment_scatter_panel`, `plot_single_subject_scatter_triplet`, `select_representative_subject_by_gtex_median`, `resolve_publication_subject`) and retire `results_single_subject_predictions.ipynb`.
-- `eval_latent.py` — pooled PCA, reconstruction, PLS — migrate from `pca_cached_predictions.ipynb`.
+- Migrate the remaining heavyweight single-subject visualizations from `results_eda.py` into `eval_single_subject.py` (`plot_subject_model_matrix_panel`, `plot_subject_alignment_scatter_panel`, `plot_single_subject_scatter_triplet`, `select_representative_subject_by_gtex_median`, `resolve_publication_subject`) and retire `results_single_subject_predictions.ipynb`. *(Confirmed not yet migrated: 3 `def` for those plotters still live in `results_eda.py`.)*
+- Wire the **age bias forest** alongside the existing sex bias forest in `eval_population.ipynb`. *(Currently only the Sex section invokes `compute_stratum_bias` / `plot_stratum_bias_forest`.)*
+- Principled **gene-sublist builder** (HVGs / DEGs) under `src/data_build/` (or analogue) with sidecar manifests. *(No `src/data_build/` exists yet.)*
+- **`samples.csv` builder** for end-to-end repro from upstream AHBA + GTEx downloads → harmonized canonical CSV.
 - Decide whether `compute_fold_combo_metrics_from_cache` and the bare `plot_fold_combo_ranked` get formally rewritten into `eval_population.py` (or a future `eval_cache.py`) or stay re-exported from `results_eda.py`.
 
 ## Architecture (stable)
@@ -172,10 +181,7 @@ Per-gene + within-subject spatial analyses. Mirrors the mini-config-per-section 
     - `compute_gene_rank_lookup(view, model=SUBLIST_RANK_MODEL, metric=...)` once → looped per model passing `gene_rank_lookup=` into `plot_global_prediction_scatter` with `gene_selection=`/`highlight_genes=`/`isolate_color_subby=` knobs. Lookup precompute avoids the bug where a per-model view doesn't contain the rank-anchor model's pred table.
 7. **Section 4 — Interactive single-gene scatter.**
     - Two `ipywidgets.Dropdown`s (Model + Gene with `'all'` option) wired via explicit `dd.observe(callback)` — *not* `interactive_output` (caused 4× re-renders on inline backend). Single `Output` widget cleared with `_out.clear_output(wait=True)` per change. Inline matplotlib (no `%matplotlib widget`).
-8. **Section 5 — Within-subject spatial Kendall-τ.**
-    - Mini-config: `KENDALL_GENE_LIST_PATH=None` (all genes — first run is cached, sublists filter inline), `KENDALL_ANCHOR_MODEL='naive'`, `KENDALL_BOTTOM_QUANTILE=None` (no shading), `KENDALL_MIN_REGIONS=5`.
-    - `compute_within_subject_kendall(view, models=MODELS, min_regions=KENDALL_MIN_REGIONS)` (cached). Two ranked plots: per-gene (across-subject median) and per-subject (across-gene median).
-    - **Sublist subsection**: `KENDALL_SUBLIST_PATH='gtex_100hvg'` → `filter_kendall_to_genes(kendall_long, genes)` → `summarize_kendall_per_unit` → `plot_unitwise_kendall_ranked`. No recompute.
+8. **Kendall** — *promoted to its own notebook* (`eval_population_kendall.ipynb`); the genewise notebook keeps a thin link/pointer cell rather than the full Kendall flow.
 
 ## Notebook structure (`eval_population.ipynb`)
 
@@ -196,7 +202,9 @@ Top-down:
 
 Subject specificity and the per-subject ranked-mean diagnostic moved out to `eval_singlesubject.ipynb`.
 
-## Notebook structure (`eval_singlesubject.ipynb`)
+## Notebook structure (`eval_population_subjectwise.ipynb`)
+
+*Renamed from `eval_singlesubject.ipynb` into the `eval_population_*` family.*
 
 Top-down. Per-section knobs live in **mini-config cells immediately above their use sites** so in-notebook iteration is fluid; only truly global config sits at the top.
 
@@ -206,12 +214,58 @@ Top-down. Per-section knobs live in **mini-config cells immediately above their 
 4. **Section 1 — Per-subject performance.**
     - Section 1 mini-config: `FOLD_COMBO_COVERAGE_MIN/MAX`, `PERFORMANCE_FOLD_METRIC`, `ANCHOR_MODEL`, `SPARSIFY=100`, `BOTTOM_QUANTILE`, `DYNAMIC_BOTTOM_QUANTILE`, `TOP_QUANTILE`.
     - LORO fold-combo cache load → `compute_subject_performance` → `select_subjects_by_percentile` (returned as `band_subjects`) → `plot_subject_performance_ranked` (markers-only, percentile annotations above axis, dynamic shading).
-    - **Illustrative subjects subsection**: mini-config `ILLUSTRATIVE_PERCENTILES=[10,50,90]`, `ILLUSTRATIVE_COLOR_BY='region'`, `ILLUSTRATIVE_FIGSIZE`. Picks subjects nearest to those percentiles from `band_subjects` (or computes inline), then renders **3 single-panel scatters** by passing `models=[ANCHOR_MODEL]` + `subjects=[subj]` through `make_prediction_eval_view` + `plot_global_prediction_scatter`. No new helper — composes existing primitives.
+    - **Percentile distribution histogram** subsection: shows the per-subject anchor-model percentile distribution as a sanity / coverage check on `select_subjects_by_percentile`.
+    - **Illustrative subjects subsection**: mini-config `ILLUSTRATIVE_PERCENTILES=[10,50,90]`, `ILLUSTRATIVE_FIGSIZE`. Picks subjects nearest to those percentiles from `band_subjects` (or computes inline), then renders **four view variants** per subject, all composed from `make_prediction_eval_view(models=[ANCHOR_MODEL], subjects=[subj])` + `plot_global_prediction_scatter`:
+        - **View A** — colored by region (the original illustrative scatter).
+        - **View B** — gene-stratified subset (restricts the scatter to a gene-list path/basename via `eval_gene_list_path`).
+        - **View C** — focus gene **isolated** via `isolate_stratum` / `isolate_color_subby` (leaves the rest as background).
+        - **View D** — focus gene `genes=[...]` (single gene), colored by region.
 5. **Section 2 — Subject specificity.**
     - Mini-config: `SPECIFICITY_REGION_COL`, `SHOW_SPATIAL_SPECIFICITY`.
     - `compute_subject_specificity` → median-table + `plot_subject_specificity`.
 6. **Section 3 — Spatial specificity.**
     - `compute_spatial_specificity` → median-table + `plot_spatial_specificity`. Markdown explicitly contrasts the two specificity axes (right subject? right region within subject?).
+
+## Notebook structure (`eval_population_kendall.ipynb`)
+
+Within-subject spatial Kendall-τ — promoted from §5 of the genewise notebook. Same TOC + minimal CFG + Shared Reconstruction pattern.
+
+1. Notebook configuration + shared reconstruction (PREPOST + prediction tables + `build_panel_view` closure).
+2. **Section 5 — Within-subject spatial Kendall-τ.** (section number retained for cross-doc continuity.)
+    - Mini-config: `KENDALL_GENE_LIST_PATH=None` (all genes — first run is cached, sublists filter inline), `KENDALL_ANCHOR_MODEL='naive'`, `KENDALL_BOTTOM_QUANTILE=None`, `KENDALL_MIN_REGIONS=5`.
+    - `compute_within_subject_kendall(view, models=MODELS, min_regions=KENDALL_MIN_REGIONS)` (cached on disk under `notebooks/cache/genewise_kendall/`). Two ranked plots: gene-wise (median Kendall-τ across subjects) and subject-wise (median Kendall-τ across genes).
+    - **Sublist subsection** (`KENDALL_SUBLIST_PATH='gtex_100hvg'`): `filter_kendall_to_genes(kendall_long, genes)` → `summarize_kendall_per_unit` → `plot_unitwise_kendall_ranked`. No recompute — the cache is the source of truth.
+
+## Notebook structure (`eval_regional.ipynb`)
+
+Region-stratified performance + the DLAM gene-highlighted region fan.
+
+1. Notebook configuration + shared reconstruction + global prediction tables.
+2. **Region-stratified performance**: per-`gtex_region` scatter / box / table (mirrors the Region section that used to live inside `eval_population.ipynb`), ordered cortical → subcortical → cerebellar.
+3. **DLAM gene-highlighted region fan**: compute one shared gene ranking once (via `compute_gene_rank_lookup` anchored on DLAM), then render per-region highlight panels so every region surfaces the same genes — exposes how the same set of top/bottom DLAM-predicted genes scatters across regions.
+
+## Notebook structure (`eval_distributional.ipynb`)
+
+Distributional eval — truth vs prediction distributions and summary statistics, in two regimes:
+
+1. Notebook configuration + cached-table load + helpers.
+2. **Matched held-out parcels only**: distributional comparison restricted to the per-subject observed parcel set (the LORO targets).
+3. **Add fullfit imputed parcels**: extends the comparison to all parcels reconstructed in the fullfit pass — surfaces whether the full-brain reconstruction's marginal distribution stays plausible against the GTEx-observed reference.
+
+All plotting helpers live in `eval_distributional.py`; the notebook is thin.
+
+## Notebook structure (`eval_pca.ipynb`)
+
+Latent-space pooled PCA recovery — the migration of `pca_cached_predictions.ipynb` into the canonical pattern.
+
+1. Notebook configuration + shared reconstruction.
+2. **Section 1 — Standard pooled PCA.** Variance spectra by source, ground-truth PCA recovery (raw component-wise points + LOWESS trend overlay).
+3. **Section 2 — Within-parcel demeaned PCA.** Subtracts per-parcel mean before PCA so residual subject/replicate variance is what's modeled; mirrors §1's spectra + recovery plots.
+4. **Section 3 — Within-parcel variance effects.** Quantifies how much of the recovery comes from the per-parcel mean vs the demeaned residual.
+5. **Section 4 — Sample × gene heatmaps.** Locks the gene order from truth so every panel shares columns; useful for direct truth-vs-pred visual inspection.
+6. **Section 5 — Parcel prediction scatters.** Per-parcel truth-vs-pred clouds.
+
+PLS surfaces from the original `pca_cached_predictions.ipynb` remain to migrate.
 
 ## Module layout (current)
 
@@ -247,11 +301,17 @@ Subject-keyed evaluation surfaces. Stable surfaces:
 - Subject specificity: `compute_subject_specificity`, `plot_subject_specificity`.
 - Spatial specificity: `compute_spatial_specificity`, `plot_spatial_specificity` (truth-of-other-regions null, mean-of-metrics not metric-of-mean).
 
-### `eval_latent.py` *(pending)*
-Planned: pooled PCA fit/eval, reconstruction/recovery, variance spectra, PLS fit + reconstruction, latent-score comparison plots. Should consume the canonical wide prediction tables.
+### `eval_latent.py`
+Pooled PCA + reconstruction + variance spectra, sample×gene heatmap utilities, and parcel-level prediction scatters. Consumes the canonical wide prediction tables. Drives `eval_pca.ipynb` (standard PCA → within-parcel demeaned PCA → within-parcel variance effects → sample×gene heatmaps → parcel scatters). PLS surfaces still to migrate from `pca_cached_predictions.ipynb` as needed.
+
+### `eval_distributional.py`
+Distributional evaluation surfaces (truth vs prediction distributions, summary statistics) on matched held-out parcels and on fullfit-imputed parcels. Drives `eval_distributional.ipynb`. *New since the prior plan revision; not part of the original migration roadmap.*
+
+### Adjacent eval modules (outside `/results`)
+`eval_embeddings.py` (PCA / UMAP embedding diagnostics across GTEx truth, post-ComBat truth, LORO reconstruction), `eval_flattened.py`, `eval_onbrain.py` (on-brain slice / glass-brain renders), `eval_pls_gradients.py` + `eval_pls_gradient_progression.py` (frozen AHBA PLS basis projection, LV gradient brain maps, age-progression trajectories), `eval_samples.py` (tensor view builders: `build_combat_tensor_view`, `build_prediction_tensor_view`), `eval_dlam_alignment.py`, `dlam_diagnostics.py` (per-subject DLAM fold inspection: T/U/T'/T_ref/T_full intermediates, basis-panel renders). These back `notebooks/eval/{embeddings,gradients,tensors}/` and `notebooks/eval/eval_gxp_onbrain_views.ipynb`. They're orthogonal to the `/results` refactor and not enumerated in detail here.
 
 ### `results_eda.py`
-Compatibility/reference. Migrate stable logic out into focused `eval_*` modules; keep re-exports until notebooks fully decouple. Houses unmigrated heavyweight single-subject visualizations (matrix panel, alignment scatter, performance triplet) used by `results_single_subject_predictions.ipynb`.
+Compatibility/reference. Migrate stable logic out into focused `eval_*` modules; keep re-exports until notebooks fully decouple. Houses **still-unmigrated** heavyweight single-subject visualizations (matrix panel, alignment scatter, performance triplet) used by `results_single_subject_predictions.ipynb`.
 
 ## Notebook migration plan
 
@@ -291,15 +351,22 @@ Compatibility/reference. Migrate stable logic out into focused `eval_*` modules;
 - **EDAConfig slimmed; HVG list now sourced from cache**: `EDAConfig.hvg_path` removed. PREPOST cache hash keys on `(csv_path, cache_root, gene_scope, ...)` + resolved `matching_policy` + CSV mtime/size. For `gene_scope='hvg'`, `_genes_from_cache(cfg)` reads `gene_names` from any subject npz under `<cache_root>/<gene_scope>/<model>/` (replaces `_resolve_hvg_path`/`_cached_gene_header`). For `gene_scope='allgenes'`, a small `_cached_csv_genes_all` helper reads the CSV header directly. Eval-prediction-tables manifest no longer carries `hvg_path`. Net effect: cfg uniqueness is fully determined by data lineage (csv_path, cache_root, gene_scope) rather than a separate file path.
 - **Data-folder restructure**: `atlas_info` and `gene_lists` moved from `data/raw/` to `data/metadata/`. Resolvers updated minimally with metadata-first / raw-fallback ordering: `AtlasOverlapPaths.atlas_info_dir` default, `_resolve_atlas_info_dir` swap-fallback, `default_cerebellar_gene_list_paths` `_pick(name)` per-file resolver, `_resolve_eval_gene_path` candidate list (in `eda_core.py` and `results_eda.py`), and `_resolve_optional_path` HVG fallback list in `loro_cache.py` + `writeup_pipeline.py`. Notebook CFG defaults updated; legacy paths still resolve.
 - **Notebook refresh (4 notebooks)**: `eval_data.ipynb`, `eval_population.ipynb`, `eval_population_genewise.ipynb`, `eval_singlesubject.ipynb` all carry a Table-of-Contents markdown cell right after the title, plus minimal CFG cells (`csv_path` + `cache_root` + `gene_scope` only — `hvg_path` and `plam_cache_dirname='plam'` removed since they are no longer load-bearing in the default flow). Section sublist defaults are `'gtex_100hvg'` (Section 3 sublist scatter, Kendall sublist, illustrative-subject view B); top-level analyses default to `gene_scope='allgenes'` with `EVAL_GENE_LIST_PATH=None`. All four notebooks already use up-to-date helpers (`prepare_pre_post_harmonization_cached`, `build_global_prediction_tables`, `compute_within_subject_kendall`, `make_prediction_eval_view`, `compute_genewise_metrics`, `compute_subject_specificity`, etc.) — no stale `results_eda.py` paths remain in their hot loops.
+- **`eval_latent.py` landed**: pooled PCA fit/eval, reconstruction recovery, variance spectra, within-parcel demeaned PCA, within-parcel variance effects, sample×gene heatmaps, parcel prediction scatters. Drives `eval_pca.ipynb` end-to-end. Closes the "Next" item that previously read "Begin `eval_latent.py`."
+- **`eval_distributional.py` + `eval_distributional.ipynb`**: new distributional eval axis (matched held-out parcels + fullfit-imputed parcels) — not in the original roadmap.
+- **Kendall split out of the genewise notebook** into its own surface (`eval_population_kendall.ipynb`), with the same gene-wise + subject-wise ranked + sublist-by-filter flow. The genewise notebook itself stays focused on per-gene predictability and the interactive single-gene scatter.
+- **Region stratification promoted to its own notebook** (`eval_regional.ipynb`) — adds the DLAM gene-highlighted region fan (one shared gene ranking, per-region highlight panels) on top of the existing region-stratified performance views.
+- **Subjectwise notebook renamed** to `eval_population_subjectwise.ipynb` (joins the `eval_population_*` naming family) and the illustrative-subjects section expanded from one view to **four**: A (colored by region), B (gene-stratified subset), C (focus gene isolated via `isolate_stratum`), D (focus gene `genes=[...]`, colored by region).
+- **Notebook relocation**: the seven results notebooks moved from the repo root into **`notebooks/eval/results/`**. Adjacent eval families live as siblings: `notebooks/eval/{embeddings, gradients, tensors}/` and `notebooks/eval/eval_gxp_onbrain_views.ipynb`.
+- **DLAM strategy buildout (orthogonal to the eval refactor but worth flagging):** `t_prior_residual` added as a first-class dlam strategy in `baseline_pipeline.py` (subject-frame atlas encode + decaying-kernel residual interpolator + atlas-stabilized scale floor). Kernel switch (`imq | gaussian | tps | gp`) wired from `SubjectCacheConfig` → CLI → sbatch env vars. The atlas-scale floor is intentionally code-only (default True, not on the CLI surface) for ablation hygiene. `loro_cache._cfg_hash` excludes `t_prior_*` keys when the strategy isn't `t_prior_residual` so pre-existing naive/plam/anchor caches stay valid.
 
 ### Next
-- Migrate heavyweight single-subject visualizations from `results_eda.py` into `eval_single_subject.py` (`plot_subject_model_matrix_panel`, `plot_subject_alignment_scatter_panel`, `plot_single_subject_scatter_triplet`, `select_representative_subject_by_gtex_median`, `resolve_publication_subject`). Retire `results_single_subject_predictions.ipynb`.
-- Wire bias forest into the Age section once the Sex pattern is settled in writing.
+- Migrate heavyweight single-subject visualizations from `results_eda.py` into `eval_single_subject.py` (`plot_subject_model_matrix_panel`, `plot_subject_alignment_scatter_panel`, `plot_single_subject_scatter_triplet`, `select_representative_subject_by_gtex_median`, `resolve_publication_subject`). Retire `results_single_subject_predictions.ipynb`. *(Confirmed still in `results_eda.py`.)*
+- Wire bias forest into the Age section of `eval_population.ipynb` (the Sex pattern is settled).
 - Decide whether `compute_fold_combo_metrics_from_cache` and `plot_fold_combo_ranked` get formally rewritten into `eval_population.py` (or a future `eval_cache.py`) or stay re-exported from `results_eda.py`.
-- Begin `eval_latent.py` (PCA → PLS migration from `pca_cached_predictions.ipynb`).
 - Continue migrating remaining hero plots to the font-token API as they are touched.
-- **Principled gene-sublist extraction (HVGs / DEGs)**. Today gene lists live as bare `.txt` files under `data/raw/gene_lists/` and `out/raw/gene_lists/` resolved by `eval_gene_list_path`; provenance (which dataset, which selection method, which parameters, which date) isn't tracked. Plan: add a builder module under `src/data_build/` (or analogue) that produces gene sublists deterministically from the canonical CSV + AHBA / GTEx counts — HVGs via mean-variance trend (configurable n / dispersion threshold), DEGs via per-tissue contrasts (e.g., cerebellum vs cortex, with FDR cut). Each produced file should carry a sidecar manifest (sha256, source CSV mtime, method, params, n_genes) so downstream eval consumers can verify what they're loading. Surfaces consumed: `EDAConfig.hvg_path`, `eval_gene_list_path`, the genewise notebook's sublist defaults.
-- **`samples.csv` builder for end-to-end repro**. The current `data/raw/gxp_samples.csv` is hand-assembled from upstream AHBA + GTEx downloads + coordinate parsing. Goal: a documented build pipeline (script entrypoint, ideally an sbatch-backed CLI) that goes raw downloads → harmonized CSV with frozen schema (`subject, age, sex, dataset, tissue_or_parcel, coordinates, <gene cols>`), so any contributor can reproduce the canonical input. Should integrate with the gene-sublist builder above (CSV produces gene header → HVG/DEG selection runs against it). This unblocks: ablating gene scope, swapping atlases, regenerating after upstream releases.
+- Migrate the remaining PLS / latent-score comparison surfaces from `pca_cached_predictions.ipynb` into `eval_latent.py` (PCA is in; PLS comparisons still pending).
+- **Principled gene-sublist extraction (HVGs / DEGs)**. Today gene lists live as bare `.txt` files under `data/metadata/gene_lists/` and `out/raw/gene_lists/` resolved by `eval_gene_list_path`; provenance (which dataset, which selection method, which parameters, which date) isn't tracked. Plan: add a builder module under `src/data_build/` (or analogue) that produces gene sublists deterministically from the canonical CSV + AHBA / GTEx counts — HVGs via mean-variance trend (configurable n / dispersion threshold), DEGs via per-tissue contrasts (e.g., cerebellum vs cortex, with FDR cut). Each produced file should carry a sidecar manifest (sha256, source CSV mtime, method, params, n_genes) so downstream eval consumers can verify what they're loading. Surfaces consumed: `eval_gene_list_path`, the genewise notebook's sublist defaults. *(No `src/data_build/` exists yet.)*
+- **`samples.csv` builder for end-to-end repro**. The current `data/raw/gxp_samples.csv` is hand-assembled from upstream AHBA + GTEx downloads + coordinate parsing. Goal: a documented build pipeline (script entrypoint, ideally an sbatch-backed CLI) that goes raw downloads → harmonized CSV with frozen schema (`subject, age, sex, dataset, tissue_or_parcel, coordinates, <gene cols>`), so any contributor can reproduce the canonical input. Should integrate with the gene-sublist builder above (CSV produces gene header → HVG/DEG selection runs against it). This unblocks: ablating gene scope, swapping atlases, regenerating after upstream releases. *(Not started.)*
 
 ## Validation checklist
 

@@ -33,6 +33,14 @@ context_packages/*
 # Notebook caches
 notebooks/cache/
 notebooks/results_*
+notebooks/eval/results/*anchor.ipynb
+notebooks/eval/results/*gp.ipynb
+notebooks/eval/results/*rbf.ipynb
+notebooks/eval/results/*rbf_shrink.ipynb
+notebooks/eval/results/*tprior_gp.ipynb
+notebooks/eval/results/*tprior_imq.ipynb
+notebooks/eval/results/*tprior_tps.ipynb
+
 # LaTeX build artifacts
 *.log
 *.synctex.gz

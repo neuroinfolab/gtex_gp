@@ -136,11 +136,21 @@ where $\alpha_g$ is the gene-specific intercept, $\mathbf{x}_{ij}$ is a vector o
 row-level covariates, $\boldsymbol{\beta}_g$ gives the gene-specific covariate
 effects, $\gamma_{ig}$ is the additive batch effect, and $\delta_{ig}$ is the
 multiplicative batch scale.  In the default analysis, $\mathbf{x}_{ij}$ contains
-normalized age, a sex indicator, and broad anatomical macro-system indicators, with
-cortical association cortex used as the reference macro-system.
+normalized age, a sex indicator, and broad anatomical macro-system indicators (visual-somatomotor cortex, association cortex, subcortical, cerebellar).  With only two
+batches and AHBA contributing a small post-mortem cohort, a single pooled OLS
+estimate of $\boldsymbol{\beta}_g$ across both batches is unreliable for any
+covariate whose distribution correlates with batch identity: at this sample size,
+systematic demographic differences between AHBA and GTEx can dominate the pooled
+fit and bias $\boldsymbol{\beta}_g$ away from either batch's true effect.  Our
+default pipeline therefore estimates $\boldsymbol{\beta}_g^{(i)}$ per batch for the
+subject-level demographic covariates (age, sex), and retains a single pooled
+coefficient for the parcel-level macro-system indicators, which has documented shared variance structure across batches.  With a larger number of batches and more diverse per-batch sampling, a
+fully pooled covariate model would be appropriate; in the present two-batch,
+small-AHBA setting, the mixed per-batch / pooled formulation is the principled
+default.
 
 Operationally, the pooled AHBA--GTEx expression table is first adjusted for the
-fitted covariate contribution $\mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g$.
+fitted covariate contribution $\mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g^{(i)}$.
 For each gene, the covariate-adjusted values are centered and scaled using pooled
 statistics across both platforms:
 \[
@@ -149,7 +159,7 @@ statistics across both platforms:
   \frac{
     y_{ijg}
     -
-    \mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g
+    \mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g^{(i)}
     -
     \hat{\alpha}_g
   }{\hat{\sigma}_g}.
@@ -189,7 +199,7 @@ the fitted covariate contribution:
   +
   \hat{\alpha}_g
   +
-  \mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g .
+  \mathbf{x}_{ij}^{\top}\hat{\boldsymbol{\beta}}_g^{(i)} .
 \]
 
 Because AHBA and GTEx do not sample the same biological object, the implementation
@@ -404,6 +414,137 @@ state is propagated across subjects.
        Eq.~\eqref{eq:det-inverse-affine}
 \State Decode to harmonized expression using Eq.~\eqref{eq:det-decode}
 \State Overwrite observed parcels using Eq.~\eqref{eq:det-overwrite}
+\State \Return $\hat{X}_{s,h}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{DLAM Atlas Prior Residual Variant}
+\label{sec:dlam-tprior}
+
+\subsection{Intuition}
+The atlas-prior residual variant of DLAM keeps the subject-specific latent
+expression basis as the sole frame of representation, sidestepping the need for an
+independent atlas latent decomposition and the affine alignment between the two.
+The harmonized atlas is instead projected directly through the subject's gene
+loadings to give a dense atlas reference in the subject's own latent coordinates.
+The subject-specific deviation from this atlas reference is measured only at
+observed parcels and is propagated to unobserved parcels by a decaying-kernel
+radial-basis interpolator that vanishes far from the observed support, so
+predictions track the subject near data and relax to the atlas reference
+elsewhere.  As in the original DLAM, harmonization, latent decomposition, residual
+interpolation, and decoding are estimated sequentially as point estimates.
+
+\subsection{Atlas projection and residual interpolation}
+\label{sec:tprior-align}
+
+The affine alignment in Eq.~\eqref{eq:det-affine-fit}, the spatial transport in
+Eq.~\eqref{eq:det-spatial-transport}, the RBF on aligned spatial scores in
+Eq.~\eqref{eq:det-rbf}, the ridge bridge in Eq.~\eqref{eq:det-ridge-regression},
+and the inverse-affine in Eq.~\eqref{eq:det-inverse-affine} are all replaced by a
+single subject-basis composition.  The variant keeps the subject PLS of
+Eqs.~\eqref{eq:det-expression-decomp}--\eqref{eq:det-spatial-decomp} as the sole
+frame, projects the atlas reference through that same basis, and models the
+subject-specific deviation as a smooth spatial field with a decaying-kernel
+interpolator.
+
+\paragraph{Atlas in the subject basis.}
+The dense atlas is projected through the subject gene loadings,
+\begin{equation}
+  \label{eq:tprior-encode}
+  Z_A^{(s)} \;=\; X_A^{(h)}\, W_s \;\in\; \mathbb{R}^{R\times K},
+\end{equation}
+yielding the atlas reference in the subject's own latent coordinates at every
+parcel.  Because $Z_s$ and $Z_A^{(s)}$ share the loadings $W_s$, both are decoded
+by the same map and no affine alignment is required.
+
+\paragraph{Residual at observed parcels.}
+\begin{equation}
+  \label{eq:tprior-residual}
+  E_s \;=\; Z_s - Z_A^{(s)}\!\bigl[\Omega_s,:\bigr]
+        \;\in\; \mathbb{R}^{|\Omega_s|\times K}.
+\end{equation}
+
+\paragraph{Decaying-kernel residual interpolation.}
+For each latent component $k = 1,\dots,K$, an inverse-multiquadric (IMQ) RBF
+interpolator with length scale $\ell$ is fit on the anchors
+$\bigl(y_{\Omega_s,i},\, E_{s,i,k}\bigr)$:
+\begin{equation}
+  \label{eq:tprior-imq}
+  \varphi(d) \;=\; \frac{1}{\sqrt{1 + (d/\ell)^2}}, \qquad d \geq 0.
+\end{equation}
+Component-wise weights $\alpha_s^{(k)} \in \mathbb{R}^{|\Omega_s|}$ solve the
+regularized system
+\begin{equation}
+  \label{eq:tprior-rbf-fit}
+  \bigl(\Phi_s + \lambda I\bigr)\,\alpha_s^{(k)} \;=\; E_{s,:,k},
+  \qquad
+  (\Phi_s)_{ij} \;=\; \varphi\!\bigl(\|y_{\Omega_s,i} - y_{\Omega_s,j}\|\bigr),
+\end{equation}
+and the field is evaluated at any parcel as
+\begin{equation}
+  \label{eq:tprior-rbf-eval}
+  g_{s,k}(y_r) \;=\;
+    \sum_{i=1}^{|\Omega_s|} \alpha_{s,i}^{(k)}\,
+    \varphi\!\bigl(\|y_r - y_{\Omega_s,i}\|\bigr).
+\end{equation}
+The IMQ kernel is strictly positive definite, monotonically decaying, and uses no
+polynomial tail, so $g_s(y_r) \to 0$ as
+$\min_i \|y_r - y_{\Omega_s,i}\| \to \infty$: the residual field vanishes far
+from observed parcels rather than extrapolating unboundedly.
+
+\paragraph{Composition, decoding, and overwrite.}
+\begin{equation}
+  \label{eq:tprior-compose}
+  \hat{Z}_{s,r} \;=\; Z_A^{(s)}(r) \;+\; g_s(y_r), \qquad r = 1,\dots,R,
+\end{equation}
+\begin{equation}
+  \label{eq:tprior-decode}
+  \hat{X}_{s,h} \;=\; \hat{Z}_s\, W_s^{\top}.
+\end{equation}
+Observed parcels are preserved by overwrite as in Eq.~\eqref{eq:det-overwrite}.
+
+\paragraph{Behavioral envelope.}
+Near observed parcels $g_s(y_r) \approx e_{s,r,:}$ and $\hat{Z}_{s,r} \to Z_s$,
+so the prediction tracks the subject.  Off-support $g_s(y_r) \to 0$ and
+$\hat{Z}_{s,r} \to Z_A^{(s)}(r)$, so the prediction is the atlas reference in the
+subject's frame---bounded and decoded by the same $W_s$ that decodes $Z_s$.
+Predictions therefore live between subject-near-data and an atlas-anchored
+fallback at all parcels, with no unbounded extrapolation regime.
+
+\subsection{Initialization}
+The shared harmonizer in Eq.~\eqref{eq:shared-harmonization} is fit first; the
+subject PLS in
+Eqs.~\eqref{eq:det-expression-decomp}--\eqref{eq:det-spatial-decomp} is fit on
+the harmonized observed matrix.  The atlas projection in
+Eq.~\eqref{eq:tprior-encode} and the residual in Eq.~\eqref{eq:tprior-residual}
+are direct evaluations.  The IMQ-RBF in
+Eqs.~\eqref{eq:tprior-rbf-fit}--\eqref{eq:tprior-rbf-eval} is the only learned
+spatial map.  No latent state is propagated across subjects.  As an
+implementation safeguard, the per-gene standardization used to fit the subject
+PLS is shared with the atlas projection in Eq.~\eqref{eq:tprior-encode} and
+lower-bounded by the atlas-side standard deviation, so out-of-sample projections
+of $X_A^{(h)}$ through a sparsely-supported basis remain stable on low-variance
+genes.
+
+\begin{algorithm}[H]
+\caption{DLAM atlas-prior residual variant for subject $s$}
+\begin{algorithmic}[1]
+\Require Atlas expression $X_A$, subject observations $X_s^{(G)}$ on $\Omega_s$,
+         parcel centroids $Y$, latent dimension $K$, IMQ length scale $\ell$
+\Ensure Completed harmonized atlas $\hat{X}_{s,h}$
+\State Fit the shared harmonizer; compute $X_A^{(h)}$ and $X_{s,h}^{obs}$ via
+       Eq.~\eqref{eq:shared-harmonization}
+\State Fit the subject PLS in
+       Eqs.~\eqref{eq:det-expression-decomp}--\eqref{eq:det-spatial-decomp}
+       to obtain $(W_s, Z_s)$
+\State Project the atlas through the subject basis:
+       $Z_A^{(s)} = X_A^{(h)} W_s$ via Eq.~\eqref{eq:tprior-encode}
+\State Compute residual anchors $E_s$ via Eq.~\eqref{eq:tprior-residual}
+\State Fit the IMQ-RBF residual interpolator via Eq.~\eqref{eq:tprior-rbf-fit}
+\State Evaluate $\hat{Z}_s$ at every parcel via
+       Eqs.~\eqref{eq:tprior-rbf-eval}--\eqref{eq:tprior-compose}
+\State Decode to harmonized expression via Eq.~\eqref{eq:tprior-decode}
+\State Overwrite observed parcels via Eq.~\eqref{eq:det-overwrite}
 \State \Return $\hat{X}_{s,h}$
 \end{algorithmic}
 \end{algorithm}

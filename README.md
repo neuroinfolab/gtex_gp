@@ -10,18 +10,28 @@ This repository contains the AHBA<->GTEx atlas-alignment workflow used for manus
 Primary write-up pipeline:
 - `notebooks/ahba_gtex_writeup_end_to_end.ipynb`
 
-Active analysis notebooks (eval refactor):
-- `eval_data.ipynb` — dataset-level EDA: PREPOST, demographics, coverage, global matrices, harmonization heatmaps.
-- `eval_population.ipynb` — population-level evaluation over cached LORO predictions: global scatters, sample-wise stratifications (Global / Sex / Age / Region), sex-bias forest, LORO fold-combo overlays + dist-colored gradients, fold-difficulty decomposition, distance-to-training.
-- `eval_singlesubject.ipynb` — subject-keyed analyses: per-subject performance distribution with percentile-anchored ranked plot (dynamic-shading at anchor>naive crossover), illustrative single-model scatters at p10/50/90, subject specificity (self vs other-subject truth at same region), spatial specificity (self vs mean of `k − 1` per-region metrics within subject).
-- `eval_population_genewise.ipynb` — per-gene analyses: gene-wise ranked + histogram overall and tissue-stratified; gene-sublist 3-model scatters with rank-based selection (`top` / `bottom` / `random` / `list_order`) or hand-picked highlights; ipywidgets dropdown for single-gene scatter (model + gene); within-subject spatial Kendall-τ with all-genes default + cached sublist filter.
-- `eval_embeddings.ipynb` — matrix-contract-backed GTEx embedding diagnostics: ground-truth PREPOST, post-ComBat PREPOST, then LORO reconstruction from prediction caches; region-wise PCA first, then UMAP after PCA pre-reduction, with `center|standardize|none` feature preprocessing and shared region/macro-system palettes.
-- Tensor visualizer notebooks (unified `TensorView` / `JointTensorView` surface in `src/eval_utils/eval_samples.py`; see `context_packages/samples_visualizer.md`):
-  - `eval_gxp_samples.ipynb` — raw GTEx + AHBA, standalone then joint (CSV via `build_native_tensor_view`).
-  - `eval_gxp_samples_combat.ipynb` — ComBat joint, pre (`raw_matched`) and post (`harmonized`), from PREPOST cubes via `build_combat_tensor_view`.
-  - `eval_gxp_samples_predictions_single.ipynb` — standalone held-out single tensors (`loro_truth` / `loro_recon`) on the matched native-GTEx-parcel axis (dense region ticks), from per-subject npz caches via `build_prediction_tensor_view`.
-  - `eval_gxp_samples_predictions_joint.ipynb` — LORO + full-fit predictions (`loro_truth` / `loro_recon` / `loro_fused` / `fullfit`) joint-vs-AHBA on the superset axis, plus dense `loro_fused` / `fullfit` standalones.
-  - Archived native single-dataset reference renders: `notebooks/arxiv/eval_gtex_gxp_samples.ipynb`, `notebooks/arxiv/eval_ahba_gxp_samples.ipynb`.
+Active analysis notebooks live under `notebooks/eval/` and `notebooks/preprocessing/`:
+
+- **Dataset-level EDA** (`notebooks/preprocessing/eval_data.ipynb`) — PREPOST, demographics, coverage, global matrices, harmonization heatmaps.
+- **Model evaluation** (`notebooks/eval/results/`, seven notebooks; per-section CFG + ToC pattern):
+  - `eval_population.ipynb` — population evaluation over cached LORO predictions: global scatters, sample-wise stratifications (Global / Sex / Age), sex-bias forest, LORO fold-combo overlays + dist-colored gradients, fold-difficulty decomposition, distance-to-training.
+  - `eval_population_genewise.ipynb` — per-gene analyses: gene-wise ranked + histogram overall and tissue-stratified; gene-sublist 3-model scatters; ipywidgets dropdown single-gene scatter.
+  - `eval_population_kendall.ipynb` — within-subject spatial Kendall-τ with all-genes default + cached sublist filter (gene-wise and subject-wise ranked).
+  - `eval_population_subjectwise.ipynb` — subject-keyed analyses: per-subject performance distribution with percentile-anchored ranked plot, four illustrative-subject views (region / gene-stratified / focus-gene-isolated / focus-gene-by-region), subject specificity, spatial specificity.
+  - `eval_regional.ipynb` — region-stratified performance + DLAM gene-highlighted region fan.
+  - `eval_distributional.ipynb` — distributional comparison on matched held-out parcels and on fullfit-imputed parcels (`src/eval_utils/eval_distributional.py`).
+  - `eval_pca.ipynb` — pooled PCA recovery: standard, within-parcel demeaned, within-parcel variance effects, sample×gene heatmaps, parcel scatters (`src/eval_utils/eval_latent.py`).
+- **Embedding diagnostics** (`notebooks/eval/embeddings/`) — six cov/nocov variants for GTEx-only and cross-dataset.
+- **Gradients / on-brain** (`notebooks/eval/gradients/`) — DLAM alignment, PLS gradient progression, PLS-gradients-on-brain. Plus `notebooks/eval/eval_gxp_onbrain_views.ipynb` at the eval root.
+- **Tensor visualizers** (`notebooks/eval/tensors/`, unified `TensorView`/`JointTensorView` surface in `src/eval_utils/eval_samples.py`; see `context_packages/markdowns/samples_visualizer.md`):
+  - `eval_gxp_samples.ipynb` — raw GTEx + AHBA standalone then joint (CSV via `build_native_tensor_view`).
+  - `eval_gxp_samples_combat.ipynb` — ComBat joint, pre (`raw_matched`) and post (`harmonized`), from PREPOST cubes.
+  - `eval_gxp_samples_pipeline.ipynb` — end-to-end pipeline view.
+  - `eval_gxp_samples_predictions_joint.ipynb` + `eval_gxp_samples_predictions_joint_alpha.ipynb` — LORO + full-fit (`loro_truth` / `loro_recon` / `loro_fused` / `fullfit`) joint-vs-AHBA on the superset axis.
+  - `eval_gxp_onbrain_view_prep.ipynb` — prep for on-brain renders.
+- **Variant / sweep notebooks at the repo root** read from per-variant LORO cache roots:
+  - DLAM `t_prior_residual` kernel sweep: `eval_population_genewise_tprior_{gp,imq,tps}.ipynb`, `eval_population_subjectwise_tprior_imq.ipynb`, `eval_population_tprior_imq.ipynb`.
+  - Legacy spatial-interpolation sweep: `eval_population_genewise_{anchor,gp,rbf,rbf_shrink}.ipynb`.
 - `notebooks/coordinate_overlay_3d_mni.ipynb` — GTEx/AHBA spatial assignment inspection.
 
 Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `results_single_subject_predictions.ipynb`, `pca_cached_predictions.ipynb`. Older exploratory variants live under `notebooks/`.
@@ -54,6 +64,8 @@ Legacy / reference notebooks at repo root: `results_cached_predictions.ipynb`, `
 - **Dynamic sbatch array sizing**: `run_loro_cache_array.sbatch` is fixed at `--array=1-385%64` (full GTEx subject pool ceiling). Tasks beyond the policy's eligible count exit cleanly with a `[skip-out-of-range]` log line via `scripts/run_loro_cache_batch.py`. The same submission line works across all `MATCHING_POLICY` × `MIN_OBSERVED_PARCELS` configurations.
 - **Sample visualizer plan**: `context_packages/samples_visualizer.md` is the live plan for explaining the full tensor pipeline: original GTEx/AHBA inputs, the raw joint ground-truth view on a shared AHBA superset region frame (`JointTensorView` + `plot_joint_tensor_voxels`, with translucent GTEx imputation-target cells driven by `future_imputation_mask`), ComBat-harmonized matched data, strict LORO imputed data, and full-brain GTEx imputed data. UMAPs are planned primarily for raw matched, ComBat harmonized, and full-brain imputed stages.
 - **Embedding diagnostics**: `src/eval_utils/eval_embeddings.py` emits a shared subject-region x gene matrix contract. PREPOST is the direct source for pre/post ComBat; `TensorView` is the adapter for LORO/fullfit and visualizer-derived views. PCA/UMAP helpers apply explicit feature preprocessing (`center`, `standardize`, `none`) and reuse the region-stratified eval palette from `eval_style`.
+- **DLAM atlas-prior residual variant (`t_prior_residual`)**: a new DLAM strategy in `src/models/baseline_pipeline.py` that keeps the subject PLS as the sole frame, projects the harmonized atlas through the *subject's* gene loadings to obtain a dense atlas reference in the subject's own latent coordinates, measures the subject-specific residual only at observed parcels, and propagates it with a decaying-kernel RBF that vanishes off-support. The affine basis map, latent spatial transport, U-field RBF, ridge bridge, and inverse-affine step of the original DLAM are bypassed. Residual kernel switch — `imq` (default) | `gaussian` | `tps` | `gp` — plumbed through `SubjectCacheConfig.t_prior_{interp,length_scale,gp_noise,gp_optimize}` → CLI flags on `loro_cache.py` and `scripts/run_loro_cache_batch.py` → env vars on `run_loro_cache_array.sbatch`. The atlas-scale floor (`t_prior_atlas_scale_floor`, default `True`) is intentionally code-only — not on the CLI surface — for ablation hygiene. Method documented as `\section{DLAM Atlas Prior Residual Variant}` in `docs/manuscript/main_edits.tex`.
+- **Refactor migrations completed**: `src/eval_utils/eval_latent.py` is now live (pooled PCA recovery + within-parcel demeaned PCA + sample×gene heatmaps + parcel scatters, drives `eval_pca.ipynb`); `src/eval_utils/eval_distributional.py` + `eval_distributional.ipynb` are new (distributional comparison on matched and fullfit-imputed parcels). Notebook splits: Kendall promoted out of the genewise notebook into `eval_population_kendall.ipynb`; region stratification promoted into `eval_regional.ipynb`; subjectwise renamed from `eval_singlesubject.ipynb` into `eval_population_subjectwise.ipynb` with illustrative views expanded from one to four (region / gene-stratified / focus-gene-isolated / focus-gene-by-region). All seven base eval notebooks relocated from the repo root into `notebooks/eval/results/`.
 
 ## Repository Layout
 
@@ -191,14 +203,14 @@ GENE_SCOPE=hvg sbatch run_loro_cache_array.sbatch
 ## Notes for Contributors
 
 - Current iterative development target is **all-genes** EDA/utilities first.
-- Keep new analysis work in the active `eval_*` notebooks at the repo root; treat `notebooks/` and the `results_*.ipynb` notebooks at root as historical unless explicitly reviving one. `notebooks/cache/` is an active helper-cache location and is not historical.
+- Keep new analysis work in the active eval notebooks under `notebooks/eval/results/` (plus `notebooks/eval/{embeddings,gradients,tensors}/` for adjacent families); treat `notebooks/` and the `results_*.ipynb` notebooks at the repo root as historical unless explicitly reviving one. The variant sweep notebooks at the repo root (e.g. `eval_population_genewise_tprior_*.ipynb`) are active. `notebooks/cache/` is an active helper-cache location and is not historical.
 - `EDAConfig` (in `eda_core.py`) supports model-directory overrides (`naive_cache_dirname`, `dlam_cache_dirname`, `plam_cache_dirname`) for side-by-side rank experiments (`plam_rank3`, `plam_rank4`, `plam_dynamicrank`).
-- New eval-refactor work should target `src/eval_utils/eda_core.py`, `src/eval_utils/eval_population.py`, `src/eval_utils/eval_single_subject.py`, and the future `eval_latent.py`. Treat `results_eda.py` as compatibility/reference during migration; do not add new functionality there.
+- New eval-refactor work should target `src/eval_utils/eda_core.py`, `src/eval_utils/eval_population.py`, `src/eval_utils/eval_single_subject.py`, `src/eval_utils/eval_latent.py`, and `src/eval_utils/eval_distributional.py`. Treat `results_eda.py` as compatibility/reference during migration; do not add new functionality there. The heavyweight single-subject visualizations (matrix panel, alignment scatter, performance triplet) still live in `results_eda.py` and remain on the migration backlog.
 - Always route metric labels through `eval_style.format_metric_label` (or `format_legend_label`); never hardcode `Pearson R` / `R^2` / `rho` / `tau` strings in plots or tables.
 - Use the font-token system (`font_size`, `_DEFAULT_FONT_SIZES`, `font_sizes={...}` per-call overrides, `set_font_scale`) when adding or tuning hero plots — single global scale knob.
 - Helper-level caches (PREPOST, genewise Kendall) belong under `notebooks/cache/<name>/<hash>.pkl`. `out/` is reserved for true prediction artifacts.
 - When adding a new collaborator share via `nfs4_setfacl` on `/scratch/asr655/...`, always re-assert the inheritable OWNER@ ACE on the same tree, otherwise newly-created files land with mode `0o000` (see CONTEXT.md → "NFSv4 ACL gotcha").
 - Do not edit `src/eval_utils/results_eda_arxiv.py`; it is a backup snapshot.
-- See `CONTEXT.md` for a fast onboarding summary intended for parallel agents, `context_packages/results_eda_refactor_plan.md` for the live eval refactor plan, and `context_packages/samples_visualizer.md` for the sample/tensor visualizer plan.
+- See `CONTEXT.md` for a fast onboarding summary intended for parallel agents, `context_packages/markdowns/results_eda_refactor_plan.md` for the live eval refactor plan, and `context_packages/markdowns/samples_visualizer.md` for the sample/tensor visualizer plan.
 
-Last updated at: 2026-05-21
+Last updated at: 2026-05-28
