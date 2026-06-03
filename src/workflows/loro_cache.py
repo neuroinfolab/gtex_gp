@@ -69,6 +69,11 @@ class SubjectCacheConfig:
     seed: int = 123
     combat_use_covariates: bool = True
     drop_macro_system_covariate: bool = False
+    # ComBat covariate batch-handling mode (used when combat_use_covariates=True):
+    #   'mixed'     — age + sex per batch, macro_system pooled (default)
+    #   'pooled'    — all covariates pooled (legacy pre-fix behavior)
+    #   'per_batch' — all covariates per batch
+    cov_batch_mode: str = "mixed"
     latent_dim: int = 3
     dynamic_rank: bool = False
     plam_latent_dim_max: int = 10
@@ -191,6 +196,11 @@ def _cfg_hash(cfg: SubjectCacheConfig, subject: str, model_name: str) -> str:
             "t_prior_atlas_scale_floor",
         ):
             payload.pop(key, None)
+    # Default cov_batch_mode='mixed' is treated as identity for caches built
+    # before this knob existed; only include it in the hash when overridden so
+    # existing caches stay valid by default.
+    if str(payload.get("cov_batch_mode", "mixed")) == "mixed":
+        payload.pop("cov_batch_mode", None)
     payload["subject"] = str(subject)
     payload["model_name"] = str(model_name)
     return io_utils.hash_config(payload)
@@ -217,6 +227,7 @@ def _fit_full_harmonizer(ahba_raw: pd.DataFrame, gtex_raw: pd.DataFrame, genes: 
     hcfg = SimpleNamespace(
         combat_use_covariates=bool(cfg.combat_use_covariates),
         drop_macro_system_covariate=bool(cfg.drop_macro_system_covariate),
+        cov_batch_mode=str(cfg.cov_batch_mode),
     )
     harm = fit_harmonizer(ahba_raw, gtex_raw, genes, method="combat", cfg=hcfg)
     ahba_h = harm.transform(ahba_raw, "AHBA")
@@ -423,6 +434,7 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
         hcfg = SimpleNamespace(
             combat_use_covariates=bool(cfg.combat_use_covariates),
             drop_macro_system_covariate=bool(cfg.drop_macro_system_covariate),
+            cov_batch_mode=str(cfg.cov_batch_mode),
         )
         harm = fit_harmonizer(ahba_raw, gtex_train, genes, method="combat", cfg=hcfg)
         ahba_h = harm.transform(ahba_raw, "AHBA")
@@ -468,6 +480,11 @@ def process_subject_model(cfg: SubjectCacheConfig, subject: str, model_name: str
                     "gp_noise": float(cfg.gp_noise),
                     "gp_optimize": bool(cfg.gp_optimize),
                     "gp_n_restarts": int(cfg.gp_n_restarts),
+                    "t_prior_interp": str(cfg.t_prior_interp),
+                    "t_prior_length_scale": float(cfg.t_prior_length_scale),
+                    "t_prior_gp_noise": float(cfg.t_prior_gp_noise),
+                    "t_prior_gp_optimize": bool(cfg.t_prior_gp_optimize),
+                    "t_prior_atlas_scale_floor": bool(cfg.t_prior_atlas_scale_floor),
                     "seed": int(cfg.seed),
                     "c_min": int(cfg.c_min),
                     "fold_hemispheres": bool(fold_hemispheres),
@@ -623,6 +640,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
     p.add_argument("--drop-macro-system-covariate", default=str(SubjectCacheConfig.drop_macro_system_covariate).lower())
+    p.add_argument(
+        "--cov-batch-mode",
+        choices=["mixed", "pooled", "per_batch"],
+        default=SubjectCacheConfig.cov_batch_mode,
+        help="ComBat covariate batch-handling: mixed (age+sex per-batch, macro pooled; default), pooled, per_batch.",
+    )
     p.add_argument("--latent-dim", type=int, default=SubjectCacheConfig.latent_dim)
     p.add_argument("--dynamic-rank", default=str(SubjectCacheConfig.dynamic_rank).lower())
     p.add_argument("--plam-latent-dim-max", type=int, default=SubjectCacheConfig.plam_latent_dim_max)
@@ -688,6 +711,7 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
         drop_macro_system_covariate=_parse_bool(a.drop_macro_system_covariate),
+        cov_batch_mode=str(a.cov_batch_mode).lower(),
         latent_dim=int(a.latent_dim),
         dynamic_rank=_parse_bool(a.dynamic_rank),
         plam_latent_dim_max=int(a.plam_latent_dim_max),

@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=SubjectCacheConfig.seed)
     p.add_argument("--combat-use-covariates", default=str(SubjectCacheConfig.combat_use_covariates).lower())
     p.add_argument("--drop-macro-system-covariate", default=str(SubjectCacheConfig.drop_macro_system_covariate).lower())
+    p.add_argument(
+        "--cov-batch-mode",
+        choices=["mixed", "pooled", "per_batch"],
+        default=SubjectCacheConfig.cov_batch_mode,
+        help="ComBat covariate batch-handling: mixed (age+sex per-batch, macro pooled; default), pooled, per_batch.",
+    )
     p.add_argument("--latent-dim", type=int, default=SubjectCacheConfig.latent_dim)
     p.add_argument("--dynamic-rank", default=str(SubjectCacheConfig.dynamic_rank).lower())
     p.add_argument("--plam-latent-dim-max", type=int, default=SubjectCacheConfig.plam_latent_dim_max)
@@ -113,6 +119,7 @@ def _cfg_from_args(a: argparse.Namespace) -> SubjectCacheConfig:
         # t_prior_atlas_scale_floor deliberately omitted: default True, code-only.
         seed=int(a.seed),
         combat_use_covariates=_parse_bool(a.combat_use_covariates),
+        cov_batch_mode=str(a.cov_batch_mode).lower(),
         drop_macro_system_covariate=_parse_bool(a.drop_macro_system_covariate),
         latent_dim=int(a.latent_dim),
         dynamic_rank=_parse_bool(a.dynamic_rank),

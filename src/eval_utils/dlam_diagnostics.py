@@ -41,6 +41,7 @@ class DlamDiagnosticsConfig:
     min_observed_parcels: int = 5
     combat_use_covariates: bool = True
     drop_macro_system_covariate: bool = False
+    cov_batch_mode: str = "mixed"
     atlas_agg: str = "mean"
     gtex_rep_mode: str = "centroid"
     gtex_hemi_mode: str = "mirror_left"
@@ -185,6 +186,7 @@ def _subject_cache_cfg(cfg: DlamDiagnosticsConfig) -> SubjectCacheConfig:
         min_observed_parcels=cfg.min_observed_parcels,
         combat_use_covariates=cfg.combat_use_covariates,
         drop_macro_system_covariate=cfg.drop_macro_system_covariate,
+        cov_batch_mode=str(getattr(cfg, "cov_batch_mode", "mixed")),
         atlas_agg=cfg.atlas_agg,
         gtex_rep_mode=cfg.gtex_rep_mode,
         gtex_hemi_mode=cfg.gtex_hemi_mode,
@@ -376,6 +378,7 @@ def _fit_dlam_fold_payload(
     hcfg = SimpleNamespace(
         combat_use_covariates=bool(cfg.combat_use_covariates),
         drop_macro_system_covariate=bool(cfg.drop_macro_system_covariate),
+        cov_batch_mode=str(getattr(cfg, "cov_batch_mode", "mixed")),
     )
     harm = fit_harmonizer(ahba_raw, gtex_train, genes, method="combat", cfg=hcfg)
     ahba_h = harm.transform(ahba_raw, "AHBA")

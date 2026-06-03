@@ -103,6 +103,8 @@ __all__ = [
     "plot_metric_delta_violins",
     "plot_metric_violins",
     "plot_region_model_metric_heatmap",
+    "plot_sample_metric_histogram_by_age",
+    "plot_sample_metric_histogram_by_age_proportion",
     "plot_stratified_scatter",
     "plot_stratified_distribution",
     "format_stratified_metric_table",
@@ -3768,6 +3770,250 @@ def plot_stratified_distribution(
         handles, labels = ax.get_legend_handles_labels()
         ax.legend(handles, [model_label(v) for v in labels], title="Model", frameon=True, fancybox=False)
     return fig, ax
+
+
+def _sample_age_histogram_bins(
+    metric_df: pd.DataFrame,
+    *,
+    metric: str,
+    model: str,
+    bin_width: float,
+    metric_min: float | None,
+    metric_max: float | None,
+) -> tuple[pd.DataFrame, list[str], np.ndarray, list[str]]:
+    """Internal: build the count cube `(metric_bin × age_bin)` for the bar plots.
+
+    Returns `(counts_df, bin_labels, bin_edges, age_order)`. `counts_df` is
+    wide: index = `bin_labels`, columns = `age_order`, values = sample counts.
+    Drops rows where the chosen `metric` is NaN.
+    """
+    if "age" not in metric_df.columns:
+        raise KeyError("metric_df must include an 'age' column (compute with stratify_by='age')")
+    if metric not in metric_df.columns:
+        raise KeyError(f"metric_df missing '{metric}' column")
+
+    d = metric_df.copy()
+    d["model"] = d["model"].astype(str).str.lower()
+    d = d[d["model"] == str(model).lower()]
+    d = d[d[metric].notna()].copy()
+    if d.empty:
+        raise RuntimeError(f"No rows for model={model!r} with non-null {metric!r}")
+
+    vals = d[metric].to_numpy(dtype=np.float64)
+    lo = float(metric_min) if metric_min is not None else float(np.floor(vals.min() / bin_width) * bin_width)
+    hi = float(metric_max) if metric_max is not None else float(np.ceil(vals.max() / bin_width) * bin_width)
+    if not (hi > lo):
+        raise ValueError(f"metric_max ({hi}) must exceed metric_min ({lo})")
+    n_bins = int(round((hi - lo) / float(bin_width)))
+    if n_bins < 1:
+        raise ValueError("bin_width too large for the value range")
+    edges = np.linspace(lo, hi, n_bins + 1)
+
+    # Right-inclusive on the last bin so values exactly at `hi` are kept.
+    idx = np.clip(np.searchsorted(edges, vals, side="right") - 1, 0, n_bins - 1)
+    bin_labels = [f"{edges[i]:.2g}–{edges[i + 1]:.2g}" for i in range(n_bins)]
+    d["_metric_bin"] = pd.Categorical(
+        [bin_labels[i] for i in idx], categories=bin_labels, ordered=True,
+    )
+
+    age_order = sorted(d["age"].dropna().astype(str).unique().tolist(), key=_age_sort_key)
+    d["_age_str"] = d["age"].astype(str)
+    counts = (
+        d.groupby(["_metric_bin", "_age_str"], observed=False)
+        .size().unstack(fill_value=0)
+    )
+    # Re-order columns deterministically; fill missing bins with 0 rows.
+    counts = counts.reindex(index=bin_labels, columns=age_order, fill_value=0)
+    return counts, bin_labels, edges, age_order
+
+
+def _age_palette(age_order: Sequence[str]) -> dict[str, tuple[float, float, float, float]]:
+    """Sequential plasma palette over the ordered age decades (young → old)."""
+    cmap = plt.get_cmap("plasma")
+    n = max(1, len(age_order))
+    return {a: cmap(0.10 + 0.78 * (i / max(1, n - 1))) for i, a in enumerate(age_order)}
+
+
+# Per-metric default bin width for the sample-wise age histograms. Pearson r
+# concentrates near 1.0, so 0.05-width bins surface the right-tail shape that
+# 0.1-width bins flatten.
+_SAMPLE_HIST_DEFAULT_BIN_WIDTH = {
+    "pearson_r":  0.05,
+    "spearman_r": 0.05,
+    "r2":         0.1,
+    "rmse":       0.1,
+}
+
+
+def _resolve_sample_hist_bin_width(metric: str, bin_width: float | None) -> float:
+    if bin_width is not None:
+        return float(bin_width)
+    return float(_SAMPLE_HIST_DEFAULT_BIN_WIDTH.get(str(metric).lower(), 0.1))
+
+
+# Larger font defaults for the sample-wise age histograms. The legacy FONT
+# dict (title=11, label=10, tick=9, legend=9) is too small at notebook DPI;
+# these are tuned so titles, axes, ticks, and the legend all read at the
+# same scale as the ranked-percentile plot.
+_SAMPLE_HIST_FONTS = {
+    "title":  FONT["title"] + 8,   # 19
+    "label":  FONT["label"] + 6,   # 16
+    "tick":   FONT["tick"] + 5,    # 14
+    "legend": FONT["legend"] + 5,  # 14
+    "annot":  FONT["tick"] + 3,    # 12 — for `n=…` markers on the proportion plot
+}
+
+
+def plot_sample_metric_histogram_by_age(
+    metric_df: pd.DataFrame,
+    *,
+    metric: str = "pearson_r",
+    model: str = "dlam",
+    bin_width: float | None = None,
+    metric_min: float | None = None,
+    metric_max: float | None = None,
+    figsize: Tuple[float, float] | None = None,
+    dpi: int = 180,
+) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
+    """Stacked sample-count histogram of per-sample `metric` for a single
+    model, with each bar segmented by GTEx age decade.
+
+    `metric_df` is `compute_prediction_metrics(view, unit='sample',
+    stratify_by='age', ...)` — one row per `(subject_region_key, model)`
+    with `metric` and `age` columns. `bin_width=None` (default) selects a
+    per-metric default (0.05 for pearson_r/spearman_r, 0.1 elsewhere);
+    pass an explicit value to override. `metric_min`/`metric_max` snap to
+    data range when None.
+
+    Returns `(fig, ax, counts_df)` where `counts_df` has metric-bin index
+    and age-decade columns (counts per cell).
+    """
+    bw = _resolve_sample_hist_bin_width(metric, bin_width)
+    counts, bin_labels, _edges, age_order = _sample_age_histogram_bins(
+        metric_df,
+        metric=metric, model=model, bin_width=bw,
+        metric_min=metric_min, metric_max=metric_max,
+    )
+    palette = _age_palette(age_order)
+
+    if figsize is None:
+        figsize = (max(8.5, 0.7 * len(bin_labels) + 4.5), 6.0)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+
+    x = np.arange(len(bin_labels), dtype=float)
+    bottom = np.zeros(len(bin_labels), dtype=float)
+    for age in age_order:
+        heights = counts[age].to_numpy(dtype=float)
+        ax.bar(
+            x, heights, bottom=bottom, width=0.78,
+            color=palette[age], edgecolor="white", linewidth=0.6,
+            label=str(age),
+        )
+        bottom += heights
+
+    label_rotation = 30 if len(bin_labels) > 10 else 0
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        bin_labels, rotation=label_rotation,
+        ha="right" if label_rotation else "center",
+        fontsize=_SAMPLE_HIST_FONTS["tick"],
+    )
+    ax.tick_params(axis="y", labelsize=_SAMPLE_HIST_FONTS["tick"])
+    ax.set_xlabel(format_legend_label(metric), fontsize=_SAMPLE_HIST_FONTS["label"])
+    ax.set_ylabel("Sample count", fontsize=_SAMPLE_HIST_FONTS["label"])
+    ax.set_title(
+        f"Sample-wise {format_legend_label(metric)} distribution by age — {model_label(model)}",
+        fontsize=_SAMPLE_HIST_FONTS["title"],
+    )
+    ax.grid(True, axis="y", alpha=0.18)
+    ax.set_axisbelow(True)
+    ax.legend(
+        title="Age bin", frameon=True, fancybox=False,
+        fontsize=_SAMPLE_HIST_FONTS["legend"],
+        title_fontsize=_SAMPLE_HIST_FONTS["legend"] + 1,
+        loc="best",
+    )
+    apply_tick_style(ax, label_fontsize=_SAMPLE_HIST_FONTS["tick"])
+    fig.tight_layout()
+    return fig, ax, counts
+
+
+def plot_sample_metric_histogram_by_age_proportion(
+    metric_df: pd.DataFrame,
+    *,
+    metric: str = "pearson_r",
+    model: str = "dlam",
+    bin_width: float | None = None,
+    metric_min: float | None = None,
+    metric_max: float | None = None,
+    figsize: Tuple[float, float] | None = None,
+    dpi: int = 180,
+) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
+    """Stacked-proportion variant of `plot_sample_metric_histogram_by_age`.
+
+    Each bar is normalized to 1.0 so the segment heights show the age
+    *composition* of every performance bin, independent of absolute count.
+    Bins with zero samples render as empty. `bin_width=None` (default)
+    uses the per-metric default (0.05 for pearson_r/spearman_r).
+
+    Returns `(fig, ax, proportions_df)` (proportions sum to 1 along axis=1).
+    """
+    bw = _resolve_sample_hist_bin_width(metric, bin_width)
+    counts, bin_labels, _edges, age_order = _sample_age_histogram_bins(
+        metric_df,
+        metric=metric, model=model, bin_width=bw,
+        metric_min=metric_min, metric_max=metric_max,
+    )
+    totals = counts.sum(axis=1).replace(0, np.nan)
+    proportions = counts.div(totals, axis=0).fillna(0.0)
+    palette = _age_palette(age_order)
+
+    if figsize is None:
+        figsize = (max(8.5, 0.7 * len(bin_labels) + 4.5), 6.0)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=int(dpi))
+
+    x = np.arange(len(bin_labels), dtype=float)
+    bottom = np.zeros(len(bin_labels), dtype=float)
+    for age in age_order:
+        heights = proportions[age].to_numpy(dtype=float)
+        ax.bar(
+            x, heights, bottom=bottom, width=0.78,
+            color=palette[age], edgecolor="white", linewidth=0.6,
+            label=str(age),
+        )
+        bottom += heights
+
+    # Annotate per-bar total n on top so empty/sparse bins are obvious.
+    for xi, n in zip(x, counts.sum(axis=1).to_numpy()):
+        ax.text(float(xi), 1.01, f"n={int(n)}", ha="center", va="bottom",
+                fontsize=_SAMPLE_HIST_FONTS["annot"], color="#555555")
+
+    label_rotation = 30 if len(bin_labels) > 10 else 0
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        bin_labels, rotation=label_rotation,
+        ha="right" if label_rotation else "center",
+        fontsize=_SAMPLE_HIST_FONTS["tick"],
+    )
+    ax.tick_params(axis="y", labelsize=_SAMPLE_HIST_FONTS["tick"])
+    ax.set_xlabel(format_legend_label(metric), fontsize=_SAMPLE_HIST_FONTS["label"])
+    ax.set_ylabel("Age composition (proportion)", fontsize=_SAMPLE_HIST_FONTS["label"])
+    ax.set_ylim(0.0, 1.08)
+    ax.set_title(
+        f"Sample-wise {format_legend_label(metric)} age composition — {model_label(model)}",
+        fontsize=_SAMPLE_HIST_FONTS["title"],
+    )
+    ax.grid(True, axis="y", alpha=0.18)
+    ax.set_axisbelow(True)
+    ax.legend(
+        title="Age bin", frameon=True, fancybox=False,
+        fontsize=_SAMPLE_HIST_FONTS["legend"],
+        title_fontsize=_SAMPLE_HIST_FONTS["legend"] + 1,
+        loc="best",
+    )
+    apply_tick_style(ax, label_fontsize=_SAMPLE_HIST_FONTS["tick"])
+    fig.tight_layout()
+    return fig, ax, proportions
 
 
 def format_stratified_metric_table(

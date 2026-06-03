@@ -28,6 +28,7 @@ def fit_harmonizer(train_ahba_df, train_gtex_df, gene_cols, method, cfg):
             gene_cols,
             use_covariates=bool(getattr(cfg, "combat_use_covariates", True)),
             drop_macro_system_covariate=bool(getattr(cfg, "drop_macro_system_covariate", False)),
+            cov_batch_mode=str(getattr(cfg, "cov_batch_mode", "mixed")),
         )
     if m == "hier_affine":
         subset = getattr(cfg, "hier_subject_subset", None)

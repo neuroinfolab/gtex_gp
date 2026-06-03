@@ -24,6 +24,9 @@ HVG_PATH="${HVG_PATH:-data/metadata/gene_lists/ahba_100hvg.txt}"
 USE_CACHE="${USE_CACHE:-true}"
 COMBAT_USE_COVARIATES="${COMBAT_USE_COVARIATES:-true}"
 DROP_MACRO_SYSTEM_COVARIATE="${DROP_MACRO_SYSTEM_COVARIATE:-false}"
+# ComBat covariate batch-handling mode: mixed | pooled | per_batch
+# 'mixed' (default): age+sex per-batch coefficients, macro_system pooled.
+COV_BATCH_MODE="${COV_BATCH_MODE:-mixed}"
 OUT_ROOT="${OUT_ROOT:-out/loro_subject_cache_c}"  # convention: _c=centroids, _cv=centroids_and_volumes
 DLAM_STRATEGY="${DLAM_STRATEGY:-baseline}" # baseline, reference_residual, constrained_anchor, pls_linear_projection, distance_shrink, gp_uncertainty, moe_basis
 DLAM_SPATIAL_METHOD="${DLAM_SPATIAL_METHOD:-rbf}"
@@ -79,6 +82,7 @@ SINGULARITY_CMD="source /ext3/env.sh && python3 scripts/run_loro_cache_batch.py 
   --t-prior-gp-optimize \"${T_PRIOR_GP_OPTIMIZE}\" \
   --combat-use-covariates \"${COMBAT_USE_COVARIATES}\" \
   --drop-macro-system-covariate \"${DROP_MACRO_SYSTEM_COVARIATE}\" \
+  --cov-batch-mode \"${COV_BATCH_MODE}\" \
   --latent-dim \"${LATENT_DIM}\" \
   --dynamic-rank \"${DYNAMIC_RANK}\" \
   --plam-latent-dim-max \"${PLAM_MAX_RANK}\" \

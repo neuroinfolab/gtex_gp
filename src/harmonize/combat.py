@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -39,7 +39,22 @@ def _build_covariates(
     df: pd.DataFrame,
     use_covariates: bool,
     drop_macro_system_covariate: bool = False,
+    age_mean: float | None = None,
+    age_sd: float | None = None,
 ) -> np.ndarray:
+    """Construct the covariate design matrix for ComBat.
+
+    The continuous ``age`` column is z-scored. At fit time the scaling
+    ``(mean, sd)`` is derived from the input DataFrame (the pooled AHBA+GTEx
+    table). At transform time the harmonizer must pass in ``age_mean``/``age_sd``
+    captured at fit so that the same z-scaling is used on both sides — otherwise
+    ``transform`` re-derives the scaling from whatever rows are handed in and the
+    add-back step no longer cancels the fit-time covariate removal. In the
+    degenerate small-batch case (single subject, single age) the in-data ``sd``
+    is 0, the guard collapses the denominator to 1, and ``z(age) = 0`` for every
+    row — silently stripping the entire age covariate. Always pass the fit-time
+    stats through at transform.
+    """
     n = len(df)
     if not use_covariates:
         return np.zeros((n, 0), dtype=np.float64)
@@ -47,9 +62,13 @@ def _build_covariates(
     if np.all(~np.isfinite(age)):
         age = np.zeros(n, dtype=np.float64)
     else:
-        m = np.nanmean(age)
+        if age_mean is None or age_sd is None:
+            m = float(np.nanmean(age))
+            sd = float(np.nanstd(age))
+        else:
+            m = float(age_mean)
+            sd = float(age_sd)
         age = np.where(np.isfinite(age), age, m)
-        sd = np.nanstd(age)
         age = (age - m) / (sd if sd > 1e-8 else 1.0)
 
     sex_raw = df.get("sex", pd.Series([""] * n)).astype(str).str.upper().str.strip()
@@ -65,6 +84,47 @@ def _build_covariates(
             covariates.append((macro == level).to_numpy(dtype=np.float64))
 
     return np.column_stack(covariates).astype(np.float64)
+
+
+def _resolve_per_batch_mask(cov_batch_mode: str, n_cov: int) -> np.ndarray:
+    """Return a per-column boolean mask saying which covariate columns get
+    per-batch coefficients vs a single pooled coefficient shared across batches.
+
+    Column layout from :func:`_build_covariates`: ``[age, sex, *macro_dummies]``.
+
+    Modes:
+    - ``'mixed'`` (default) — age and sex per-batch; macro_system pooled.
+      Rationale: age and sex are subject-level demographic covariates whose
+      batch composition can correlate with the AHBA-vs-GTEx batch identity,
+      so a single pooled OLS coefficient confounds with batch (the original
+      candidate-1 / candidate-2 defect). Macro_system is parcel-level
+      spatial-biological structure that is intrinsically shared across
+      datasets, so a pooled coefficient is well-posed and reduces variance.
+    - ``'pooled'`` — every covariate column gets a single pooled coefficient
+      shared across batches. Reproduces the pre-fix behavior (modulo the
+      candidate-1 z-scoring fix).
+    - ``'per_batch'`` — every covariate column gets its own batch-specific
+      coefficient. Maximally permissive; safe when batch-covariate
+      confounding is suspected for every column.
+    """
+    mode = str(cov_batch_mode).lower()
+    if n_cov == 0:
+        return np.zeros(0, dtype=bool)
+    if mode == "pooled":
+        return np.zeros(n_cov, dtype=bool)
+    if mode == "per_batch":
+        return np.ones(n_cov, dtype=bool)
+    if mode == "mixed":
+        mask = np.zeros(n_cov, dtype=bool)
+        if n_cov >= 1:
+            mask[0] = True   # age
+        if n_cov >= 2:
+            mask[1] = True   # sex
+        # macro_system dummies (indices 2:) stay False = pooled
+        return mask
+    raise ValueError(
+        f"cov_batch_mode must be one of 'mixed', 'pooled', 'per_batch'; got {cov_batch_mode!r}"
+    )
 
 
 @dataclass
@@ -118,9 +178,28 @@ class CombatHarmonizer:
     delta_hat: np.ndarray
     gamma_star: np.ndarray
     delta_star: np.ndarray
-    beta_cov: np.ndarray  # shape: [n_cov, n_genes]
+    beta_cov: np.ndarray  # shape: [n_cov, n_genes] — kept for backward
+                          # compatibility; populated with the GTEx-batch
+                          # coefficients (beta_cov_per_batch[1]).
     slope: np.ndarray
     intercept: np.ndarray
+    # Fit-time z-scoring stats for the ``age`` covariate. Captured from the
+    # pooled fit DataFrame and reused at transform so that the covariate
+    # add-back uses the same scaling as the fit-time removal.
+    age_mean_fit: float = 0.0
+    age_sd_fit: float = 1.0
+    # Per-batch covariate coefficients. Shape (B, n_cov, n_genes) where
+    # batch 0 = AHBA, batch 1 = GTEx. ComBat's "preserve biological signal"
+    # step adds back ``cov @ beta_cov_per_batch[batch(i)]`` per row. For
+    # *pooled* covariate columns (under ``cov_batch_mode``) the coefficient
+    # is identical across batches; for *per-batch* columns each batch
+    # carries its own coefficient.
+    beta_cov_per_batch: np.ndarray = field(default_factory=lambda: np.zeros((2, 0, 0), dtype=np.float64))
+    # How covariate columns were treated at fit time: 'mixed' (age+sex
+    # per-batch, macro_system pooled — default), 'pooled' (all pooled),
+    # or 'per_batch' (all per-batch). Stored for documentation only; the
+    # per-column choices are baked into ``beta_cov_per_batch``.
+    cov_batch_mode: str = "mixed"
 
     @classmethod
     def fit(
@@ -130,6 +209,7 @@ class CombatHarmonizer:
         gene_cols: List[str],
         use_covariates: bool = True,
         drop_macro_system_covariate: bool = False,
+        cov_batch_mode: str = "mixed",
     ) -> "CombatHarmonizer":
         a = ahba_df.copy()
         g = gtex_df.copy()
@@ -139,34 +219,91 @@ class CombatHarmonizer:
 
         X = comb[gene_cols].to_numpy(dtype=np.float64)
         batch = comb["_batch"].to_numpy(dtype=np.int32)
+        # Capture the pooled age stats now so transform can reuse them; passing
+        # them in here also makes _build_covariates idempotent w.r.t. the same
+        # input it just derived them from.
+        _age_pool = np.asarray(
+            [_age_to_numeric(v) for v in comb.get("age", pd.Series([np.nan] * len(comb))).tolist()],
+            dtype=np.float64,
+        )
+        _age_pool_finite = _age_pool[np.isfinite(_age_pool)]
+        if _age_pool_finite.size > 0:
+            age_mean_fit = float(np.mean(_age_pool_finite))
+            age_sd_fit = float(np.std(_age_pool_finite))
+            if age_sd_fit <= 1e-8:
+                age_sd_fit = 1.0
+        else:
+            age_mean_fit = 0.0
+            age_sd_fit = 1.0
         cov = _build_covariates(
             comb,
             use_covariates=use_covariates,
             drop_macro_system_covariate=drop_macro_system_covariate,
+            age_mean=age_mean_fit,
+            age_sd=age_sd_fit,
         )
 
         n, G = X.shape
         B = 2
         n_cov = cov.shape[1]
 
-        beta_cov = np.zeros((n_cov, G), dtype=np.float64)
         grand_mean = np.zeros(G, dtype=np.float64)
         pooled_sd = np.ones(G, dtype=np.float64)
         S = np.zeros((n, G), dtype=np.float64)
         gamma_hat = np.zeros((B, G), dtype=np.float64)
         delta_hat = np.ones((B, G), dtype=np.float64)
 
+        # Hybrid OLS: which covariate columns are per-batch vs pooled is
+        # controlled by ``cov_batch_mode``. The expanded design has:
+        #   - one shared intercept,
+        #   - for each per-batch covariate j: B columns (cov[:, j] * 1{batch == b}),
+        #   - for each pooled covariate j: 1 column (cov[:, j]).
+        # A single OLS solve over the expanded design recovers all coefficients
+        # jointly. Pooled-column coefficients are then replicated across
+        # batches in ``beta_cov_per_batch`` so the downstream cov_effect lookup
+        # ``cov @ beta_cov_per_batch[batch(i)]`` works uniformly.
+        mask_per_batch = _resolve_per_batch_mask(cov_batch_mode, n_cov)
+        if n_cov > 0:
+            cols_list = [np.ones(n, dtype=np.float64)]   # shared intercept
+            layout: List[Tuple[int, int | None]] = []    # (cov_index, batch or None=pooled)
+            for j in range(n_cov):
+                if mask_per_batch[j]:
+                    for bi in range(B):
+                        cols_list.append(cov[:, j] * (batch == bi).astype(np.float64))
+                        layout.append((j, bi))
+                else:
+                    cols_list.append(cov[:, j])
+                    layout.append((j, None))
+            D_ext = np.column_stack(cols_list)
+            try:
+                coef_ext = np.linalg.solve(D_ext.T @ D_ext, D_ext.T @ X)
+            except np.linalg.LinAlgError:
+                coef_ext, *_ = np.linalg.lstsq(D_ext, X, rcond=None)
+
+            beta_cov_per_batch = np.zeros((B, n_cov, G), dtype=np.float64)
+            pos = 1   # skip the shared-intercept row
+            for j, bi in layout:
+                if bi is None:
+                    shared = coef_ext[pos, :]
+                    for bb in range(B):
+                        beta_cov_per_batch[bb, j, :] = shared
+                else:
+                    beta_cov_per_batch[bi, j, :] = coef_ext[pos, :]
+                pos += 1
+
+            cov_effect_per_sample = np.zeros((n, G), dtype=np.float64)
+            for bidx in range(B):
+                rows = batch == bidx
+                if np.any(rows):
+                    cov_effect_per_sample[rows, :] = cov[rows] @ beta_cov_per_batch[bidx]
+        else:
+            cov_effect_per_sample = np.zeros((n, G), dtype=np.float64)
+            beta_cov_per_batch = np.zeros((B, 0, G), dtype=np.float64)
+
+        # Standardization gene-by-gene on (y - per-sample cov_effect).
         for gi in range(G):
             y = X[:, gi]
-            if n_cov > 0:
-                D = np.c_[np.ones(n, dtype=np.float64), cov]
-                b, *_ = np.linalg.lstsq(D, y, rcond=None)
-                cov_effect = D[:, 1:] @ b[1:]
-                beta_cov[:, gi] = b[1:]
-            else:
-                cov_effect = np.zeros(n, dtype=np.float64)
-
-            y_nocov = y - cov_effect
+            y_nocov = y - cov_effect_per_sample[:, gi]
             gm = float(np.mean(y_nocov))
             sd = float(np.std(y_nocov))
             if sd < 1e-8:
@@ -207,7 +344,10 @@ class CombatHarmonizer:
 
         X_corr = np.zeros_like(X)
         for i in range(n):
-            cov_e = cov[i, :] @ beta_cov if n_cov > 0 else np.zeros(G, dtype=np.float64)
+            if n_cov > 0:
+                cov_e = cov[i, :] @ beta_cov_per_batch[int(batch[i])]
+            else:
+                cov_e = np.zeros(G, dtype=np.float64)
             X_corr[i, :] = S_adj[i, :] * pooled_sd + grand_mean + cov_e
 
         a_corr = X_corr[: len(a), :]
@@ -221,6 +361,15 @@ class CombatHarmonizer:
             n_parcels=n_parcels,
         )
 
+        # beta_cov (legacy single-batch field) carries the GTEx-batch
+        # coefficients, since the reconstruction target is GTEx and most
+        # diagnostics that read this field care about that batch's signal.
+        beta_cov_legacy = (
+            beta_cov_per_batch[1]
+            if n_cov > 0
+            else np.zeros((0, G), dtype=np.float64)
+        )
+
         return cls(
             genes=list(gene_cols),
             use_covariates=bool(use_covariates),
@@ -231,25 +380,38 @@ class CombatHarmonizer:
             delta_hat=delta_hat,
             gamma_star=gamma_star,
             delta_star=delta_star,
-            beta_cov=beta_cov,
+            beta_cov=beta_cov_legacy,
             slope=slope,
             intercept=intercept,
+            age_mean_fit=age_mean_fit,
+            age_sd_fit=age_sd_fit,
+            beta_cov_per_batch=beta_cov_per_batch,
+            cov_batch_mode=str(cov_batch_mode),
         )
 
-    def _cov_effect(self, df: pd.DataFrame) -> np.ndarray:
+    def _cov_effect(self, df: pd.DataFrame, dataset_name: str) -> np.ndarray:
         cov = _build_covariates(
             df,
             use_covariates=self.use_covariates,
             drop_macro_system_covariate=self.drop_macro_system_covariate,
+            age_mean=self.age_mean_fit,
+            age_sd=self.age_sd_fit,
         )
         if cov.shape[1] == 0:
             return np.zeros((len(df), len(self.genes)), dtype=np.float64)
-        return cov @ self.beta_cov
+        bidx = 0 if str(dataset_name).upper() == "AHBA" else 1
+        # Fallback for legacy harmonizers pickled before the per-batch fit
+        # landed: their beta_cov_per_batch is (2, 0, 0) so n_cov-mismatch
+        # would raise. Use the legacy ``beta_cov`` in that case.
+        beta = self.beta_cov_per_batch[bidx]
+        if beta.shape != (cov.shape[1], len(self.genes)):
+            beta = self.beta_cov
+        return cov @ beta
 
     def transform(self, df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
         out = df.copy()
         x = out[self.genes].to_numpy(dtype=np.float64)
-        cov_e = self._cov_effect(out)
+        cov_e = self._cov_effect(out, dataset_name)
         y_nocov = x - cov_e
         s = (y_nocov - self.grand_mean[None, :]) / self.pooled_sd[None, :]
         bidx = 0 if str(dataset_name).upper() == "AHBA" else 1

@@ -9,6 +9,7 @@ and reconstruction matrices use the same row ordering so both row-wise sample
 correlations and column-wise gene correlations are well defined.
 """
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -440,9 +441,22 @@ def _draw_group_blocks(
     region_separator_alpha: float,
     group_separator_linewidth: float | None,
     group_separator_color: str,
+    show_gene_separators: bool,
+    gene_separator_linewidth: float,
+    gene_separator_color: str,
+    gene_separator_alpha: float,
     group_label_x: float,
     group_label_fontsize: int | float,
 ) -> None:
+    if show_gene_separators:
+        n_g = int(matrix.X.shape[1])
+        for j in range(1, n_g):
+            ax.axvline(
+                j - 0.5,
+                color=gene_separator_color,
+                linewidth=gene_separator_linewidth,
+                alpha=gene_separator_alpha,
+            )
     if show_region_separators and "region" in matrix.row_metadata.columns:
         regions = matrix.row_metadata["region"].tolist()
         for row in range(1, len(regions)):
@@ -498,11 +512,17 @@ def plot_flattened_tensor_matrix(
     region_separator_alpha: float = 0.45,
     group_separator_linewidth: float | None = None,
     group_separator_color: str = "black",
+    show_gene_separators: bool = False,
+    gene_separator_linewidth: float = 0.6,
+    gene_separator_color: str = "black",
+    gene_separator_alpha: float = 1.0,
     show_ylabel: bool = False,
     group_label_x: float = -0.08,
     group_label_fontsize: int | float = 8,
     font_scale: float = 1.0,
     cbar_font_scale: float = 1.0,
+    axis_label_scale: float = 1.0,
+    axis_label_pad: float | None = None,
     soften: bool = False,
     soften_amount: float = 0.35,
     border_linewidth: float | None = None,
@@ -537,9 +557,12 @@ def plot_flattened_tensor_matrix(
         cmap=cmap,
         norm=Normalize(vmin=float(vmin), vmax=float(vmax)),
     )
+    axis_label_fs = label_fs * axis_label_scale
     ax.set_title(matrix.title if title is None else title, fontsize=title_fs)
-    ax.set_xlabel(matrix.x_label, fontsize=label_fs)
-    ax.set_ylabel(matrix.y_label if show_ylabel else "", fontsize=label_fs)
+    _xlbl_kw = {"labelpad": axis_label_pad} if axis_label_pad is not None else {}
+    _ylbl_kw = {"labelpad": axis_label_pad} if axis_label_pad is not None else {}
+    ax.set_xlabel(matrix.x_label, fontsize=axis_label_fs, **_xlbl_kw)
+    ax.set_ylabel(matrix.y_label if show_ylabel else "", fontsize=axis_label_fs, **_ylbl_kw)
     _apply_matrix_ticks(
         ax,
         matrix,
@@ -560,11 +583,21 @@ def plot_flattened_tensor_matrix(
         region_separator_alpha=region_separator_alpha,
         group_separator_linewidth=group_separator_linewidth,
         group_separator_color=group_separator_color,
+        show_gene_separators=show_gene_separators,
+        gene_separator_linewidth=gene_separator_linewidth,
+        gene_separator_color=gene_separator_color,
+        gene_separator_alpha=gene_separator_alpha,
         group_label_x=group_label_x,
         group_label_fontsize=group_label_fontsize * font_scale,
     )
     apply_tick_style(ax, label_fontsize=tick_fs)
     ax.grid(False)  # imshow heatmap — suppress any style-inherited gridlines
+    # Suppress stray tick marks when ticklabels are disabled (otherwise the
+    # left-edge tick at index 0 stays visible).
+    if not show_gene_ticklabels:
+        ax.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
+    if not show_sample_ticklabels:
+        ax.tick_params(axis="y", which="both", left=False, right=False, labelleft=False)
     if border_linewidth is not None:
         for spine in ax.spines.values():
             spine.set_visible(True)
@@ -600,6 +633,10 @@ def plot_flattened_tensor_pair(
     region_separator_alpha: float = 0.45,
     group_separator_linewidth: float | None = None,
     group_separator_color: str = "black",
+    show_gene_separators: bool = False,
+    gene_separator_linewidth: float = 0.6,
+    gene_separator_color: str = "black",
+    gene_separator_alpha: float = 1.0,
     soften: bool = False,
     soften_amount: float = 0.35,
     show_ylabel: bool = False,
@@ -607,6 +644,9 @@ def plot_flattened_tensor_pair(
     group_label_fontsize: int | float = 8,
     font_scale: float = 1.0,
     cbar_font_scale: float = 1.0,
+    axis_label_scale: float = 1.0,
+    axis_label_pad: float | None = None,
+    suptitle_y: float = 1.02,
     border_linewidth: float | None = None,
     border_color: str = "black",
     dpi: float | None = None,
@@ -642,11 +682,17 @@ def plot_flattened_tensor_pair(
             region_separator_alpha=region_separator_alpha,
             group_separator_linewidth=group_separator_linewidth,
             group_separator_color=group_separator_color,
+            show_gene_separators=show_gene_separators,
+            gene_separator_linewidth=gene_separator_linewidth,
+            gene_separator_color=gene_separator_color,
+            gene_separator_alpha=gene_separator_alpha,
             show_ylabel=show_ylabel and col == 0,
             group_label_x=group_label_x,
             group_label_fontsize=group_label_fontsize,
             font_scale=font_scale,
             cbar_font_scale=cbar_font_scale,
+            axis_label_scale=axis_label_scale,
+            axis_label_pad=axis_label_pad,
             border_linewidth=border_linewidth,
             border_color=border_color,
             colorbar=False,
@@ -658,7 +704,7 @@ def plot_flattened_tensor_pair(
     cbar.set_label(truth.value_label, fontsize=font_size("m") * font_scale * cbar_font_scale)
     cbar.ax.tick_params(labelsize=font_size("s") * font_scale * cbar_font_scale)
     if suptitle:
-        fig.suptitle(suptitle, y=1.02, fontsize=font_size("l") * font_scale)
+        fig.suptitle(suptitle, y=suptitle_y, fontsize=font_size("l") * font_scale)
     return fig, axes
 
 
@@ -687,6 +733,10 @@ def plot_flattened_tensor_matrices(
     region_separator_alpha: float = 0.45,
     group_separator_linewidth: float | None = None,
     group_separator_color: str = "black",
+    show_gene_separators: bool = False,
+    gene_separator_linewidth: float = 0.6,
+    gene_separator_color: str = "black",
+    gene_separator_alpha: float = 1.0,
     soften: bool = False,
     soften_amount: float = 0.35,
     show_ylabel: bool = False,
@@ -752,6 +802,10 @@ def plot_flattened_tensor_matrices(
         region_separator_alpha=region_separator_alpha,
         group_separator_linewidth=group_separator_linewidth,
         group_separator_color=group_separator_color,
+        show_gene_separators=show_gene_separators,
+        gene_separator_linewidth=gene_separator_linewidth,
+        gene_separator_color=gene_separator_color,
+        gene_separator_alpha=gene_separator_alpha,
         group_label_x=group_label_x,
         group_label_fontsize=group_label_fontsize,
         font_scale=font_scale,
@@ -830,6 +884,39 @@ def sample_correlation_table(
         _pearson_1d(truth.X[i, :], recon.X[i, :]) for i in range(truth.X.shape[0])
     ]
     return meta
+
+
+def sort_matrices_genes_by_mean(
+    matrices: Sequence[FlattenedTensorMatrix],
+    *,
+    ascending: bool = True,
+    anchor_index: int = 0,
+) -> list[FlattenedTensorMatrix]:
+    """Reorder the gene (column) axis of aligned matrices by per-gene mean.
+
+    Computes the column order from ``matrices[anchor_index]`` (default: first)
+    so every matrix keeps matched columns; returns new ``FlattenedTensorMatrix``
+    objects (inputs are not mutated). Use to sort genes left-to-right by mean
+    expression for visibility.
+    """
+    matrices = list(matrices)
+    if not matrices:
+        return []
+    anchor = matrices[anchor_index]
+    means = np.nanmean(np.asarray(anchor.X, dtype=np.float64), axis=0)
+    order = np.argsort(means)
+    if not ascending:
+        order = order[::-1]
+    out: list[FlattenedTensorMatrix] = []
+    for m in matrices:
+        if m.X.shape[1] != len(order) or list(m.genes) != list(anchor.genes):
+            raise ValueError("all matrices must share the gene axis to reorder together.")
+        out.append(dataclasses.replace(
+            m,
+            X=m.X[:, order],
+            genes=[m.genes[i] for i in order],
+        ))
+    return out
 
 
 def reconstruction_summary(

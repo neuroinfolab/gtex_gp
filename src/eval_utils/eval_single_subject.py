@@ -251,12 +251,13 @@ def select_subjects_by_percentile(
 
 
 _SUBJECT_RANKED_FONTS = {
-    "title":  "xxl",
-    "xlabel": "l+1",
-    "ylabel": "l+2",
-    "tick":   "s",       # auto-tuned below by n_subj; caller can override
-    "legend": "m+2",
-    "legend_title": "m+3",
+    "title":  "xxl+2",
+    "xlabel": "xl",
+    "ylabel": "xl",
+    "tick":   "l",       # only ~10 labels by default (every label_interval %)
+    "legend": "l",
+    "legend_title": "l+1",
+    "annotation": "m+1", # in-axes age/sex meta under each labeled marker
 }
 
 
@@ -265,6 +266,8 @@ def plot_subject_performance_ranked(
     metric: str = "pearson_r",
     models: Sequence[str] | None = None,
     sparsify: int | None = 100,
+    percentile_interval: float | None = None,
+    label_interval: float | None = 10.0,
     anchor_model: str = "plam",
     figsize: Tuple[float, float] | None = None,
     dpi: int = 180,
@@ -272,6 +275,9 @@ def plot_subject_performance_ranked(
     top_quantile: float | None = None,
     dynamic_bottom_quantile: bool = True,
     naive_baseline_model: str = "naive",
+    subject_meta: pd.DataFrame | None = None,
+    show_subject_meta: bool = True,
+    color_by_age: bool = False,
     font_sizes: Mapping[str, str | int] | None = None,
 ) -> Tuple[plt.Figure, plt.Axes, pd.DataFrame]:
     """Ranked per-subject mean metric across LORO folds, per model.
@@ -283,8 +289,32 @@ def plot_subject_performance_ranked(
 
     Default `sparsify=100` keeps one subject per percentile of the anchor
     model. Pass `sparsify=None` to render every subject; pass any int N to
-    show N evenly-spaced performance percentiles. The plot scales
+    show N evenly-spaced performance percentiles. `percentile_interval=K`
+    is the more intuitive knob — pick subjects every K% (K=2 → 2,4,...,98);
+    it takes precedence over `sparsify` when supplied. The plot scales
     horizontally with `n_subj`.
+
+    `subject_meta` is an optional `DataFrame[subject, age, sex]` (extra
+    columns ignored). When supplied and `show_subject_meta=True`, each
+    *labeled* subject gets an in-axes `24M`-style annotation directly under
+    its anchor marker — x-tick labels themselves stay clean (percentile
+    only).
+
+    `label_interval` decouples how often the x-axis is labeled from how
+    many markers are drawn. With `percentile_interval=2`, `label_interval=10`
+    (defaults), the plot shows 50 anchor points but only 10 axis ticks
+    (every 10%), keeping the axis readable while preserving point density.
+    Pass `label_interval=None` to label every picked subject (legacy).
+
+    Subject metadata (`24M`-style) is rendered under **every** picked
+    scatter point, independent of `label_interval` — the latter only
+    controls x-axis tick density.
+
+    `color_by_age=True` colors every scatter point by its subject's age
+    bin using the same plasma palette as
+    `plot_sample_metric_histogram_by_age`. Marker shape distinguishes
+    models (anchor=circle, others=triangle/square). A second legend
+    panel lists the age bins.
 
     Shading:
       - `bottom_quantile=0.20` (default) shades the leftmost 20% of subjects.
@@ -315,9 +345,21 @@ def plot_subject_performance_ranked(
 
     higher_better = bool(_HIGHER_IS_BETTER.get(_normalize_specificity_metric(metric), True))
 
-    if sparsify is not None and int(sparsify) > 0:
+    # `percentile_interval` is the user-facing knob: K=2 → picks every 2% =
+    # 50 bands. Falls back to `sparsify` (n_bands) when not supplied.
+    if percentile_interval is not None:
+        k = float(percentile_interval)
+        if not (0.0 < k <= 100.0):
+            raise ValueError("percentile_interval must lie in (0, 100]")
+        effective_n_bands: int | None = max(1, int(round(100.0 / k)))
+    elif sparsify is not None and int(sparsify) > 0:
+        effective_n_bands = int(sparsify)
+    else:
+        effective_n_bands = None
+
+    if effective_n_bands is not None:
         anchor_subjects = select_subjects_by_percentile(
-            summary, metric=metric, model=anchor, n_bands=int(sparsify)
+            summary, metric=metric, model=anchor, n_bands=effective_n_bands
         )
         keep_subjects = list(anchor_subjects["subject"].astype(str))
         anchor_pcts = anchor_subjects.set_index("subject")["percentile_anchor"].astype(float)
@@ -394,64 +436,185 @@ def plot_subject_performance_ranked(
         top_n = max(1, int(round(float(top_quantile) * n_subj)))
         ax.axvspan(n_subj - top_n - 0.5, n_subj - 0.5, color="#1b7837", alpha=0.07, zorder=0)
 
-    # Tick density / size scales with n_subj. The default token is for ~100
-    # subjects (one per percentile); fewer subjects bump up, denser bumps
-    # down — caller can override via font_sizes['tick'].
-    if n_subj <= 20:
-        tick_default = "s+1"
-    elif n_subj <= 60:
-        tick_default = "s"
-    elif n_subj <= 150:
-        tick_default = "xs"
-    else:
-        tick_default = "xs-1"
-    if font_sizes is None or "tick" not in font_sizes:
-        local_override = dict(font_sizes or {})
-        local_override["tick"] = tick_default
-        fonts = _resolve_fonts(_SUBJECT_RANKED_FONTS, local_override)
-    else:
-        fonts = _resolve_fonts(_SUBJECT_RANKED_FONTS, font_sizes)
+    # Font sizes — `label_interval` keeps the axis sparse regardless of
+    # n_subj, so we no longer auto-shrink ticks with subject count. Caller
+    # can still override anything via `font_sizes={...}`.
+    fonts = _resolve_fonts(_SUBJECT_RANKED_FONTS, font_sizes)
+
+    # Resolve subject → age lookup (for color_by_age, also reused by meta
+    # annotations). Pull from subject_meta when provided; otherwise fall
+    # back to the empty dict (color_by_age then renders gray).
+    subject_to_age: dict[str, object] = {}
+    if subject_meta is not None and "age" in subject_meta.columns:
+        sm_age = subject_meta[["subject", "age"]].copy()
+        sm_age["subject"] = sm_age["subject"].astype(str)
+        sm_age = sm_age.drop_duplicates(subset=["subject"], keep="first")
+        subject_to_age = dict(zip(sm_age["subject"], sm_age["age"]))
+
+    age_palette: dict[str, object] = {}
+    age_order: list[str] = []
+    if color_by_age:
+        # Lazy import to avoid a circular dep at module-import time.
+        from src.eval_utils.eval_population import _age_palette, _age_sort_key
+        ages_str = [str(subject_to_age.get(s, "")) for s in keep_subjects]
+        age_order = sorted({a for a in ages_str if a}, key=_age_sort_key)
+        if not age_order:
+            raise RuntimeError(
+                "color_by_age=True requires `subject_meta` with a non-empty 'age' column"
+            )
+        age_palette = _age_palette(age_order)
+
+    # Marker shape per model when coloring by age — colors then mean age,
+    # so model differentiation moves to shape.
+    _MODEL_MARKERS = {"naive": "^", "dlam": "o", "plam": "s"}
 
     for m in plot_models:
         dm = summary[summary["model"] == m]
         if dm.empty:
             continue
-        c = MODEL_COLORS.get(m, "#777777")
         is_anchor = (m == anchor)
-        # Markers only — no connecting lines, no fills.
-        ax.errorbar(
-            dm["_x"], dm["mean"], yerr=dm["std"].fillna(0.0),
-            fmt="o",
-            color=c, ecolor=c,
-            markersize=4.6 if is_anchor else 4.0,
-            linewidth=0.0,
-            elinewidth=0.8, capsize=2.0,
-            label=model_label(m) + (" (anchor)" if is_anchor else ""),
-            alpha=0.92 if is_anchor else 0.78,
-            zorder=3 if is_anchor else 2,
-        )
+        if color_by_age:
+            marker = _MODEL_MARKERS.get(m, "D")
+            # Per-point color comes from age palette; draw errorbars in a
+            # neutral gray under the scatter, then overlay colored points.
+            ys = dm["mean"].to_numpy(dtype=float)
+            xs = dm["_x"].to_numpy(dtype=float)
+            errs = dm["std"].fillna(0.0).to_numpy(dtype=float)
+            ax.errorbar(
+                xs, ys, yerr=errs,
+                fmt="none", ecolor="#888888",
+                elinewidth=0.7, capsize=2.0,
+                zorder=2 if is_anchor else 1,
+            )
+            colors = [
+                age_palette.get(str(subject_to_age.get(str(s), "")), "#cccccc")
+                for s in dm["subject"].astype(str)
+            ]
+            size = (5.4 if is_anchor else 4.4) ** 2  # scatter `s` is area in pts²
+            ax.scatter(
+                xs, ys,
+                c=colors, marker=marker,
+                s=size, linewidths=0.4, edgecolors="white",
+                alpha=0.95 if is_anchor else 0.78,
+                label=model_label(m) + (" (anchor)" if is_anchor else ""),
+                zorder=4 if is_anchor else 3,
+            )
+        else:
+            c = MODEL_COLORS.get(m, "#777777")
+            # Markers only — no connecting lines, no fills.
+            ax.errorbar(
+                dm["_x"], dm["mean"], yerr=dm["std"].fillna(0.0),
+                fmt="o",
+                color=c, ecolor=c,
+                markersize=4.6 if is_anchor else 4.0,
+                linewidth=0.0,
+                elinewidth=0.8, capsize=2.0,
+                label=model_label(m) + (" (anchor)" if is_anchor else ""),
+                alpha=0.92 if is_anchor else 0.78,
+                zorder=3 if is_anchor else 2,
+            )
 
-    # X-ticks below the axis: subject IDs, rotated. Percentile labels go
-    # above the axis line as a horizontal in-axes annotation per tick.
+    # X-ticks: percentile only at picked positions; subject metadata is
+    # rendered separately as in-axes text just below each anchor marker
+    # so the axis stays clean.
+    meta_lookup: dict[str, dict[str, object]] = {}
+    if subject_meta is not None and show_subject_meta:
+        sm = subject_meta.copy()
+        if "subject" not in sm.columns:
+            raise KeyError("subject_meta must include a 'subject' column")
+        sm["subject"] = sm["subject"].astype(str)
+        sm = sm.drop_duplicates(subset=["subject"], keep="first")
+        meta_lookup = sm.set_index("subject").to_dict(orient="index")
+
+    def _fmt_age(val: object) -> str:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return ""
+        # Drop trailing ".0" on float-looking ages (e.g. 24.0 → 24); leave
+        # string buckets like "20-29" untouched.
+        if isinstance(val, (int, np.integer)):
+            return str(int(val))
+        if isinstance(val, (float, np.floating)):
+            return str(int(val)) if float(val).is_integer() else str(val)
+        s = str(val).strip()
+        if s.endswith(".0") and s[:-2].lstrip("-").isdigit():
+            return s[:-2]
+        return s
+
+    def _fmt_meta(subj: str) -> str:
+        if not meta_lookup:
+            return ""
+        row = meta_lookup.get(str(subj))
+        if row is None:
+            return ""
+        age_s = _fmt_age(row.get("age"))
+        sex = row.get("sex")
+        sex_s = "" if (sex is None or (isinstance(sex, float) and np.isnan(sex))) else str(sex)
+        return f"{age_s}{sex_s}"  # no space, no parens
+
     x_idx = np.arange(n_subj)
-    ax.set_xticks(x_idx)
-    ax.set_xticklabels(keep_subjects, rotation=80, ha="right", fontsize=fonts["tick"])
+    anchor_means = (
+        summary[summary["model"] == anchor]
+        .set_index("subject")["mean"]
+    )
 
-    pct_fontsize = max(5, fonts["tick"] - 1)
-    for x_i, subj in zip(x_idx, keep_subjects):
-        pct = float(anchor_pcts.get(subj, np.nan))
-        if not np.isfinite(pct):
+    # Decouple label density from marker density. `label_interval=10`
+    # means we anchor labels to 10%, 20%, ..., 100% and snap each to the
+    # nearest picked subject. With label_interval=None, label every pick.
+    pct_pairs = [
+        (int(x_i), float(anchor_pcts.get(subj, np.nan)), subj)
+        for x_i, subj in zip(x_idx, keep_subjects)
+    ]
+    pct_pairs = [(i, p, s) for (i, p, s) in pct_pairs if np.isfinite(p)]
+
+    if label_interval is None:
+        labeled = pct_pairs
+    else:
+        step = float(label_interval)
+        if step <= 0:
+            raise ValueError("label_interval must be positive (or None)")
+        targets = np.arange(step, 100.0 + 1e-9, step)
+        seen: set[int] = set()
+        labeled = []
+        for t in targets:
+            if not pct_pairs:
+                break
+            best = min(pct_pairs, key=lambda pp: abs(pp[1] - float(t)))
+            if best[0] in seen:
+                continue
+            seen.add(best[0])
+            labeled.append(best)
+
+    tick_positions = [pp[0] for pp in labeled]
+    tick_labels = [f"{pp[1]:.0f}%" for pp in labeled]
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels, rotation=0, ha="center", fontsize=fonts["tick"])
+
+    # In-axes metadata annotations: one per **picked** subject, just below
+    # its anchor marker. Decoupled from `label_interval` — x-axis ticks
+    # stay sparse for readability but every scatter point carries its
+    # `24M`-style metadata directly underneath.
+    meta_fontsize = fonts.get("annotation", fonts["tick"])
+    for x_i, _pct, subj in pct_pairs:
+        meta_str = _fmt_meta(subj)
+        if not meta_str:
             continue
-        ax.text(
-            float(x_i), 0.012, f"{pct:.0f}",
-            transform=ax.get_xaxis_transform(),
-            ha="center", va="bottom",
-            fontsize=pct_fontsize, color="#444444",
+        y_anchor = float(anchor_means.get(subj, np.nan))
+        if not np.isfinite(y_anchor):
+            continue
+        ax.annotate(
+            meta_str,
+            xy=(float(x_i), y_anchor),
+            xytext=(0, -10),
+            textcoords="offset points",
+            ha="center", va="top",
+            fontsize=meta_fontsize, color="#444444",
+            zorder=5,
         )
 
     direction_word = "ascending" if higher_better else "descending"
     ax.set_xlabel(
-        f"Subject (worst → best by {model_label(anchor)} {direction_word} {format_legend_label(metric)})",
+        f"Rank percentile (worst → best by {model_label(anchor)} "
+        f"{direction_word} {format_legend_label(metric)})",
         fontsize=fonts["xlabel"],
     )
     ax.set_ylabel(format_legend_label(metric), fontsize=fonts["ylabel"])
@@ -480,11 +643,30 @@ def plot_subject_performance_ranked(
     if top_quantile is not None and 0.0 < float(top_quantile) < 1.0:
         handles.append(Patch(facecolor="#1b7837", edgecolor="none", alpha=0.07))
         labels.append(f"Top {int(round(float(top_quantile) * 100))}% (`top_quantile`)")
-    ax.legend(
+    model_legend = ax.legend(
         handles, labels, title="Model",
         frameon=True, fancybox=False,
         fontsize=fonts["legend"], title_fontsize=fonts["legend_title"],
+        loc="best",
     )
+    if color_by_age and age_order:
+        # Second legend for age bins — added as a separate artist so it
+        # doesn't clobber the model legend. Plasma palette matches the
+        # sample-wise age histograms for consistent visual decoding.
+        from matplotlib.lines import Line2D
+        ax.add_artist(model_legend)
+        age_handles = [
+            Line2D([0], [0], marker="o", linestyle="",
+                   markerfacecolor=age_palette[a], markeredgecolor="white",
+                   markeredgewidth=0.5, markersize=9, label=str(a))
+            for a in age_order
+        ]
+        ax.legend(
+            handles=age_handles, title="Age bin",
+            frameon=True, fancybox=False,
+            fontsize=fonts["legend"], title_fontsize=fonts["legend_title"],
+            loc="lower right",
+        )
     apply_tick_style(ax, label_fontsize=fonts["tick"])
     fig.tight_layout()
     return fig, ax, summary
